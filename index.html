@@ -1090,19 +1090,35 @@ async function initStockfish() {
 function sfAnalyze(fen, depth = 16, multiPv = 1) {
   return new Promise((resolve) => {
     if (!sfReady) { resolve(null); return; }
-    const collected = {};
 
+    // Phase 1: stop old search and drain all pending messages
     sfWorker.postMessage('stop');
-    sfWorker.postMessage('ucinewgame');
     sfWorker.postMessage('isready');
 
-    function readyHandler(e) {
-      if (e.data !== 'readyok') return;
-      sfWorker.removeEventListener('message', readyHandler);
+    let phase = 1;
+    const collected = {};
 
-      function onMsg(e2) {
-        const line = e2.data;
-        if (typeof line !== 'string') return;
+    function handler(e) {
+      const line = e.data;
+      if (typeof line !== 'string') return;
+
+      if (phase === 1) {
+        // Draining — ignore info/bestmove from old search, wait for readyok
+        if (line === 'readyok') {
+          // Send second isready to flush any bestmove that arrived after readyok
+          phase = 2;
+          sfWorker.postMessage('isready');
+        }
+      } else if (phase === 2) {
+        // Second readyok — now fully drained, start new search
+        if (line === 'readyok') {
+          phase = 3;
+          sfWorker.postMessage(`setoption name MultiPV value ${multiPv}`);
+          sfWorker.postMessage(`position fen ${fen}`);
+          sfWorker.postMessage(`go depth ${depth}`);
+        }
+      } else if (phase === 3) {
+        // Searching — collect results
         if (line.startsWith('info') && line.includes(' pv ')) {
           const dM = line.match(/depth (\d+)/);
           const cpM = line.match(/score cp (-?\d+)/);
@@ -1120,7 +1136,7 @@ function sfAnalyze(fen, depth = 16, multiPv = 1) {
           }
         }
         if (line.startsWith('bestmove')) {
-          sfWorker.removeEventListener('message', onMsg);
+          sfWorker.removeEventListener('message', handler);
           const bm = line.split(' ')[1];
           const pvs = Object.keys(collected)
             .sort((a, b) => parseInt(a) - parseInt(b))
@@ -1128,50 +1144,57 @@ function sfAnalyze(fen, depth = 16, multiPv = 1) {
           resolve({ bestMove: bm, pvs, fen });
         }
       }
-
-      sfWorker.addEventListener('message', onMsg);
-      sfWorker.postMessage(`setoption name MultiPV value ${multiPv}`);
-      sfWorker.postMessage(`position fen ${fen}`);
-      sfWorker.postMessage(`go depth ${depth}`);
     }
-    sfWorker.addEventListener('message', readyHandler);
+    sfWorker.addEventListener('message', handler);
   });
 }
 
 // ─── Streaming pre-analysis (runs up to depth 30 while user thinks) ───
 function startPreAnalysis(fen) {
-  // Cancel any previous pre-analysis
   stopPreAnalysis();
   preAnalysis = null;
   preAnalysisFen = fen;
   preAnalysisDepth = 0;
   preAnalysisComplete = false;
   preAnalysisWaiters = [];
-  const session = ++preAnalysisSession; // invalidate any stale handlers
+  const session = ++preAnalysisSession;
 
   if (!sfReady) return;
 
+  // Phase 1: stop old search, Phase 2: verify drain, Phase 3: search
   sfWorker.postMessage('stop');
-  sfWorker.postMessage('ucinewgame');
   sfWorker.postMessage('isready');
 
-  function readyHandler(e) {
-    if (typeof e.data !== 'string' || e.data !== 'readyok') return;
-    sfWorker.removeEventListener('message', readyHandler);
-    preAnalysisReadyHandler = null;
-    if (session !== preAnalysisSession) return; // stale
+  let phase = 1;
+  const collected = {};
 
-    const collected = {};
+  function handler(e) {
+    const line = e.data;
+    if (typeof line !== 'string') return;
+    if (session !== preAnalysisSession) {
+      sfWorker.removeEventListener('message', handler);
+      preAnalysisReadyHandler = null;
+      preAnalysisListener = null;
+      return;
+    }
 
-    function onMsg(e2) {
-      const line = e2.data;
-      if (typeof line !== 'string') return;
-      if (session !== preAnalysisSession) {
-        sfWorker.removeEventListener('message', onMsg);
-        preAnalysisListener = null;
-        return;
+    if (phase === 1) {
+      if (line === 'readyok') {
+        phase = 2;
+        sfWorker.postMessage('isready');
       }
-
+      // ignore everything else (old search draining)
+    } else if (phase === 2) {
+      if (line === 'readyok') {
+        phase = 3;
+        preAnalysisReadyHandler = null; // no longer waiting for ready
+        sfWorker.postMessage('setoption name MultiPV value 3');
+        sfWorker.postMessage(`position fen ${fen}`);
+        sfWorker.postMessage('go depth 30');
+      }
+      // ignore everything else (stale bestmove draining)
+    } else if (phase === 3) {
+      // Active search — collect results
       if (line.startsWith('info') && line.includes(' pv ')) {
         const dM = line.match(/depth (\d+)/);
         const cpM = line.match(/score cp (-?\d+)/);
@@ -1213,7 +1236,7 @@ function startPreAnalysis(fen) {
       }
 
       if (line.startsWith('bestmove')) {
-        sfWorker.removeEventListener('message', onMsg);
+        sfWorker.removeEventListener('message', handler);
         preAnalysisListener = null;
         if (session === preAnalysisSession) {
           preAnalysisComplete = true;
@@ -1222,15 +1245,12 @@ function startPreAnalysis(fen) {
         }
       }
     }
-
-    preAnalysisListener = onMsg;
-    sfWorker.addEventListener('message', onMsg);
-    sfWorker.postMessage('setoption name MultiPV value 3');
-    sfWorker.postMessage(`position fen ${fen}`);
-    sfWorker.postMessage('go depth 30');
   }
-  preAnalysisReadyHandler = readyHandler;
-  sfWorker.addEventListener('message', readyHandler);
+
+  // Track handler as both ready handler (phases 1-2) and listener (phase 3)
+  preAnalysisReadyHandler = handler;
+  preAnalysisListener = handler; // same handler for all phases
+  sfWorker.addEventListener('message', handler);
 }
 
 function stopPreAnalysis() {
@@ -1284,74 +1304,10 @@ function updatePreAnalysisUI() {
 
 function togglePauseAnalysis() {
   if (preAnalysisPaused) {
-    // Resume — restart search from same position, keeping existing data
+    // Resume — restart analysis from scratch (safe and simple)
     preAnalysisPaused = false;
-    preAnalysisComplete = false;
-    if (preAnalysisFen && sfReady) {
-      const session = ++preAnalysisSession;
-      sfWorker.postMessage('stop');
-      sfWorker.postMessage('isready');
-      const fen = preAnalysisFen;
-      function readyHandler(e) {
-        if (typeof e.data !== 'string' || e.data !== 'readyok') return;
-        sfWorker.removeEventListener('message', readyHandler);
-        preAnalysisReadyHandler = null;
-        if (session !== preAnalysisSession) return;
-        const collected = {};
-        function onMsg(e2) {
-          const line = e2.data;
-          if (typeof line !== 'string') return;
-          if (session !== preAnalysisSession) { sfWorker.removeEventListener('message', onMsg); preAnalysisListener = null; return; }
-          if (line.startsWith('info') && line.includes(' pv ')) {
-            const dM = line.match(/depth (\d+)/);
-            const cpM = line.match(/score cp (-?\d+)/);
-            const mateM = line.match(/score mate (-?\d+)/);
-            const pvM = line.match(/ pv (.+)/);
-            const mpvM = line.match(/multipv (\d+)/);
-            const d = parseInt(dM?.[1] || '0');
-            const pvNum = parseInt(mpvM?.[1] || '1');
-            let cp = 0;
-            if (cpM) cp = parseInt(cpM[1]);
-            else if (mateM) cp = parseInt(mateM[1]) > 0 ? 10000 : -10000;
-            const moves = pvM?.[1]?.trim() || '';
-            if (!collected[pvNum] || d >= collected[pvNum].depth) {
-              collected[pvNum] = { cp, moves, depth: d, firstMove: moves.split(' ')[0] };
-            }
-            const depths = Object.values(collected).map(c => c.depth);
-            const minDepth = Math.min(...depths);
-            if (minDepth > preAnalysisDepth && session === preAnalysisSession) {
-              preAnalysisDepth = minDepth;
-              const pvs = Object.keys(collected)
-                .sort((a, b) => parseInt(a) - parseInt(b))
-                .map(k => collected[k]);
-              preAnalysis = {
-                bestCp: pvs[0]?.cp ?? 0,
-                bestMove: pvs[0]?.firstMove,
-                pvs: pvs.map(pv => ({ cp: pv.cp, move: pv.firstMove, san: uciToSan(fen, pv.firstMove), uciLine: pv.moves })),
-                depth: minDepth,
-              };
-              updatePreAnalysisUI();
-              resolveWaiters();
-            }
-          }
-          if (line.startsWith('bestmove')) {
-            sfWorker.removeEventListener('message', onMsg);
-            preAnalysisListener = null;
-            if (session === preAnalysisSession) {
-              preAnalysisComplete = true;
-              resolveWaiters();
-              updatePreAnalysisUI();
-            }
-          }
-        }
-        preAnalysisListener = onMsg;
-        sfWorker.addEventListener('message', onMsg);
-        sfWorker.postMessage('setoption name MultiPV value 3');
-        sfWorker.postMessage(`position fen ${fen}`);
-        sfWorker.postMessage('go depth 30');
-      }
-      preAnalysisReadyHandler = readyHandler;
-      sfWorker.addEventListener('message', readyHandler);
+    if (preAnalysisFen) {
+      startPreAnalysis(preAnalysisFen);
     }
     updatePreAnalysisUI();
   } else {
