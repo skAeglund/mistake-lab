@@ -696,6 +696,14 @@ let reviewQueue = [];            // positions due for review
 
 const filters = { color: 'both', severity: 'all' };
 
+// ─── Debug logging toggle ───
+const DEBUG_SF = true;
+function sfLog(fn, msg, data) {
+  if (!DEBUG_SF) return;
+  if (data !== undefined) console.log(`[SF:${fn}] ${msg}`, data);
+  else console.log(`[SF:${fn}] ${msg}`);
+}
+
 // ─── FSRS-5 Algorithm ───
 const FSRS_W = [
   0.40255, 1.18385, 3.173, 15.69105, 7.1949, 0.5345, 1.4604, 0.0046,
@@ -1089,7 +1097,9 @@ async function initStockfish() {
 
 function sfAnalyze(fen, depth = 16, multiPv = 1) {
   return new Promise((resolve) => {
-    if (!sfReady) { resolve(null); return; }
+    if (!sfReady) { sfLog('sfAnalyze', 'SF not ready, resolving null'); resolve(null); return; }
+
+    sfLog('sfAnalyze', `START fen=${fen.split(' ').slice(0,2).join(' ')}… depth=${depth} mpv=${multiPv} preAnalysisFen=${preAnalysisFen?.split(' ').slice(0,2).join(' ')}…`);
 
     // Phase 1: stop old search and drain all pending messages
     sfWorker.postMessage('stop');
@@ -1097,25 +1107,29 @@ function sfAnalyze(fen, depth = 16, multiPv = 1) {
 
     let phase = 1;
     const collected = {};
+    const analyzeId = Date.now(); // local ID for tracing
 
     function handler(e) {
       const line = e.data;
       if (typeof line !== 'string') return;
 
       if (phase === 1) {
-        // Draining — ignore info/bestmove from old search, wait for readyok
         if (line === 'readyok') {
-          // Send second isready to flush any bestmove that arrived after readyok
+          sfLog('sfAnalyze', `[${analyzeId}] Phase 1→2 readyok (draining)`);
           phase = 2;
           sfWorker.postMessage('isready');
+        } else if (line.startsWith('bestmove')) {
+          sfLog('sfAnalyze', `[${analyzeId}] Phase 1 DRAINED stale bestmove: ${line}`);
         }
       } else if (phase === 2) {
-        // Second readyok — now fully drained, start new search
         if (line === 'readyok') {
+          sfLog('sfAnalyze', `[${analyzeId}] Phase 2→3 readyok, starting go depth ${depth} for fen=${fen.split(' ').slice(0,2).join(' ')}…`);
           phase = 3;
           sfWorker.postMessage(`setoption name MultiPV value ${multiPv}`);
           sfWorker.postMessage(`position fen ${fen}`);
           sfWorker.postMessage(`go depth ${depth}`);
+        } else if (line.startsWith('bestmove')) {
+          sfLog('sfAnalyze', `[${analyzeId}] Phase 2 DRAINED stale bestmove: ${line}`);
         }
       } else if (phase === 3) {
         // Searching — collect results
@@ -1141,6 +1155,7 @@ function sfAnalyze(fen, depth = 16, multiPv = 1) {
           const pvs = Object.keys(collected)
             .sort((a, b) => parseInt(a) - parseInt(b))
             .map(k => collected[k]);
+          sfLog('sfAnalyze', `[${analyzeId}] COMPLETE bestmove=${bm} maxDepth=${pvs[0]?.depth} fen=${fen.split(' ').slice(0,2).join(' ')}… currentPreAnalysisFen=${preAnalysisFen?.split(' ').slice(0,2).join(' ')}…`);
           resolve({ bestMove: bm, pvs, fen });
         }
       }
@@ -1159,7 +1174,9 @@ function startPreAnalysis(fen) {
   preAnalysisWaiters = [];
   const session = ++preAnalysisSession;
 
-  if (!sfReady) return;
+  sfLog('startPreAnalysis', `session=${session} fen=${fen.split(' ').slice(0,2).join(' ')}…`);
+
+  if (!sfReady) { sfLog('startPreAnalysis', `session=${session} SF not ready, aborting`); return; }
 
   // Phase 1: stop old search, Phase 2: verify drain, Phase 3: search
   sfWorker.postMessage('stop');
@@ -1172,6 +1189,7 @@ function startPreAnalysis(fen) {
     const line = e.data;
     if (typeof line !== 'string') return;
     if (session !== preAnalysisSession) {
+      sfLog('startPreAnalysis', `session=${session} STALE (current=${preAnalysisSession}), removing handler. line=${line.substring(0,60)}`);
       sfWorker.removeEventListener('message', handler);
       preAnalysisReadyHandler = null;
       preAnalysisListener = null;
@@ -1180,17 +1198,23 @@ function startPreAnalysis(fen) {
 
     if (phase === 1) {
       if (line === 'readyok') {
+        sfLog('startPreAnalysis', `session=${session} Phase 1→2 readyok`);
         phase = 2;
         sfWorker.postMessage('isready');
+      } else if (line.startsWith('bestmove')) {
+        sfLog('startPreAnalysis', `session=${session} Phase 1 DRAINED stale bestmove: ${line}`);
       }
       // ignore everything else (old search draining)
     } else if (phase === 2) {
       if (line === 'readyok') {
+        sfLog('startPreAnalysis', `session=${session} Phase 2→3 readyok, starting go depth 30 for fen=${fen.split(' ').slice(0,2).join(' ')}…`);
         phase = 3;
         preAnalysisReadyHandler = null; // no longer waiting for ready
         sfWorker.postMessage('setoption name MultiPV value 3');
         sfWorker.postMessage(`position fen ${fen}`);
         sfWorker.postMessage('go depth 30');
+      } else if (line.startsWith('bestmove')) {
+        sfLog('startPreAnalysis', `session=${session} Phase 2 DRAINED stale bestmove: ${line}`);
       }
       // ignore everything else (stale bestmove draining)
     } else if (phase === 3) {
@@ -1230,18 +1254,23 @@ function startPreAnalysis(fen) {
             })),
             depth: minDepth,
           };
+          sfLog('startPreAnalysis', `session=${session} depth milestone ${minDepth} bestMove=${pvs[0]?.firstMove} fen=${fen.split(' ').slice(0,2).join(' ')}…`);
           updatePreAnalysisUI();
           resolveWaiters();
         }
       }
 
       if (line.startsWith('bestmove')) {
+        const bm = line.split(' ')[1];
+        sfLog('startPreAnalysis', `session=${session} BESTMOVE=${bm} finalDepth=${preAnalysisDepth} fen=${fen.split(' ').slice(0,2).join(' ')}… currentSession=${preAnalysisSession}`);
         sfWorker.removeEventListener('message', handler);
         preAnalysisListener = null;
         if (session === preAnalysisSession) {
           preAnalysisComplete = true;
           resolveWaiters();
           updatePreAnalysisUI();
+        } else {
+          sfLog('startPreAnalysis', `session=${session} bestmove arrived but session is stale (current=${preAnalysisSession}), DISCARDING`);
         }
       }
     }
@@ -1254,6 +1283,11 @@ function startPreAnalysis(fen) {
 }
 
 function stopPreAnalysis() {
+  const hadReady = !!preAnalysisReadyHandler;
+  const hadListener = !!preAnalysisListener;
+  if (hadReady || hadListener) {
+    sfLog('stopPreAnalysis', `removing handlers: readyHandler=${hadReady} listener=${hadListener} session=${preAnalysisSession} fen=${preAnalysisFen?.split(' ').slice(0,2).join(' ')}…`);
+  }
   if (preAnalysisReadyHandler) {
     sfWorker.removeEventListener('message', preAnalysisReadyHandler);
     preAnalysisReadyHandler = null;
@@ -1267,6 +1301,7 @@ function stopPreAnalysis() {
 function resolveWaiters() {
   preAnalysisWaiters = preAnalysisWaiters.filter(w => {
     if (preAnalysisDepth >= w.minDepth || preAnalysisComplete) {
+      sfLog('resolveWaiters', `resolving waiter minDepth=${w.minDepth} with depth=${preAnalysisDepth} complete=${preAnalysisComplete} bestMove=${preAnalysis?.bestMove} session=${preAnalysisSession} fen=${preAnalysisFen?.split(' ').slice(0,2).join(' ')}…`);
       w.resolve(preAnalysis);
       return false;
     }
@@ -1277,8 +1312,10 @@ function resolveWaiters() {
 function waitForPreAnalysis(minDepth = 16) {
   return new Promise((resolve) => {
     if (preAnalysis && (preAnalysisDepth >= minDepth || preAnalysisComplete)) {
+      sfLog('waitForPreAnalysis', `IMMEDIATE resolve: depth=${preAnalysisDepth} complete=${preAnalysisComplete} bestMove=${preAnalysis?.bestMove} session=${preAnalysisSession} fen=${preAnalysisFen?.split(' ').slice(0,2).join(' ')}…`);
       resolve(preAnalysis);
     } else {
+      sfLog('waitForPreAnalysis', `QUEUED: need depth≥${minDepth}, have depth=${preAnalysisDepth} complete=${preAnalysisComplete} session=${preAnalysisSession}`);
       preAnalysisWaiters.push({ minDepth, resolve });
     }
   });
@@ -1834,11 +1871,15 @@ function renderQueue() {
 // ─── Load a position ───
 function loadPosition(globalIdx) {
   if (globalIdx < 0 || globalIdx >= filteredMistakes.length) return;
+  const prevSession = preAnalysisSession;
+  const prevFen = preAnalysisFen;
   currentMistakeIdx = globalIdx;
   currentAttempts = 0;
   firstAttemptFailed = false;
   srsRecorded = false;
   const m = filteredMistakes[globalIdx];
+
+  sfLog('loadPosition', `idx=${globalIdx} fen=${m.fenBefore.split(' ').slice(0,2).join(' ')}… gameId=${m.gameId} ply=${m.movePly} prevSession=${prevSession} prevFen=${prevFen?.split(' ').slice(0,2).join(' ')}…`);
 
   document.getElementById('emptyMsg').classList.add('hidden');
   document.getElementById('btnRetry').classList.add('hidden');
@@ -1881,6 +1922,7 @@ function loadPosition(globalIdx) {
 
   // Stream pre-analysis (runs up to depth 30 while user thinks)
   startPreAnalysis(m.fenBefore);
+  sfLog('loadPosition', `idx=${globalIdx} startPreAnalysis called, newSession=${preAnalysisSession}`);
 }
 
 // ─── Board interaction ───
@@ -1924,6 +1966,8 @@ async function evaluateMove(from, to, move) {
   const m = filteredMistakes[mistakeIdx];
   const container = document.getElementById('feedbackContainer');
 
+  sfLog('evaluateMove', `START move=${move.san} (${from}→${to}) mistakeIdx=${mistakeIdx} fen=${m.fenBefore.split(' ').slice(0,2).join(' ')}… session=${preAnalysisSession}`);
+
   if (!sfReady) {
     showFeedback('info', 'Engine loading…', 'Stockfish is still initializing. Try again in a moment.');
     gameEngine.undo();
@@ -1943,10 +1987,16 @@ async function evaluateMove(from, to, move) {
     let bestCp, bestMoveUci, bestMoveSan;
 
     // Wait for pre-analysis to reach at least depth 16
+    sfLog('evaluateMove', `awaiting preAnalysis depth≥16… currentDepth=${preAnalysisDepth} preAnalysisFen=${preAnalysisFen?.split(' ').slice(0,2).join(' ')}…`);
     const pre = await waitForPreAnalysis(16);
-    if (currentMistakeIdx !== mistakeIdx) return; // user navigated away
+    sfLog('evaluateMove', `preAnalysis resolved: depth=${pre?.depth} bestMove=${pre?.bestMove} mistakeIdx snapshot=${mistakeIdx} current=${currentMistakeIdx}`);
+    if (currentMistakeIdx !== mistakeIdx) {
+      sfLog('evaluateMove', `ABORT: user navigated away (was ${mistakeIdx}, now ${currentMistakeIdx})`);
+      return;
+    }
 
     if (pre && preAnalysisFen === m.fenBefore) {
+      sfLog('evaluateMove', `preAnalysis FEN MATCH: preAnalysisFen=${preAnalysisFen?.split(' ').slice(0,2).join(' ')}… == m.fenBefore`);
       // Validate: verify best move is legal in this position (guards against stale data)
       const testChess = new Chess(m.fenBefore);
       const testMove = pre.bestMove ? testChess.move({
@@ -1954,6 +2004,8 @@ async function evaluateMove(from, to, move) {
         to: pre.bestMove.substring(2, 4),
         promotion: pre.bestMove.length > 4 ? pre.bestMove[4] : undefined
       }) : null;
+
+      sfLog('evaluateMove', `legality check: bestMove=${pre.bestMove} legal=${!!testMove} testFen=${m.fenBefore.split(' ').slice(0,2).join(' ')}…`);
 
       if (testMove) {
         bestCp = pre.bestCp;
@@ -1963,34 +2015,49 @@ async function evaluateMove(from, to, move) {
         // Check if the user's move matches one of the pre-analyzed PVs
         const userUci = from + to + (move.promotion || '');
         const matchedPv = pre.pvs.find(pv => pv.move === userUci);
+        sfLog('evaluateMove', `PV match check: userUci=${userUci} matched=${!!matchedPv} pvMoves=[${pre.pvs.map(p=>p.move).join(',')}]`);
         if (matchedPv) {
           const loadEl = document.getElementById(loadingId);
           if (loadEl) loadEl.remove();
           const cpLoss = bestCp - matchedPv.cp;
           const contUci = matchedPv.uciLine ? matchedPv.uciLine.split(' ').slice(1).join(' ') : '';
+          sfLog('evaluateMove', `FAST PATH (PV match): cpLoss=${cpLoss} bestCp=${bestCp} matchedCp=${matchedPv.cp}`);
           handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUci);
           return;
         }
       } else {
+        sfLog('evaluateMove', `ILLEGAL BEST MOVE — discarding pre-analysis. bestMove=${pre.bestMove} fen=${m.fenBefore}`);
         console.warn('Pre-analysis best move illegal in position — discarding stale data');
       }
+    } else {
+      sfLog('evaluateMove', `preAnalysis FEN MISMATCH or null: preAnalysisFen=${preAnalysisFen?.split(' ').slice(0,2).join(' ')}… vs m.fenBefore=${m.fenBefore.split(' ').slice(0,2).join(' ')}…`);
     }
 
     if (!bestCp && bestCp !== 0) {
       // Pre-analysis unavailable — run a fresh one-shot analysis of the position
+      sfLog('evaluateMove', `FALLBACK: one-shot analysis of position fen=${m.fenBefore.split(' ').slice(0,2).join(' ')}…`);
       stopPreAnalysis();
       const preResult = await sfAnalyze(m.fenBefore, 16, 1);
-      if (currentMistakeIdx !== mistakeIdx) return; // user navigated away
+      sfLog('evaluateMove', `one-shot result: bestMove=${preResult?.bestMove} mistakeIdx snapshot=${mistakeIdx} current=${currentMistakeIdx}`);
+      if (currentMistakeIdx !== mistakeIdx) {
+        sfLog('evaluateMove', `ABORT after one-shot: user navigated away`);
+        return;
+      }
       bestCp = preResult?.pvs[0]?.cp ?? 0;
       bestMoveUci = preResult?.bestMove || '?';
       bestMoveSan = uciToSan(m.fenBefore, bestMoveUci);
     }
 
     // User's move wasn't in the top PVs — analyze the resulting position
+    sfLog('evaluateMove', `SLOW PATH: analyzing after-move position`);
     stopPreAnalysis();
     const afterFen = gameEngine.fen();
     const afterResult = await sfAnalyze(afterFen, 16, 1);
-    if (currentMistakeIdx !== mistakeIdx) return; // user navigated away
+    sfLog('evaluateMove', `after-move result: bestMove=${afterResult?.bestMove} mistakeIdx snapshot=${mistakeIdx} current=${currentMistakeIdx}`);
+    if (currentMistakeIdx !== mistakeIdx) {
+      sfLog('evaluateMove', `ABORT after slow-path: user navigated away`);
+      return;
+    }
 
     const loadEl = document.getElementById(loadingId);
     if (loadEl) loadEl.remove();
@@ -2005,6 +2072,8 @@ async function evaluateMove(from, to, move) {
     // afterResult.cp is from opponent's perspective — negate for ours
     const afterCp = -(afterResult.pvs[0]?.cp ?? 0);
     const cpLoss = bestCp - afterCp;
+
+    sfLog('evaluateMove', `SLOW PATH result: bestCp=${bestCp} afterCp=${afterCp} cpLoss=${cpLoss}`);
 
     // Continuation from the resulting position's analysis
     const contUci = afterResult.pvs[0]?.moves || '';
