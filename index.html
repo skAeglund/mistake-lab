@@ -682,7 +682,8 @@ let preAnalysisFen = null;
 let preAnalysisDepth = 0;
 let preAnalysisComplete = false;
 let preAnalysisWaiters = [];  // [{minDepth, resolve}]
-let preAnalysisListener = null; // current onMsg handler to remove on new position
+let preAnalysisListener = null; // current onMsg handler
+let preAnalysisReadyHandler = null; // current readyHandler waiting for readyok
 let preAnalysisPaused = false;
 let preAnalysisSession = 0;     // incremented on each new analysis to invalidate stale handlers
 let selectedSquare = null;      // for click-to-move
@@ -1157,7 +1158,8 @@ function startPreAnalysis(fen) {
   function readyHandler(e) {
     if (typeof e.data !== 'string' || e.data !== 'readyok') return;
     sfWorker.removeEventListener('message', readyHandler);
-    if (session !== preAnalysisSession) return; // stale — a newer analysis was started
+    preAnalysisReadyHandler = null;
+    if (session !== preAnalysisSession) return; // stale
 
     const collected = {};
 
@@ -1166,6 +1168,7 @@ function startPreAnalysis(fen) {
       if (typeof line !== 'string') return;
       if (session !== preAnalysisSession) {
         sfWorker.removeEventListener('message', onMsg);
+        preAnalysisListener = null;
         return;
       }
 
@@ -1188,7 +1191,7 @@ function startPreAnalysis(fen) {
 
         const depths = Object.values(collected).map(c => c.depth);
         const minDepth = Math.min(...depths);
-        if (minDepth > preAnalysisDepth && fen === preAnalysisFen) {
+        if (minDepth > preAnalysisDepth && session === preAnalysisSession) {
           preAnalysisDepth = minDepth;
           const pvs = Object.keys(collected)
             .sort((a, b) => parseInt(a) - parseInt(b))
@@ -1212,9 +1215,11 @@ function startPreAnalysis(fen) {
       if (line.startsWith('bestmove')) {
         sfWorker.removeEventListener('message', onMsg);
         preAnalysisListener = null;
-        preAnalysisComplete = true;
-        resolveWaiters();
-        updatePreAnalysisUI();
+        if (session === preAnalysisSession) {
+          preAnalysisComplete = true;
+          resolveWaiters();
+          updatePreAnalysisUI();
+        }
       }
     }
 
@@ -1224,10 +1229,15 @@ function startPreAnalysis(fen) {
     sfWorker.postMessage(`position fen ${fen}`);
     sfWorker.postMessage('go depth 30');
   }
+  preAnalysisReadyHandler = readyHandler;
   sfWorker.addEventListener('message', readyHandler);
 }
 
 function stopPreAnalysis() {
+  if (preAnalysisReadyHandler) {
+    sfWorker.removeEventListener('message', preAnalysisReadyHandler);
+    preAnalysisReadyHandler = null;
+  }
   if (preAnalysisListener) {
     sfWorker.removeEventListener('message', preAnalysisListener);
     preAnalysisListener = null;
@@ -1285,12 +1295,13 @@ function togglePauseAnalysis() {
       function readyHandler(e) {
         if (typeof e.data !== 'string' || e.data !== 'readyok') return;
         sfWorker.removeEventListener('message', readyHandler);
+        preAnalysisReadyHandler = null;
         if (session !== preAnalysisSession) return;
         const collected = {};
         function onMsg(e2) {
           const line = e2.data;
           if (typeof line !== 'string') return;
-          if (session !== preAnalysisSession) { sfWorker.removeEventListener('message', onMsg); return; }
+          if (session !== preAnalysisSession) { sfWorker.removeEventListener('message', onMsg); preAnalysisListener = null; return; }
           if (line.startsWith('info') && line.includes(' pv ')) {
             const dM = line.match(/depth (\d+)/);
             const cpM = line.match(/score cp (-?\d+)/);
@@ -1308,7 +1319,7 @@ function togglePauseAnalysis() {
             }
             const depths = Object.values(collected).map(c => c.depth);
             const minDepth = Math.min(...depths);
-            if (minDepth > preAnalysisDepth && fen === preAnalysisFen) {
+            if (minDepth > preAnalysisDepth && session === preAnalysisSession) {
               preAnalysisDepth = minDepth;
               const pvs = Object.keys(collected)
                 .sort((a, b) => parseInt(a) - parseInt(b))
@@ -1326,9 +1337,11 @@ function togglePauseAnalysis() {
           if (line.startsWith('bestmove')) {
             sfWorker.removeEventListener('message', onMsg);
             preAnalysisListener = null;
-            preAnalysisComplete = true;
-            resolveWaiters();
-            updatePreAnalysisUI();
+            if (session === preAnalysisSession) {
+              preAnalysisComplete = true;
+              resolveWaiters();
+              updatePreAnalysisUI();
+            }
           }
         }
         preAnalysisListener = onMsg;
@@ -1337,6 +1350,7 @@ function togglePauseAnalysis() {
         sfWorker.postMessage(`position fen ${fen}`);
         sfWorker.postMessage('go depth 30');
       }
+      preAnalysisReadyHandler = readyHandler;
       sfWorker.addEventListener('message', readyHandler);
     }
     updatePreAnalysisUI();
@@ -1975,23 +1989,37 @@ async function evaluateMove(from, to, move) {
     const pre = await waitForPreAnalysis(16);
 
     if (pre && preAnalysisFen === m.fenBefore) {
-      bestCp = pre.bestCp;
-      bestMoveUci = pre.bestMove;
-      bestMoveSan = pre.pvs[0]?.san || uciToSan(m.fenBefore, bestMoveUci);
+      // Validate: verify best move is legal in this position (guards against stale data)
+      const testChess = new Chess(m.fenBefore);
+      const testMove = pre.bestMove ? testChess.move({
+        from: pre.bestMove.substring(0, 2),
+        to: pre.bestMove.substring(2, 4),
+        promotion: pre.bestMove.length > 4 ? pre.bestMove[4] : undefined
+      }) : null;
 
-      // Check if the user's move matches one of the pre-analyzed PVs
-      const userUci = from + to + (move.promotion || '');
-      const matchedPv = pre.pvs.find(pv => pv.move === userUci);
-      if (matchedPv) {
-        const loadEl = document.getElementById(loadingId);
-        if (loadEl) loadEl.remove();
-        const cpLoss = bestCp - matchedPv.cp;
-        // Continuation: user's move + rest of PV (drop first UCI move since that's the user's move)
-        const contUci = matchedPv.uciLine ? matchedPv.uciLine.split(' ').slice(1).join(' ') : '';
-        handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUci);
-        return;
+      if (testMove) {
+        bestCp = pre.bestCp;
+        bestMoveUci = pre.bestMove;
+        bestMoveSan = testMove.san;
+
+        // Check if the user's move matches one of the pre-analyzed PVs
+        const userUci = from + to + (move.promotion || '');
+        const matchedPv = pre.pvs.find(pv => pv.move === userUci);
+        if (matchedPv) {
+          const loadEl = document.getElementById(loadingId);
+          if (loadEl) loadEl.remove();
+          const cpLoss = bestCp - matchedPv.cp;
+          const contUci = matchedPv.uciLine ? matchedPv.uciLine.split(' ').slice(1).join(' ') : '';
+          handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUci);
+          return;
+        }
+      } else {
+        console.warn('Pre-analysis best move illegal in position — discarding stale data');
+        // Fall through to one-shot analysis
       }
-    } else {
+    }
+
+    if (!bestCp && bestCp !== 0) {
       // Pre-analysis failed — stop it and run a quick one-shot
       stopPreAnalysis();
       const preResult = await sfAnalyze(m.fenBefore, 16, 1);
