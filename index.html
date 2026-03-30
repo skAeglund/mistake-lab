@@ -1964,7 +1964,8 @@ function onSnapEnd() {
 
 // ─── Evaluate the user's move via Stockfish ───
 async function evaluateMove(from, to, move) {
-  const m = filteredMistakes[currentMistakeIdx];
+  const mistakeIdx = currentMistakeIdx; // snapshot — detect if user navigates away during async
+  const m = filteredMistakes[mistakeIdx];
   const container = document.getElementById('feedbackContainer');
 
   if (!sfReady) {
@@ -1987,6 +1988,7 @@ async function evaluateMove(from, to, move) {
 
     // Wait for pre-analysis to reach at least depth 16
     const pre = await waitForPreAnalysis(16);
+    if (currentMistakeIdx !== mistakeIdx) return; // user navigated away
 
     if (pre && preAnalysisFen === m.fenBefore) {
       // Validate: verify best move is legal in this position (guards against stale data)
@@ -2015,23 +2017,24 @@ async function evaluateMove(from, to, move) {
         }
       } else {
         console.warn('Pre-analysis best move illegal in position — discarding stale data');
-        // Fall through to one-shot analysis
       }
     }
 
     if (!bestCp && bestCp !== 0) {
-      // Pre-analysis failed — stop it and run a quick one-shot
+      // Pre-analysis unavailable — run a fresh one-shot analysis of the position
       stopPreAnalysis();
       const preResult = await sfAnalyze(m.fenBefore, 16, 1);
+      if (currentMistakeIdx !== mistakeIdx) return; // user navigated away
       bestCp = preResult?.pvs[0]?.cp ?? 0;
       bestMoveUci = preResult?.bestMove || '?';
       bestMoveSan = uciToSan(m.fenBefore, bestMoveUci);
     }
 
-    // User's move wasn't in the top PVs — stop pre-analysis and analyze the result
+    // User's move wasn't in the top PVs — analyze the resulting position
     stopPreAnalysis();
     const afterFen = gameEngine.fen();
     const afterResult = await sfAnalyze(afterFen, 16, 1);
+    if (currentMistakeIdx !== mistakeIdx) return; // user navigated away
 
     const loadEl = document.getElementById(loadingId);
     if (loadEl) loadEl.remove();
@@ -2054,6 +2057,7 @@ async function evaluateMove(from, to, move) {
   } catch (err) {
     const loadEl = document.getElementById(loadingId);
     if (loadEl) loadEl.remove();
+    if (currentMistakeIdx !== mistakeIdx) return; // user navigated away
     showFeedback('info', 'Error', 'Analysis failed: ' + escHtml(err.message));
     gameEngine.undo();
     boardObj.position(gameEngine.fen());
