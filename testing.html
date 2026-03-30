@@ -1,0 +1,2619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chess Mistake Trainer</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/chessboard-1.0.0.min.css">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=DM+Sans:wght@400;500;600;700&display=swap');
+
+  :root {
+    --bg-deep: #0c0e13;
+    --bg-panel: #14171e;
+    --bg-card: #1a1e28;
+    --bg-card-hover: #212636;
+    --bg-input: #10131a;
+    --border: #2a2f3d;
+    --border-active: #4a5068;
+    --text-primary: #e2e4ea;
+    --text-secondary: #8a8fa3;
+    --text-muted: #555a6e;
+    --accent: #7c6cf0;
+    --accent-dim: #5a4ec8;
+    --accent-glow: rgba(124, 108, 240, 0.15);
+    --green: #3ecf8e;
+    --green-dim: rgba(62, 207, 142, 0.12);
+    --yellow: #f0c040;
+    --yellow-dim: rgba(240, 192, 64, 0.12);
+    --red: #ef5f5f;
+    --red-dim: rgba(239, 95, 95, 0.12);
+    --blue: #5b9cf0;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background: var(--bg-deep);
+    color: var(--text-primary);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* Header */
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 28px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-panel);
+  }
+  .header-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    color: var(--accent);
+  }
+  .header-title span { color: var(--text-muted); font-weight: 400; }
+  .header-right { display: flex; align-items: center; gap: 14px; }
+  .session-progress {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 12px; color: var(--text-secondary);
+  }
+  .progress-bar-track {
+    width: 140px; height: 6px; border-radius: 3px;
+    background: var(--bg-input); overflow: hidden;
+  }
+  .progress-bar-fill {
+    height: 100%; border-radius: 3px;
+    background: linear-gradient(90deg, var(--accent), var(--green));
+    transition: width 0.4s ease;
+  }
+
+  /* Login screen */
+  .login-screen {
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    min-height: calc(100vh - 57px); gap: 24px;
+  }
+  .login-screen h2 {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 28px; font-weight: 700;
+    background: linear-gradient(135deg, var(--accent), var(--blue));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .login-screen p { color: var(--text-secondary); font-size: 14px; max-width: 400px; text-align: center; line-height: 1.6; }
+  .login-form { display: flex; gap: 10px; }
+  .login-form input {
+    padding: 12px 18px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg-card); color: var(--text-primary);
+    font-family: 'JetBrains Mono', monospace; font-size: 14px;
+    outline: none; width: 260px; transition: border-color 0.2s;
+  }
+  .login-form input:focus { border-color: var(--accent); }
+  .login-form input::placeholder { color: var(--text-muted); }
+
+  /* Buttons */
+  .btn {
+    padding: 10px 20px; border-radius: 8px; border: none;
+    font-family: 'DM Sans', sans-serif; font-size: 13px; font-weight: 600;
+    cursor: pointer; transition: all 0.2s; white-space: nowrap;
+  }
+  .btn-primary {
+    background: var(--accent); color: #fff;
+  }
+  .btn-primary:hover { background: var(--accent-dim); transform: translateY(-1px); }
+  .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+  .btn-ghost {
+    background: transparent; color: var(--text-secondary); border: 1px solid var(--border);
+  }
+  .btn-ghost:hover { border-color: var(--border-active); color: var(--text-primary); }
+  .btn-sm { padding: 6px 14px; font-size: 12px; }
+  .btn-inline {
+    background: none; border: 1px solid var(--border); color: var(--text-secondary);
+    font-family: 'DM Sans', sans-serif; font-size: 10px; font-weight: 600;
+    padding: 1px 8px; border-radius: 4px; cursor: pointer;
+    margin-left: 4px; vertical-align: middle; transition: all 0.15s;
+  }
+  .btn-inline:hover { border-color: var(--border-active); color: var(--text-primary); }
+
+  /* Main layout */
+  .main-layout {
+    display: grid;
+    grid-template-columns: 280px 1fr 320px;
+    min-height: calc(100vh - 57px);
+  }
+
+  /* Left panel - game list */
+  .panel-left {
+    border-right: 1px solid var(--border);
+    background: var(--bg-panel);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .panel-header {
+    padding: 16px; border-bottom: 1px solid var(--border);
+  }
+  .panel-header h3 {
+    font-size: 13px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.5px;
+    color: var(--text-secondary); margin-bottom: 12px;
+  }
+  .filter-row {
+    display: flex; gap: 6px; flex-wrap: wrap;
+  }
+  .filter-chip {
+    padding: 4px 12px; border-radius: 20px;
+    font-size: 11px; font-weight: 600;
+    border: 1px solid var(--border);
+    background: transparent; color: var(--text-muted);
+    cursor: pointer; transition: all 0.2s;
+  }
+  .filter-chip.active {
+    border-color: var(--accent); color: var(--accent);
+    background: var(--accent-glow);
+  }
+  .filter-chip:hover:not(.active) { border-color: var(--border-active); color: var(--text-secondary); }
+
+  .game-list {
+    flex: 1; overflow-y: auto; padding: 8px;
+  }
+  .game-list::-webkit-scrollbar { width: 4px; }
+  .game-list::-webkit-scrollbar-track { background: transparent; }
+  .game-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .game-card {
+    padding: 12px; border-radius: 8px; margin-bottom: 4px;
+    cursor: pointer; transition: all 0.15s;
+    border: 1px solid transparent;
+  }
+  .game-card:hover { background: var(--bg-card); }
+  .game-card.active { background: var(--bg-card); border-color: var(--accent); }
+  .game-card.completed { opacity: 0.5; }
+  .game-card.completed:hover { opacity: 0.75; }
+  .game-card.completed .game-opening { text-decoration: line-through; text-decoration-color: var(--text-muted); }
+  .badge-done { background: var(--green-dim); color: var(--green); }
+
+  /* Review mode */
+  .btn-review-active {
+    border-color: var(--accent) !important; color: var(--accent) !important;
+    background: var(--accent-glow) !important;
+  }
+  .review-count {
+    display: inline-block; background: var(--accent); color: #fff;
+    font-size: 10px; font-weight: 700; padding: 1px 6px;
+    border-radius: 8px; margin-left: 4px; min-width: 18px; text-align: center;
+  }
+  .review-count.empty { background: var(--text-muted); }
+  .review-item {
+    padding: 10px 12px; border-radius: 8px; margin-bottom: 4px;
+    cursor: pointer; transition: all 0.15s;
+    border: 1px solid transparent; font-size: 12px;
+  }
+  .review-item:hover { background: var(--bg-card); }
+  .review-item.active { background: var(--bg-card); border-color: var(--accent); }
+  .review-item-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+  .review-item-opening {
+    font-size: 11px; color: var(--text-muted);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .review-srs-info {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px;
+    color: var(--text-muted); display: flex; gap: 8px;
+  }
+
+  /* Engine line browser */
+  .engine-line {
+    padding: 12px; border-radius: 8px;
+    background: var(--bg-card); border: 1px solid var(--border);
+    animation: fadeSlideIn 0.3s ease;
+  }
+  .engine-line h4 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+    color: var(--text-muted); margin-bottom: 8px; font-weight: 600;
+  }
+  .engine-line-moves {
+    display: flex; flex-wrap: wrap; gap: 2px; align-items: baseline;
+    font-family: 'JetBrains Mono', monospace; font-size: 13px;
+    line-height: 1.8;
+  }
+  .engine-line-moves .move-num {
+    color: var(--text-muted); font-size: 11px; margin-right: 1px;
+  }
+  .engine-line-moves .move {
+    padding: 1px 5px; border-radius: 4px; cursor: pointer;
+    color: var(--text-secondary); transition: all 0.1s;
+  }
+  .engine-line-moves .move:hover { background: var(--bg-card-hover); color: var(--text-primary); }
+  .engine-line-moves .move.active {
+    background: var(--accent-glow); color: var(--accent); font-weight: 600;
+    box-shadow: 0 0 0 1px var(--accent-dim);
+  }
+  .engine-line-moves .move.user-move { color: var(--text-primary); font-weight: 600; }
+  .engine-line-nav {
+    display: flex; gap: 6px; margin-top: 8px; align-items: center;
+  }
+  .engine-line-nav .hint {
+    font-size: 10px; color: var(--text-muted); margin-left: auto;
+  }
+  .game-card-top {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    margin-bottom: 6px;
+  }
+  .game-opening {
+    font-size: 12px; font-weight: 600; color: var(--text-primary);
+    line-height: 1.3; flex: 1; margin-right: 8px;
+    overflow: hidden; text-overflow: ellipsis;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  }
+  .game-mistakes-badge {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; font-weight: 700; padding: 2px 8px;
+    border-radius: 10px; white-space: nowrap; flex-shrink: 0;
+  }
+  .badge-blunder { background: var(--red-dim); color: var(--red); }
+  .badge-mistake { background: var(--yellow-dim); color: var(--yellow); }
+  .badge-clean { background: var(--green-dim); color: var(--green); }
+  .game-meta {
+    display: flex; gap: 8px; font-size: 11px; color: var(--text-muted);
+    align-items: center;
+  }
+  .game-color-dot {
+    width: 10px; height: 10px; border-radius: 50%; border: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .game-color-dot.white { background: #e8e8e8; }
+  .game-color-dot.black { background: #2a2a2a; }
+
+  /* Center panel - board */
+  .panel-center {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: flex-start; padding: 28px 24px; gap: 16px;
+    background: var(--bg-deep);
+    position: relative;
+  }
+  .board-container {
+    width: 100%; max-width: 520px; position: relative;
+  }
+  #board { width: 100%; }
+  .board-label-row {
+    display: flex; justify-content: space-between;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; color: var(--text-muted); padding: 4px 2px;
+  }
+  .position-nav {
+    display: flex; gap: 8px; align-items: center;
+  }
+  .position-counter {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px; color: var(--text-secondary);
+    min-width: 80px; text-align: center;
+  }
+  .empty-board-msg {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    color: var(--text-muted); font-size: 14px;
+    gap: 8px; pointer-events: none;
+  }
+  .empty-board-msg svg { opacity: 0.3; }
+
+  /* Right panel - feedback */
+  .panel-right {
+    border-left: 1px solid var(--border);
+    background: var(--bg-panel);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .feedback-area {
+    flex: 1; padding: 20px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 16px;
+  }
+  .feedback-area::-webkit-scrollbar { width: 4px; }
+  .feedback-area::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .info-card {
+    padding: 16px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--bg-card);
+  }
+  .info-card h4 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+    color: var(--text-muted); margin-bottom: 10px; font-weight: 600;
+  }
+  .info-card .value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 14px; font-weight: 600;
+  }
+
+  .feedback-box {
+    padding: 16px; border-radius: 10px;
+    border-left: 3px solid transparent;
+    animation: fadeSlideIn 0.3s ease;
+  }
+  @keyframes fadeSlideIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .feedback-box.correct {
+    background: var(--green-dim); border-left-color: var(--green);
+  }
+  .feedback-box.inaccurate {
+    background: var(--yellow-dim); border-left-color: var(--yellow);
+  }
+  .feedback-box.wrong {
+    background: var(--red-dim); border-left-color: var(--red);
+  }
+  .feedback-box.info {
+    background: rgba(91, 156, 240, 0.08); border-left-color: var(--blue);
+  }
+  .feedback-title {
+    font-weight: 700; font-size: 14px; margin-bottom: 6px;
+  }
+  .feedback-text {
+    font-size: 13px; color: var(--text-secondary); line-height: 1.5;
+  }
+  .feedback-text code {
+    font-family: 'JetBrains Mono', monospace;
+    background: rgba(255,255,255,0.06); padding: 1px 5px;
+    border-radius: 3px; font-size: 12px;
+  }
+
+  .attempts-indicator {
+    display: flex; gap: 6px; margin-top: 10px;
+  }
+  .attempt-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--border); transition: background 0.3s;
+  }
+  .attempt-dot.used { background: var(--red); }
+
+  .position-queue {
+    padding: 16px; border-top: 1px solid var(--border);
+  }
+  .position-queue h4 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+    color: var(--text-muted); margin-bottom: 8px; font-weight: 600;
+  }
+  .queue-item {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 10px; border-radius: 6px; font-size: 12px;
+    cursor: pointer; transition: background 0.15s;
+  }
+  .queue-item:hover { background: var(--bg-card); }
+  .queue-item.active { background: var(--bg-card); color: var(--accent); }
+  .queue-item.done { color: var(--text-muted); text-decoration: line-through; }
+  .queue-item .ply { font-family: 'JetBrains Mono', monospace; color: var(--text-muted); }
+  .queue-item .loss {
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    padding: 1px 6px; border-radius: 8px;
+  }
+  .loss-blunder { background: var(--red-dim); color: var(--red); }
+  .loss-mistake { background: var(--yellow-dim); color: var(--yellow); }
+
+  /* Loading */
+  .loading-overlay {
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 16px; padding: 40px; color: var(--text-secondary);
+    font-size: 14px;
+  }
+  .spinner {
+    width: 28px; height: 28px; border: 3px solid var(--border);
+    border-top-color: var(--accent); border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Arrow overlay for revealing best move */
+  .arrow-overlay {
+    position: absolute; top: 0; left: 0;
+    pointer-events: none; z-index: 10;
+  }
+
+  /* Misc */
+  .hidden { display: none !important; }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+
+  /* Dynamic square highlights (applied via inline styles) */
+  .square-highlighted {
+    position: relative;
+  }
+  /* Click-to-move selection */
+  .square-selected {
+    box-shadow: inset 0 0 0 3px rgba(124, 108, 240, 0.85) !important;
+    background-color: rgba(124, 108, 240, 0.25) !important;
+  }
+  .square-legal-dot {
+    position: relative;
+  }
+  .square-legal-dot::after {
+    content: '';
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    width: 26%; height: 26%;
+    border-radius: 50%;
+    background: rgba(124, 108, 240, 0.35);
+    pointer-events: none;
+  }
+  .square-legal-capture {
+    box-shadow: inset 0 0 0 3px rgba(124, 108, 240, 0.4) !important;
+  }
+
+  /* Override chessboard colors for dark theme */
+  .board-b72b1z .white-1e1d7 { background-color: #b8c0d8; color: #3a3f52; }
+  .board-b72b1z .black-3c85d { background-color: #5a6488; color: #b8c0d8; }
+
+  /* Responsive */
+  @media (max-width: 1100px) {
+    .main-layout { grid-template-columns: 240px 1fr 280px; }
+  }
+  @media (max-width: 900px) {
+    .main-layout { grid-template-columns: 1fr; grid-template-rows: auto 1fr auto; }
+    .panel-left { max-height: 200px; border-right: none; border-bottom: 1px solid var(--border); }
+    .panel-right { max-height: 300px; border-left: none; border-top: 1px solid var(--border); }
+  }
+  /* Sync indicator */
+  .sync-status {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 11px; color: var(--text-muted); cursor: pointer;
+    padding: 4px 10px; border-radius: 6px; transition: background 0.15s;
+  }
+  .sync-status:hover { background: var(--bg-card); }
+  .sync-dot {
+    width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+    transition: background 0.3s;
+  }
+  .sync-dot.ok { background: var(--green); }
+  .sync-dot.syncing { background: var(--yellow); animation: pulse 1s ease infinite; }
+  .sync-dot.error { background: var(--red); }
+  .sync-dot.off { background: var(--text-muted); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  /* Settings modal */
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 100;
+  }
+  .modal {
+    background: var(--bg-panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 28px; width: 440px; max-width: 90vw;
+  }
+  .modal h3 {
+    font-size: 16px; font-weight: 700; margin-bottom: 16px;
+  }
+  .modal label {
+    font-size: 12px; font-weight: 600; color: var(--text-secondary);
+    display: block; margin-bottom: 4px; margin-top: 14px;
+  }
+  .modal input {
+    width: 100%; padding: 10px 14px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--bg-input);
+    color: var(--text-primary); font-family: 'JetBrains Mono', monospace;
+    font-size: 13px; outline: none;
+  }
+  .modal input:focus { border-color: var(--accent); }
+  .modal .hint {
+    font-size: 11px; color: var(--text-muted); margin-top: 4px; line-height: 1.5;
+  }
+  .modal-actions {
+    display: flex; gap: 8px; margin-top: 20px; justify-content: flex-end;
+  }
+
+  /* Gist setup on login */
+  .gist-setup {
+    margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--border);
+    text-align: center;
+  }
+  .gist-setup summary {
+    font-size: 12px; color: var(--text-muted); cursor: pointer;
+    user-select: none;
+  }
+  .gist-setup summary:hover { color: var(--text-secondary); }
+  .gist-fields {
+    margin-top: 12px; display: flex; flex-direction: column; gap: 8px;
+    align-items: center;
+  }
+  .gist-fields input {
+    padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg-card); color: var(--text-primary);
+    font-family: 'JetBrains Mono', monospace; font-size: 12px;
+    outline: none; width: 340px;
+  }
+  .gist-fields input:focus { border-color: var(--accent); }
+  .gist-saved {
+    font-size: 11px; color: var(--green); margin-top: 4px; min-height: 16px;
+  }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <div class="header-title">♟ MistakeLab <span>/ review trainer</span></div>
+  <div class="header-right">
+    <div class="session-progress hidden" id="sessionProgress">
+      <span id="sessionText">0 / 0</span>
+      <div class="progress-bar-track">
+        <div class="progress-bar-fill" id="sessionBar" style="width:0%"></div>
+      </div>
+    </div>
+    <div class="sync-status hidden" id="syncStatus" onclick="openSettings()" title="Cloud sync settings">
+      <span class="sync-dot off" id="syncDot"></span>
+      <span id="syncLabel">Not synced</span>
+    </div>
+    <button class="btn btn-ghost btn-sm hidden" id="btnLogout" onclick="logout()">Change user</button>
+  </div>
+</div>
+
+<!-- Login screen -->
+<div id="loginScreen" class="login-screen">
+  <h2>MistakeLab</h2>
+  <p>Fetch your analyzed Lichess games, find mistakes and blunders, and practice finding better moves with local Stockfish evaluation.</p>
+  <div class="login-form">
+    <input type="text" id="usernameInput" placeholder="lichess username" autocomplete="off"
+           onkeydown="if(event.key==='Enter')fetchGames()">
+    <button class="btn btn-primary" id="btnFetch" onclick="fetchGames()">Load games</button>
+  </div>
+  <p id="loginError" style="color:var(--red);font-size:12px;min-height:18px;"></p>
+  <div class="gist-setup">
+    <details>
+      <summary>☁ Set up cloud sync (optional)</summary>
+      <div class="gist-fields">
+        <input type="text" id="gistTokenInput" placeholder="GitHub personal access token (gist scope)"
+               value="">
+        <input type="text" id="gistIdInput" placeholder="Gist ID (leave empty to create new)"
+               value="">
+        <button class="btn btn-ghost btn-sm" onclick="saveGistConfig()">Save</button>
+        <div class="gist-saved" id="gistSavedMsg"></div>
+        <div class="hint" style="max-width:340px;text-align:left;">
+          Create a token at <a href="https://github.com/settings/tokens/new?scopes=gist&description=MistakeLab" target="_blank" style="color:var(--accent)">github.com/settings/tokens</a> with only the <code>gist</code> scope. Leave Gist ID empty on first setup — one will be created automatically.
+        </div>
+      </div>
+    </details>
+  </div>
+</div>
+
+<!-- Main app -->
+<div id="mainApp" class="main-layout hidden">
+  <!-- Left panel: Game list -->
+  <div class="panel-left">
+    <div class="panel-header">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+        <h3 style="margin-bottom:0" id="panelTitle">Games</h3>
+        <button class="btn btn-ghost btn-sm" id="btnReviewMode" onclick="toggleReviewMode()" style="font-size:11px;">
+          ⏰ Review <span id="reviewDueCount"></span>
+        </button>
+      </div>
+      <div class="filter-row">
+        <button class="filter-chip active" data-filter="color" data-value="both" onclick="setFilter(this)">Both</button>
+        <button class="filter-chip" data-filter="color" data-value="white" onclick="setFilter(this)">White</button>
+        <button class="filter-chip" data-filter="color" data-value="black" onclick="setFilter(this)">Black</button>
+      </div>
+      <div class="filter-row" style="margin-top:6px;">
+        <button class="filter-chip active" data-filter="severity" data-value="all" onclick="setFilter(this)">All mistakes</button>
+        <button class="filter-chip" data-filter="severity" data-value="blunders" onclick="setFilter(this)">Blunders only</button>
+      </div>
+    </div>
+    <div class="game-list" id="gameList"></div>
+  </div>
+
+  <!-- Center panel: Board -->
+  <div class="panel-center">
+    <div class="board-container" id="boardContainer">
+      <div id="board" style="width:100%"></div>
+      <svg class="arrow-overlay hidden" id="arrowSvg"></svg>
+    </div>
+    <div class="position-nav" id="positionNav">
+      <button class="btn btn-ghost btn-sm" onclick="prevPosition()">← Prev</button>
+      <span class="position-counter" id="posCounter">—</span>
+      <button class="btn btn-ghost btn-sm" onclick="nextPosition()">Next →</button>
+      <button class="btn btn-ghost btn-sm" onclick="skipPosition()" title="Skip this position">Skip</button>
+      <button class="btn btn-ghost btn-sm hidden" id="btnRetry" onclick="retryPosition()" style="border-color:var(--accent);color:var(--accent)">↺ Retry</button>
+      <button class="btn btn-ghost btn-sm hidden" id="btnLichess" onclick="openLichessAnalysis()" title="Open in Lichess analysis">♟ Lichess</button>
+    </div>
+    <div class="empty-board-msg" id="emptyMsg">
+      <svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+        <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+      </svg>
+      Select a game to begin
+    </div>
+  </div>
+
+  <!-- Right panel: Feedback -->
+  <div class="panel-right">
+    <div class="feedback-area" id="feedbackArea">
+      <div class="info-card" id="posInfoCard" style="display:none">
+        <h4>Current Position</h4>
+        <div id="posInfoContent"></div>
+      </div>
+      <div id="feedbackContainer"></div>
+    </div>
+    <div class="position-queue" id="queuePanel" style="display:none">
+      <h4>Position Queue</h4>
+      <div id="queueList" style="max-height:200px;overflow-y:auto;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Settings modal -->
+<div class="modal-backdrop hidden" id="settingsModal" onclick="if(event.target===this)closeSettings()">
+  <div class="modal">
+    <h3>☁ Cloud Sync Settings</h3>
+    <label>GitHub Token</label>
+    <input type="password" id="settingsToken" placeholder="ghp_...">
+    <div class="hint">Personal access token with <code>gist</code> scope only.</div>
+    <label>Gist ID</label>
+    <input type="text" id="settingsGistId" placeholder="Auto-created if empty">
+    <div class="hint">The ID from your Gist URL. Leave empty to create a new one.</div>
+    <div id="settingsMsg" style="font-size:12px;margin-top:12px;min-height:18px;"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost btn-sm" onclick="disconnectGist()">Disconnect</button>
+      <button class="btn btn-ghost btn-sm" onclick="closeSettings()">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="saveSettingsGist()">Save & Sync</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/chessboard-1.0.0.min.js"></script>
+<script>
+// ─── State ───
+let currentUsername = '';
+let allGames = [];           // raw game objects from Lichess
+let allMistakes = [];        // extracted mistake positions
+let filteredMistakes = [];   // after filter applied
+let currentMistakeIdx = -1;
+let currentAttempts = 0;
+let boardObj = null;
+let gameEngine = null;       // Chess.js instance for current position
+let sessionCompleted = 0;
+let sessionTotal = 0;
+let activeGameId = null;
+let sfWorker = null;
+let sfReady = false;
+let preAnalysis = null;       // latest snapshot: { bestCp, bestMove, pvs }
+let preAnalysisFen = null;
+let preAnalysisDepth = 0;
+let preAnalysisComplete = false;
+let preAnalysisWaiters = [];  // [{minDepth, resolve}]
+let preAnalysisListener = null; // current onMsg handler to remove on new position
+let preAnalysisPaused = false;
+let selectedSquare = null;      // for click-to-move
+let engineLine = null;          // { baseFen, moves: [{uci,san,fen}], currentIdx: -1, userMove: {san,from,to} }
+let browsingLine = false;       // true when stepping through engine line
+let firstAttemptFailed = false;  // tracks if first try on current position was wrong
+let srsRecorded = false;         // true after SRS grade is recorded; prevents retry from re-grading
+let reviewMode = false;          // true = show only due SRS positions
+let reviewQueue = [];            // positions due for review
+
+const filters = { color: 'both', severity: 'all' };
+
+// ─── FSRS-5 Algorithm ───
+const FSRS_W = [
+  0.40255, 1.18385, 3.173, 15.69105, 7.1949, 0.5345, 1.4604, 0.0046,
+  1.54575, 0.1192, 1.01925, 1.9395, 0.11, 0.29605, 2.2698, 0.2315,
+  2.9898, 0.51655, 0.6621,
+];
+const FSRS_F = 19.0 / 81.0;
+const FSRS_C = -0.5;
+const FSRS_GRADE = { again: 1, hard: 2, good: 3, easy: 4 };
+const FSRS_STATE = { new: 0, learning: 1, review: 2, relearning: 3 };
+const DESIRED_RETENTION = 0.9;
+
+function fsrs_retrievability(t, s) {
+  return Math.pow(1.0 + FSRS_F * (t / s), FSRS_C);
+}
+function fsrs_interval(rd, s) {
+  return (s / FSRS_F) * (Math.pow(rd, 1.0 / FSRS_C) - 1.0);
+}
+function fsrs_s0(g) {
+  return [0, FSRS_W[0], FSRS_W[1], FSRS_W[2], FSRS_W[3]][g];
+}
+function fsrs_d0(g) {
+  return Math.min(10, Math.max(1, FSRS_W[4] - Math.exp(FSRS_W[5] * (g - 1)) + 1));
+}
+function fsrs_delta_d(g) { return -FSRS_W[6] * (g - 3); }
+function fsrs_dp(d, g) { return d + fsrs_delta_d(g) * ((10 - d) / 9); }
+function fsrs_difficulty(d, g) {
+  return Math.min(10, Math.max(1, FSRS_W[7] * fsrs_d0(FSRS_GRADE.easy) + (1 - FSRS_W[7]) * fsrs_dp(d, g)));
+}
+function fsrs_s_success(d, s, r, g) {
+  const td = 11 - d, ts = Math.pow(s, -FSRS_W[9]);
+  const tr = Math.exp(FSRS_W[10] * (1 - r)) - 1;
+  const h = g === FSRS_GRADE.hard ? FSRS_W[15] : 1;
+  const b = g === FSRS_GRADE.easy ? FSRS_W[16] : 1;
+  return s * (1 + td * ts * tr * h * b * Math.exp(FSRS_W[8]));
+}
+function fsrs_s_fail(d, s, r) {
+  const result = Math.pow(d, -FSRS_W[12]) * (Math.pow(s + 1, FSRS_W[13]) - 1) *
+                 Math.exp(FSRS_W[14] * (1 - r)) * FSRS_W[11];
+  return Math.min(result, s);
+}
+function fsrs_stability(d, s, r, g) {
+  return g === FSRS_GRADE.again ? fsrs_s_fail(d, s, r) : fsrs_s_success(d, s, r, g);
+}
+
+function fsrs_newCard() {
+  return { state: FSRS_STATE.new, stability: 0, difficulty: 0, due: null,
+           reps: 0, lapses: 0, lastReview: null, elapsedDays: 0, scheduledDays: 0 };
+}
+
+function fsrs_review(card, grade, now) {
+  now = now || new Date();
+  const c = { ...card };
+  const elapsed = c.lastReview ? Math.max(0, (now - new Date(c.lastReview)) / 86400000) : 0;
+  c.elapsedDays = elapsed;
+
+  if (c.state === FSRS_STATE.new) {
+    c.stability = fsrs_s0(grade);
+    c.difficulty = fsrs_d0(grade);
+    c.reps = 1;
+    if (grade === FSRS_GRADE.again) { c.state = FSRS_STATE.learning; c.lapses = 1; }
+    else { c.state = FSRS_STATE.review; }
+  } else {
+    const r = fsrs_retrievability(elapsed, c.stability);
+    c.difficulty = fsrs_difficulty(c.difficulty, grade);
+    if (grade === FSRS_GRADE.again) {
+      c.stability = fsrs_s_fail(c.difficulty, c.stability, r);
+      c.lapses++;
+      c.state = FSRS_STATE.relearning;
+    } else {
+      c.stability = fsrs_s_success(c.difficulty, c.stability, r, grade);
+      c.reps++;
+      c.state = FSRS_STATE.review;
+    }
+  }
+
+  let ivl;
+  if (grade === FSRS_GRADE.again) {
+    ivl = c.state === FSRS_STATE.new ? 0 : Math.max(1, Math.round(c.stability * 0.5));
+  } else {
+    ivl = Math.max(1, Math.round(fsrs_interval(DESIRED_RETENTION, c.stability)));
+  }
+  ivl = Math.min(ivl, 365);
+  c.scheduledDays = ivl;
+  c.lastReview = now.toISOString();
+  c.due = new Date(now.getTime() + ivl * 86400000).toISOString().split('T')[0];
+  return c;
+}
+
+function getCardForPosition(pid) {
+  const data = gistData?.positions?.[pid];
+  if (data?.srs) return data.srs;
+  return fsrs_newCard();
+}
+
+function recordReview(pid, grade) {
+  const card = getCardForPosition(pid);
+  const updated = fsrs_review(card, grade);
+  if (!gistData) gistData = { positions: {}, version: 1 };
+  if (!gistData.positions[pid]) gistData.positions[pid] = {};
+  gistData.positions[pid].completed = true;
+  gistData.positions[pid].lastSeen = new Date().toISOString();
+  gistData.positions[pid].srs = updated;
+  // Update localStorage
+  const s = getCompletedSet();
+  s.add(pid);
+  localStorage.setItem(getCompletedKey(), JSON.stringify([...s]));
+  debounceSyncToGist();
+  return updated;
+}
+
+function isDue(pid) {
+  const card = getCardForPosition(pid);
+  if (card.state === FSRS_STATE.new) return true;
+  if (!card.due) return true;
+  const today = new Date().toISOString().split('T')[0];
+  return card.due <= today;
+}
+
+function buildReviewQueue() {
+  const today = new Date().toISOString().split('T')[0];
+  reviewQueue = filteredMistakes.filter(m => isDue(posId(m)));
+  // Sort: overdue first (by due date), then new positions
+  reviewQueue.sort((a, b) => {
+    const ca = getCardForPosition(posId(a));
+    const cb = getCardForPosition(posId(b));
+    // New cards go after due cards
+    if (ca.state === FSRS_STATE.new && cb.state !== FSRS_STATE.new) return 1;
+    if (cb.state === FSRS_STATE.new && ca.state !== FSRS_STATE.new) return -1;
+    // Both new: sort by wpDrop
+    if (ca.state === FSRS_STATE.new && cb.state === FSRS_STATE.new) return b.wpDrop - a.wpDrop;
+    // Both due: most overdue first
+    return (ca.due || '') < (cb.due || '') ? -1 : 1;
+  });
+}
+
+// ─── Gist sync state ───
+let gistToken = localStorage.getItem('mistakelab_gist_token') || '';
+let gistId = localStorage.getItem('mistakelab_gist_id') || '';
+let gistData = null; // { positions: { posId: { completed, ... } }, version: 1 }
+let syncDebounceTimer = null;
+const GIST_FILENAME = 'mistakelab_progress.json';
+
+// Populate login fields from saved config + auto-load
+document.addEventListener('DOMContentLoaded', () => {
+  if (gistToken) document.getElementById('gistTokenInput').value = gistToken;
+  if (gistId) document.getElementById('gistIdInput').value = gistId;
+
+  const savedUser = localStorage.getItem('mistakelab_username');
+  if (savedUser) {
+    document.getElementById('usernameInput').value = savedUser;
+    fetchGames(savedUser);
+  }
+});
+
+// ─── Progress helpers (localStorage cache + Gist) ───
+function getCompletedKey() { return `mistakelab_done_${currentUsername.toLowerCase()}`; }
+function getCompletedSet() {
+  // Merge localStorage cache with Gist data
+  let localSet;
+  try { localSet = new Set(JSON.parse(localStorage.getItem(getCompletedKey()) || '[]')); }
+  catch { localSet = new Set(); }
+  if (gistData?.positions) {
+    for (const [id, data] of Object.entries(gistData.positions)) {
+      if (data.completed) localSet.add(id);
+    }
+  }
+  return localSet;
+}
+
+function markCompleted(pid) {
+  // Update localStorage cache immediately
+  const s = getCompletedSet();
+  s.add(pid);
+  localStorage.setItem(getCompletedKey(), JSON.stringify([...s]));
+  // Update gist data and schedule sync
+  if (!gistData) gistData = { positions: {}, version: 1 };
+  gistData.positions[pid] = {
+    ...gistData.positions[pid],
+    completed: true,
+    lastSeen: new Date().toISOString(),
+  };
+  debounceSyncToGist();
+}
+
+function posId(m) { return `${m.gameId}_${m.movePly}`; }
+
+// ─── Gist API ───
+async function gistRead() {
+  if (!gistToken || !gistId) return null;
+  const resp = await fetch(`https://api.github.com/gists/${gistId}`, {
+    headers: { 'Authorization': `token ${gistToken}` }
+  });
+  if (!resp.ok) throw new Error(`Gist read failed: ${resp.status}`);
+  const gist = await resp.json();
+  const file = gist.files?.[GIST_FILENAME];
+  if (!file) return { positions: {}, version: 1 };
+  return JSON.parse(file.content);
+}
+
+async function gistWrite(data) {
+  if (!gistToken || !gistId) return;
+  const resp = await fetch(`https://api.github.com/gists/${gistId}`, {
+    method: 'PATCH',
+    headers: {
+      'Authorization': `token ${gistToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      files: { [GIST_FILENAME]: { content: JSON.stringify(data, null, 2) } }
+    })
+  });
+  if (!resp.ok) throw new Error(`Gist write failed: ${resp.status}`);
+}
+
+async function gistCreate() {
+  if (!gistToken) throw new Error('No token');
+  const resp = await fetch('https://api.github.com/gists', {
+    method: 'POST',
+    headers: {
+      'Authorization': `token ${gistToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      description: 'MistakeLab chess trainer progress',
+      public: false,
+      files: { [GIST_FILENAME]: { content: JSON.stringify({ positions: {}, version: 1 }, null, 2) } }
+    })
+  });
+  if (!resp.ok) throw new Error(`Gist create failed: ${resp.status}`);
+  const gist = await resp.json();
+  return gist.id;
+}
+
+// ─── Sync logic ───
+function debounceSyncToGist() {
+  if (!gistToken || !gistId) return;
+  clearTimeout(syncDebounceTimer);
+  syncDebounceTimer = setTimeout(() => syncToGist(), 3000);
+}
+
+async function syncToGist() {
+  if (!gistToken || !gistId || !gistData) return;
+  setSyncStatus('syncing', 'Syncing…');
+  try {
+    await gistWrite(gistData);
+    setSyncStatus('ok', 'Synced');
+  } catch (e) {
+    console.error('Sync failed:', e);
+    setSyncStatus('error', 'Sync failed');
+  }
+}
+
+async function loadFromGist() {
+  if (!gistToken || !gistId) return false;
+  setSyncStatus('syncing', 'Loading…');
+  try {
+    gistData = await gistRead();
+    // Merge into localStorage
+    if (gistData?.positions && currentUsername) {
+      const s = getCompletedSet();
+      localStorage.setItem(getCompletedKey(), JSON.stringify([...s]));
+    }
+    setSyncStatus('ok', 'Synced');
+    return true;
+  } catch (e) {
+    console.error('Gist load failed:', e);
+    setSyncStatus('error', 'Load failed');
+    return false;
+  }
+}
+
+function setSyncStatus(state, label) {
+  const dot = document.getElementById('syncDot');
+  const lbl = document.getElementById('syncLabel');
+  if (!dot) return;
+  dot.className = `sync-dot ${state}`;
+  lbl.textContent = label;
+}
+
+function isGistConfigured() { return !!(gistToken && gistId); }
+
+// ─── Settings UI ───
+function saveGistConfig() {
+  const token = document.getElementById('gistTokenInput').value.trim();
+  const id = document.getElementById('gistIdInput').value.trim();
+  const msg = document.getElementById('gistSavedMsg');
+  if (!token) { msg.style.color = 'var(--red)'; msg.textContent = 'Token is required'; return; }
+  gistToken = token;
+  localStorage.setItem('mistakelab_gist_token', token);
+  if (id) {
+    gistId = id;
+    localStorage.setItem('mistakelab_gist_id', id);
+    msg.style.color = 'var(--green)'; msg.textContent = '✓ Saved! Sync will start when you load games.';
+  } else {
+    msg.style.color = 'var(--text-muted)'; msg.textContent = 'Creating gist…';
+    gistCreate().then(newId => {
+      gistId = newId;
+      localStorage.setItem('mistakelab_gist_id', newId);
+      document.getElementById('gistIdInput').value = newId;
+      msg.style.color = 'var(--green)';
+      msg.textContent = `✓ Created gist ${newId.substring(0,8)}…`;
+    }).catch(e => {
+      msg.style.color = 'var(--red)'; msg.textContent = 'Failed: ' + e.message;
+    });
+  }
+}
+
+function openSettings() {
+  document.getElementById('settingsToken').value = gistToken;
+  document.getElementById('settingsGistId').value = gistId;
+  document.getElementById('settingsMsg').textContent = '';
+  document.getElementById('settingsModal').classList.remove('hidden');
+}
+
+function closeSettings() {
+  document.getElementById('settingsModal').classList.add('hidden');
+}
+
+async function saveSettingsGist() {
+  const token = document.getElementById('settingsToken').value.trim();
+  const id = document.getElementById('settingsGistId').value.trim();
+  const msg = document.getElementById('settingsMsg');
+  if (!token) { msg.style.color = 'var(--red)'; msg.textContent = 'Token is required'; return; }
+  gistToken = token;
+  localStorage.setItem('mistakelab_gist_token', token);
+  if (id) {
+    gistId = id;
+    localStorage.setItem('mistakelab_gist_id', id);
+  } else {
+    msg.style.color = 'var(--text-muted)'; msg.textContent = 'Creating gist…';
+    try {
+      const newId = await gistCreate();
+      gistId = newId;
+      localStorage.setItem('mistakelab_gist_id', newId);
+      document.getElementById('settingsGistId').value = newId;
+    } catch (e) {
+      msg.style.color = 'var(--red)'; msg.textContent = 'Failed: ' + e.message; return;
+    }
+  }
+  closeSettings();
+  await loadFromGist();
+  updateSessionProgress();
+  renderQueue();
+}
+
+function disconnectGist() {
+  gistToken = ''; gistId = ''; gistData = null;
+  localStorage.removeItem('mistakelab_gist_token');
+  localStorage.removeItem('mistakelab_gist_id');
+  setSyncStatus('off', 'Not synced');
+  closeSettings();
+}
+
+// ─── Stockfish Engine ───
+const SF_PATH = 'engine/stockfish-18-lite-single.js';
+
+async function initStockfish() {
+  if (sfWorker) return;
+  try {
+    sfWorker = new Worker(SF_PATH);
+    // Wait for UCI init
+    await new Promise((resolve) => {
+      function handler(e) {
+        if (typeof e.data === 'string' && e.data === 'uciok') {
+          sfWorker.removeEventListener('message', handler);
+          resolve();
+        }
+      }
+      sfWorker.addEventListener('message', handler);
+      sfWorker.postMessage('uci');
+    });
+    sfWorker.postMessage('setoption name Hash value 64');
+    sfWorker.postMessage('isready');
+    await new Promise((resolve) => {
+      function handler(e) {
+        if (typeof e.data === 'string' && e.data === 'readyok') {
+          sfWorker.removeEventListener('message', handler);
+          resolve();
+        }
+      }
+      sfWorker.addEventListener('message', handler);
+    });
+    sfReady = true;
+    console.log('Stockfish 18 ready');
+  } catch (err) {
+    console.error('Stockfish init failed:', err);
+    sfReady = false;
+  }
+}
+
+function sfAnalyze(fen, depth = 16, multiPv = 1) {
+  return new Promise((resolve) => {
+    if (!sfReady) { resolve(null); return; }
+    const collected = {};
+
+    sfWorker.postMessage('stop');
+    sfWorker.postMessage('ucinewgame');
+    sfWorker.postMessage('isready');
+
+    function readyHandler(e) {
+      if (e.data !== 'readyok') return;
+      sfWorker.removeEventListener('message', readyHandler);
+
+      function onMsg(e2) {
+        const line = e2.data;
+        if (typeof line !== 'string') return;
+        if (line.startsWith('info') && line.includes(' pv ')) {
+          const dM = line.match(/depth (\d+)/);
+          const cpM = line.match(/score cp (-?\d+)/);
+          const mateM = line.match(/score mate (-?\d+)/);
+          const pvM = line.match(/ pv (.+)/);
+          const mpvM = line.match(/multipv (\d+)/);
+          const d = parseInt(dM?.[1] || '0');
+          const pvNum = parseInt(mpvM?.[1] || '1');
+          let cp = 0;
+          if (cpM) cp = parseInt(cpM[1]);
+          else if (mateM) cp = parseInt(mateM[1]) > 0 ? 10000 : -10000;
+          const moves = pvM?.[1]?.trim() || '';
+          if (!collected[pvNum] || d >= collected[pvNum].depth) {
+            collected[pvNum] = { cp, moves, depth: d, firstMove: moves.split(' ')[0] };
+          }
+        }
+        if (line.startsWith('bestmove')) {
+          sfWorker.removeEventListener('message', onMsg);
+          const bm = line.split(' ')[1];
+          const pvs = Object.keys(collected)
+            .sort((a, b) => parseInt(a) - parseInt(b))
+            .map(k => collected[k]);
+          resolve({ bestMove: bm, pvs, fen });
+        }
+      }
+
+      sfWorker.addEventListener('message', onMsg);
+      sfWorker.postMessage(`setoption name MultiPV value ${multiPv}`);
+      sfWorker.postMessage(`position fen ${fen}`);
+      sfWorker.postMessage(`go depth ${depth}`);
+    }
+    sfWorker.addEventListener('message', readyHandler);
+  });
+}
+
+// ─── Streaming pre-analysis (runs up to depth 30 while user thinks) ───
+function startPreAnalysis(fen) {
+  // Cancel any previous pre-analysis
+  stopPreAnalysis();
+  preAnalysis = null;
+  preAnalysisFen = fen;
+  preAnalysisDepth = 0;
+  preAnalysisComplete = false;
+  preAnalysisWaiters = [];
+
+  if (!sfReady) return;
+
+  sfWorker.postMessage('stop');
+  sfWorker.postMessage('ucinewgame');
+  sfWorker.postMessage('isready');
+
+  function readyHandler(e) {
+    if (e.data !== 'readyok') return;
+    sfWorker.removeEventListener('message', readyHandler);
+
+    const collected = {};
+
+    function onMsg(e2) {
+      const line = e2.data;
+      if (typeof line !== 'string') return;
+
+      if (line.startsWith('info') && line.includes(' pv ')) {
+        const dM = line.match(/depth (\d+)/);
+        const cpM = line.match(/score cp (-?\d+)/);
+        const mateM = line.match(/score mate (-?\d+)/);
+        const pvM = line.match(/ pv (.+)/);
+        const mpvM = line.match(/multipv (\d+)/);
+        const d = parseInt(dM?.[1] || '0');
+        const pvNum = parseInt(mpvM?.[1] || '1');
+        let cp = 0;
+        if (cpM) cp = parseInt(cpM[1]);
+        else if (mateM) cp = parseInt(mateM[1]) > 0 ? 10000 : -10000;
+        const moves = pvM?.[1]?.trim() || '';
+
+        if (!collected[pvNum] || d >= collected[pvNum].depth) {
+          collected[pvNum] = { cp, moves, depth: d, firstMove: moves.split(' ')[0] };
+        }
+
+        // Update preAnalysis snapshot at each new depth
+        const depths = Object.values(collected).map(c => c.depth);
+        const minDepth = Math.min(...depths);
+        if (minDepth > preAnalysisDepth && fen === preAnalysisFen) {
+          preAnalysisDepth = minDepth;
+          const pvs = Object.keys(collected)
+            .sort((a, b) => parseInt(a) - parseInt(b))
+            .map(k => collected[k]);
+          preAnalysis = {
+            bestCp: pvs[0]?.cp ?? 0,
+            bestMove: pvs[0]?.firstMove,
+            pvs: pvs.map(pv => ({
+              cp: pv.cp,
+              move: pv.firstMove,
+              san: uciToSan(fen, pv.firstMove),
+              uciLine: pv.moves, // full UCI PV line
+            })),
+            depth: minDepth,
+          };
+          // Show depth progress and resolve waiters
+          updatePreAnalysisUI();
+          resolveWaiters();
+        }
+      }
+
+      if (line.startsWith('bestmove')) {
+        sfWorker.removeEventListener('message', onMsg);
+        preAnalysisListener = null;
+        preAnalysisComplete = true;
+        resolveWaiters();
+        updatePreAnalysisUI();
+      }
+    }
+
+    preAnalysisListener = onMsg;
+    sfWorker.addEventListener('message', onMsg);
+    sfWorker.postMessage('setoption name MultiPV value 3');
+    sfWorker.postMessage(`position fen ${fen}`);
+    sfWorker.postMessage('go depth 30');
+  }
+  sfWorker.addEventListener('message', readyHandler);
+}
+
+function stopPreAnalysis() {
+  if (preAnalysisListener) {
+    sfWorker.removeEventListener('message', preAnalysisListener);
+    preAnalysisListener = null;
+  }
+}
+
+function resolveWaiters() {
+  preAnalysisWaiters = preAnalysisWaiters.filter(w => {
+    if (preAnalysisDepth >= w.minDepth || preAnalysisComplete) {
+      w.resolve(preAnalysis);
+      return false;
+    }
+    return true;
+  });
+}
+
+function waitForPreAnalysis(minDepth = 16) {
+  return new Promise((resolve) => {
+    if (preAnalysis && (preAnalysisDepth >= minDepth || preAnalysisComplete)) {
+      resolve(preAnalysis);
+    } else {
+      preAnalysisWaiters.push({ minDepth, resolve });
+    }
+  });
+}
+
+function updatePreAnalysisUI() {
+  const tag = document.getElementById('preAnalysisTag');
+  if (!tag) return;
+  if (preAnalysisPaused) {
+    tag.style.color = 'var(--text-secondary)';
+    tag.innerHTML = `⏸ Paused at depth ${preAnalysisDepth} <button class="btn-inline" onclick="togglePauseAnalysis()">resume</button>`;
+  } else if (preAnalysisComplete) {
+    tag.style.color = 'var(--green)';
+    tag.innerHTML = `✓ Depth ${preAnalysisDepth} (done)`;
+  } else if (preAnalysisDepth >= 16) {
+    tag.style.color = 'var(--green)';
+    tag.innerHTML = `✓ Depth ${preAnalysisDepth}… <button class="btn-inline" onclick="togglePauseAnalysis()">pause</button>`;
+  } else {
+    tag.style.color = 'var(--text-muted)';
+    tag.innerHTML = `⟳ Analyzing… depth ${preAnalysisDepth}`;
+  }
+}
+
+function togglePauseAnalysis() {
+  if (preAnalysisPaused) {
+    // Resume — restart search from same position, keeping existing data
+    preAnalysisPaused = false;
+    preAnalysisComplete = false;
+    if (preAnalysisFen && sfReady) {
+      // Restart the streaming listener without clearing preAnalysis
+      sfWorker.postMessage('stop');
+      sfWorker.postMessage('isready');
+      const fen = preAnalysisFen;
+      function readyHandler(e) {
+        if (e.data !== 'readyok') return;
+        sfWorker.removeEventListener('message', readyHandler);
+        const collected = {};
+        function onMsg(e2) {
+          const line = e2.data;
+          if (typeof line !== 'string') return;
+          if (line.startsWith('info') && line.includes(' pv ')) {
+            const dM = line.match(/depth (\d+)/);
+            const cpM = line.match(/score cp (-?\d+)/);
+            const mateM = line.match(/score mate (-?\d+)/);
+            const pvM = line.match(/ pv (.+)/);
+            const mpvM = line.match(/multipv (\d+)/);
+            const d = parseInt(dM?.[1] || '0');
+            const pvNum = parseInt(mpvM?.[1] || '1');
+            let cp = 0;
+            if (cpM) cp = parseInt(cpM[1]);
+            else if (mateM) cp = parseInt(mateM[1]) > 0 ? 10000 : -10000;
+            const moves = pvM?.[1]?.trim() || '';
+            if (!collected[pvNum] || d >= collected[pvNum].depth) {
+              collected[pvNum] = { cp, moves, depth: d, firstMove: moves.split(' ')[0] };
+            }
+            const depths = Object.values(collected).map(c => c.depth);
+            const minDepth = Math.min(...depths);
+            if (minDepth > preAnalysisDepth && fen === preAnalysisFen) {
+              preAnalysisDepth = minDepth;
+              const pvs = Object.keys(collected)
+                .sort((a, b) => parseInt(a) - parseInt(b))
+                .map(k => collected[k]);
+              preAnalysis = {
+                bestCp: pvs[0]?.cp ?? 0,
+                bestMove: pvs[0]?.firstMove,
+                pvs: pvs.map(pv => ({ cp: pv.cp, move: pv.firstMove, san: uciToSan(fen, pv.firstMove), uciLine: pv.moves })),
+                depth: minDepth,
+              };
+              updatePreAnalysisUI();
+              resolveWaiters();
+            }
+          }
+          if (line.startsWith('bestmove')) {
+            sfWorker.removeEventListener('message', onMsg);
+            preAnalysisListener = null;
+            preAnalysisComplete = true;
+            resolveWaiters();
+            updatePreAnalysisUI();
+          }
+        }
+        preAnalysisListener = onMsg;
+        sfWorker.addEventListener('message', onMsg);
+        sfWorker.postMessage('setoption name MultiPV value 3');
+        sfWorker.postMessage(`position fen ${fen}`);
+        sfWorker.postMessage('go depth 30');
+      }
+      sfWorker.addEventListener('message', readyHandler);
+    }
+    updatePreAnalysisUI();
+  } else {
+    // Pause — stop the worker if above minimum depth
+    if (preAnalysisDepth >= 16 && !preAnalysisComplete) {
+      preAnalysisPaused = true;
+      sfWorker.postMessage('stop');
+      stopPreAnalysis();
+      preAnalysisComplete = true;
+      resolveWaiters();
+      updatePreAnalysisUI();
+    }
+  }
+}
+
+function openLichessAnalysis() {
+  if (currentMistakeIdx < 0) return;
+  const m = filteredMistakes[currentMistakeIdx];
+  if (!m) return;
+  const fen = m.fenBefore.replace(/ /g, '_');
+  const color = m.playerColor;
+  window.open(`https://lichess.org/analysis/${fen}?color=${color}`, '_blank');
+}
+
+// ─── Login / Logout ───
+function logout() {
+  // Flush any pending sync
+  clearTimeout(syncDebounceTimer);
+  if (gistData && isGistConfigured()) syncToGist();
+
+  currentUsername = '';
+  localStorage.removeItem('mistakelab_username');
+  allGames = []; allMistakes = []; filteredMistakes = [];
+  currentMistakeIdx = -1; activeGameId = null;
+  document.getElementById('mainApp').classList.add('hidden');
+  document.getElementById('loginScreen').classList.remove('hidden');
+  document.getElementById('sessionProgress').classList.add('hidden');
+  document.getElementById('syncStatus').classList.add('hidden');
+  document.getElementById('btnLogout').classList.add('hidden');
+  if (boardObj) { boardObj.clear(); boardObj = null; }
+}
+
+// ─── Fetch games from Lichess ───
+async function fetchGames(autoUsername) {
+  const input = document.getElementById('usernameInput');
+  const username = autoUsername || input.value.trim();
+  if (!username) return;
+  currentUsername = username;
+  if (!autoUsername) input.value = username;
+
+  const btn = document.getElementById('btnFetch');
+  const err = document.getElementById('loginError');
+  btn.disabled = true; btn.textContent = 'Loading…'; err.textContent = '';
+
+  try {
+    const url = `https://lichess.org/api/games/user/${encodeURIComponent(username)}?max=20&analysed=true&evals=true&moves=true&pgnInJson=true&opening=true`;
+    const resp = await fetch(url, {
+      headers: { 'Accept': 'application/x-ndjson' }
+    });
+    if (!resp.ok) {
+      if (resp.status === 404) throw new Error('User not found');
+      throw new Error(`Lichess API error: ${resp.status}`);
+    }
+    const text = await resp.text();
+    const lines = text.trim().split('\n').filter(l => l.trim());
+    const games = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+
+    // Filter to only games with analysis
+    allGames = games.filter(g => g.analysis && g.analysis.length > 0);
+    if (allGames.length === 0) {
+      throw new Error('No analyzed games found. Make sure you have computer-analyzed games on Lichess.');
+    }
+
+    // Save username for auto-load
+    localStorage.setItem('mistakelab_username', username);
+
+    extractAllMistakes();
+    applyFilters();
+
+    // Load progress from Gist if configured
+    if (isGistConfigured()) {
+      await loadFromGist();
+    }
+
+    showMainApp();
+  } catch (e) {
+    err.textContent = e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Load games';
+  }
+}
+
+// ─── Mistake extraction ───
+function cpToWinPct(cp) {
+  return 100 / (1 + Math.pow(10, -cp / 400));
+}
+
+function extractAllMistakes() {
+  allMistakes = [];
+  for (const game of allGames) {
+    const moves = game.moves ? game.moves.split(' ') : [];
+    const analysis = game.analysis || [];
+    const isWhite = game.players?.white?.user?.name?.toLowerCase() === currentUsername.toLowerCase()
+                 || game.players?.white?.user?.id?.toLowerCase() === currentUsername.toLowerCase();
+    const playerColor = isWhite ? 'white' : 'black';
+
+    // Walk the moves, rebuild positions with chess.js
+    const chess = new Chess();
+    for (let i = 0; i < moves.length && i < analysis.length; i++) {
+      const fenBefore = chess.fen();
+      const san = moves[i];
+      const moveResult = chess.move(san, { sloppy: true });
+      if (!moveResult) continue;
+
+      // Only look at our moves
+      const ply = i + 1; // 1-indexed
+      const isOurMove = (playerColor === 'white' && ply % 2 === 1) ||
+                        (playerColor === 'black' && ply % 2 === 0);
+      if (!isOurMove) continue;
+
+      // We need eval BEFORE and AFTER this move
+      const evalBefore = i > 0 ? analysis[i - 1] : null;
+      const evalAfter = analysis[i];
+      if (!evalBefore || !evalAfter) continue;
+
+      const cpBefore = evalToCp(evalBefore, playerColor);
+      const cpAfter = evalToCp(evalAfter, playerColor);
+      const cpLoss = cpBefore - cpAfter;
+      const wpBefore = cpToWinPct(cpBefore);
+      const wpAfter = cpToWinPct(cpAfter);
+      const wpDrop = wpBefore - wpAfter;
+
+      if (wpDrop > 10) { // >10% win probability drop
+        allMistakes.push({
+          gameId: game.id,
+          game: game,
+          movePly: ply,
+          fenBefore: fenBefore,
+          sanPlayed: san,
+          cpLoss: Math.round(cpLoss),
+          cpBefore: Math.round(cpBefore),
+          cpAfter: Math.round(cpAfter),
+          wpDrop: Math.round(wpDrop * 10) / 10,
+          playerColor: playerColor,
+          moveNumber: Math.ceil(ply / 2),
+          bestEval: evalBefore,
+        });
+      }
+    }
+  }
+  // Sort by severity (biggest win% drop first)
+  allMistakes.sort((a, b) => b.wpDrop - a.wpDrop);
+}
+
+function evalToCp(evalObj, perspective) {
+  // Returns centipawns from perspective's point of view
+  let cp;
+  if (evalObj.eval !== undefined) {
+    cp = evalObj.eval; // from white's perspective
+  } else if (evalObj.mate !== undefined) {
+    cp = evalObj.mate > 0 ? 10000 : -10000;
+  } else {
+    return 0;
+  }
+  return perspective === 'white' ? cp : -cp;
+}
+
+// ─── Filters ───
+function setFilter(el) {
+  const filterType = el.dataset.filter;
+  const value = el.dataset.value;
+  filters[filterType] = value;
+
+  // Update active chips
+  document.querySelectorAll(`.filter-chip[data-filter="${filterType}"]`).forEach(c => c.classList.remove('active'));
+  el.classList.add('active');
+  applyFilters();
+  renderGameList();
+  // Reset position
+  if (activeGameId) selectGame(activeGameId);
+}
+
+function applyFilters() {
+  filteredMistakes = allMistakes.filter(m => {
+    if (filters.color !== 'both' && m.playerColor !== filters.color) return false;
+    if (filters.severity === 'blunders' && m.wpDrop < 15) return false;
+    return true;
+  });
+}
+
+// ─── Show main app ───
+function showMainApp() {
+  document.getElementById('loginScreen').classList.add('hidden');
+  document.getElementById('mainApp').classList.remove('hidden');
+  document.getElementById('sessionProgress').classList.remove('hidden');
+  document.getElementById('btnLogout').classList.remove('hidden');
+  document.getElementById('syncStatus').classList.remove('hidden');
+
+  if (isGistConfigured()) {
+    setSyncStatus('ok', 'Synced');
+  } else {
+    setSyncStatus('off', 'Not synced');
+  }
+
+  sessionTotal = filteredMistakes.length;
+  sessionCompleted = 0;
+  updateSessionProgress();
+  initBoard();
+  initStockfish();
+}
+
+function updateSessionProgress() {
+  const done = getCompletedSet();
+  sessionCompleted = filteredMistakes.filter(m => done.has(posId(m))).length;
+  sessionTotal = filteredMistakes.length;
+  document.getElementById('sessionText').textContent = `${sessionCompleted} / ${sessionTotal}`;
+  const pct = sessionTotal > 0 ? (sessionCompleted / sessionTotal * 100) : 0;
+  document.getElementById('sessionBar').style.width = pct + '%';
+
+  // Update review due count
+  buildReviewQueue();
+  const countEl = document.getElementById('reviewDueCount');
+  if (countEl) {
+    countEl.className = reviewQueue.length > 0 ? 'review-count' : 'review-count empty';
+    countEl.textContent = reviewQueue.length;
+  }
+
+  if (reviewMode) renderReviewList();
+  else renderGameList();
+}
+
+// ─── Game list rendering ───
+function renderGameList() {
+  const list = document.getElementById('gameList');
+  list.innerHTML = '';
+
+  // Group mistakes by game
+  const gameMap = new Map();
+  for (const g of allGames) {
+    const isWhite = g.players?.white?.user?.name?.toLowerCase() === currentUsername.toLowerCase()
+                 || g.players?.white?.user?.id?.toLowerCase() === currentUsername.toLowerCase();
+    const color = isWhite ? 'white' : 'black';
+    if (filters.color !== 'both' && color !== filters.color) continue;
+
+    const mistakes = filteredMistakes.filter(m => m.gameId === g.id);
+    gameMap.set(g.id, { game: g, mistakes, color });
+  }
+
+  const done = getCompletedSet();
+
+  for (const [gid, { game, mistakes, color }] of gameMap) {
+    const completedCount = mistakes.filter(m => done.has(posId(m))).length;
+    const allDone = mistakes.length > 0 && completedCount === mistakes.length;
+
+    const card = document.createElement('div');
+    card.className = `game-card${activeGameId === gid ? ' active' : ''}${allDone ? ' completed' : ''}`;
+    card.onclick = () => selectGame(gid);
+
+    const opening = game.opening?.name || game.pgn?.match(/\[Opening "([^"]+)"\]/)?.[1] || 'Unknown opening';
+    const date = game.createdAt ? new Date(game.createdAt).toLocaleDateString() : '';
+    const blunders = mistakes.filter(m => m.wpDrop >= 15).length;
+    const mistakeCount = mistakes.length;
+
+    let badgeClass, badgeText;
+    if (allDone) {
+      badgeClass = 'badge-done';
+      badgeText = '✓ Done';
+    } else if (mistakes.length === 0) {
+      badgeClass = 'badge-clean';
+      badgeText = 'Clean';
+    } else if (blunders > 0) {
+      badgeClass = 'badge-blunder';
+      badgeText = `${blunders} blunder${blunders>1?'s':''}`;
+    } else {
+      badgeClass = 'badge-mistake';
+      badgeText = `${mistakeCount} mistake${mistakeCount>1?'s':''}`;
+    }
+
+    // Always show progress on games with mistakes
+    const progressText = mistakes.length > 0
+      ? ` · ${completedCount}/${mistakes.length}`
+      : '';
+
+    card.innerHTML = `
+      <div class="game-card-top">
+        <div class="game-opening">${escHtml(opening)}</div>
+        <span class="game-mistakes-badge ${badgeClass}">${badgeText}</span>
+      </div>
+      <div class="game-meta">
+        <span class="game-color-dot ${color}"></span>
+        <span>${date}</span>
+        <span>·</span>
+        <span>${game.speed || ''}${progressText}</span>
+      </div>
+    `;
+    list.appendChild(card);
+  }
+}
+
+// ─── Review mode ───
+function toggleReviewMode() {
+  reviewMode = !reviewMode;
+  const btn = document.getElementById('btnReviewMode');
+  const title = document.getElementById('panelTitle');
+  const filterRows = document.querySelectorAll('.panel-header .filter-row');
+
+  if (reviewMode) {
+    btn.classList.add('btn-review-active');
+    title.textContent = 'Review';
+    filterRows.forEach(r => r.style.display = 'none');
+    buildReviewQueue();
+    renderReviewList();
+    // Auto-load first due position
+    if (reviewQueue.length > 0) {
+      const globalIdx = filteredMistakes.indexOf(reviewQueue[0]);
+      if (globalIdx >= 0) loadPosition(globalIdx);
+    }
+  } else {
+    btn.classList.remove('btn-review-active');
+    title.textContent = 'Games';
+    filterRows.forEach(r => r.style.display = '');
+    renderGameList();
+  }
+}
+
+function renderReviewList() {
+  const list = document.getElementById('gameList');
+  list.innerHTML = '';
+
+  if (reviewQueue.length === 0) {
+    list.innerHTML = `<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px;">
+      <div style="font-size:24px;margin-bottom:8px;">✓</div>
+      All caught up! No positions due for review.
+    </div>`;
+    return;
+  }
+
+  const today = new Date().toISOString().split('T')[0];
+
+  for (const m of reviewQueue) {
+    const pid = posId(m);
+    const card = getCardForPosition(pid);
+    const globalIdx = filteredMistakes.indexOf(m);
+    const isActive = globalIdx === currentMistakeIdx;
+
+    const item = document.createElement('div');
+    item.className = `review-item${isActive ? ' active' : ''}`;
+    item.onclick = () => loadPosition(globalIdx);
+
+    const opening = m.game?.opening?.name || 'Unknown';
+    const lossClass = m.wpDrop >= 15 ? 'loss-blunder' : 'loss-mistake';
+    const isNew = card.state === FSRS_STATE.new;
+    const isOverdue = !isNew && card.due && card.due < today;
+
+    let statusText;
+    if (isNew) {
+      statusText = '<span style="color:var(--blue)">New</span>';
+    } else if (isOverdue) {
+      statusText = '<span style="color:var(--red)">Overdue</span>';
+    } else {
+      statusText = '<span style="color:var(--yellow)">Due</span>';
+    }
+
+    item.innerHTML = `
+      <div class="review-item-top">
+        <span>Move ${m.moveNumber}${m.playerColor==='white'?'.':'…'} <span class="loss ${lossClass}">−${m.wpDrop}%</span></span>
+        ${statusText}
+      </div>
+      <div class="review-item-opening">${escHtml(opening)}</div>
+      <div class="review-srs-info">
+        ${!isNew ? `<span>reps: ${card.reps}</span><span>lapses: ${card.lapses}</span><span>stab: ${Math.round(card.stability)}d</span>` : '<span>First time</span>'}
+      </div>
+    `;
+    list.appendChild(item);
+  }
+}
+
+// ─── Board init ───
+function initBoard() {
+  if (boardObj) return;
+  boardObj = Chessboard('board', {
+    draggable: true,
+    position: 'start',
+    pieceTheme: 'https://lichess1.org/assets/piece/cburnett/{piece}.svg',
+    onDragStart: onDragStart,
+    onDrop: onDrop,
+    onSnapEnd: onSnapEnd,
+  });
+  window.addEventListener('resize', () => boardObj.resize());
+
+  // Click-to-move: capture phase so we fire before chessboard.js drag handlers
+  document.getElementById('board').addEventListener('mousedown', onBoardClick, true);
+}
+
+function onBoardClick(e) {
+  if (!gameEngine || browsingLine) return;
+  const m = filteredMistakes[currentMistakeIdx];
+  if (!m) return;
+
+  // Find which square was clicked
+  const squareEl = e.target.closest('[data-square]');
+  if (!squareEl) return;
+  const sq = squareEl.getAttribute('data-square');
+  if (!sq) return;
+
+  const turn = gameEngine.turn();
+  const piece = gameEngine.get(sq);
+
+  if (selectedSquare) {
+    if (sq === selectedSquare) {
+      clearSelection();
+      return; // let chessboard.js handle the mousedown (drag start) normally
+    }
+
+    // Clicking another own piece — reselect
+    if (piece && piece.color === turn) {
+      clearSelection();
+      selectSquare(sq);
+      return; // let drag start on the new piece
+    }
+
+    // Destination square (empty or enemy piece) — execute the move
+    e.stopPropagation(); // prevent chessboard.js from starting a drag on the enemy piece
+    e.preventDefault();
+
+    const move = gameEngine.move({
+      from: selectedSquare,
+      to: sq,
+      promotion: 'q'
+    });
+
+    clearSelection();
+    if (move) {
+      boardObj.position(gameEngine.fen());
+      currentAttempts++;
+      evaluateMove(move.from, move.to, move);
+    }
+  } else {
+    // Nothing selected — select if it's our piece (let drag also start via chessboard.js)
+    if (piece && piece.color === turn) {
+      selectSquare(sq);
+    }
+  }
+}
+
+function selectSquare(sq) {
+  selectedSquare = sq;
+  const el = document.querySelector(`.square-${sq}`);
+  if (el) el.classList.add('square-selected');
+
+  // Show legal move dots
+  if (gameEngine) {
+    const moves = gameEngine.moves({ square: sq, verbose: true });
+    for (const mv of moves) {
+      const targetEl = document.querySelector(`.square-${mv.to}`);
+      if (!targetEl) continue;
+      const targetPiece = gameEngine.get(mv.to);
+      if (targetPiece || mv.flags.includes('e')) {
+        targetEl.classList.add('square-legal-capture');
+      } else {
+        targetEl.classList.add('square-legal-dot');
+      }
+    }
+  }
+}
+
+function clearSelection() {
+  selectedSquare = null;
+  document.querySelectorAll('.square-selected, .square-legal-dot, .square-legal-capture')
+    .forEach(el => el.classList.remove('square-selected', 'square-legal-dot', 'square-legal-capture'));
+}
+
+// ─── Select game ───
+function selectGame(gameId) {
+  activeGameId = gameId;
+  const gameMistakes = filteredMistakes.filter(m => m.gameId === gameId);
+  if (gameMistakes.length === 0) {
+    clearBoard();
+    showFeedback('info', 'No mistakes', 'No matching mistakes found in this game with current filters.');
+    return;
+  }
+
+  // Find first unsolved
+  const done = getCompletedSet();
+  let idx = gameMistakes.findIndex(m => !done.has(posId(m)));
+  if (idx === -1) idx = 0; // all done, go to first
+
+  const globalIdx = filteredMistakes.indexOf(gameMistakes[idx]);
+  loadPosition(globalIdx);
+  renderGameList();
+  renderQueue();
+}
+
+// ─── Position queue ───
+function renderQueue() {
+  const panel = document.getElementById('queuePanel');
+  const list = document.getElementById('queueList');
+  if (!activeGameId) { panel.style.display = 'none'; return; }
+
+  const gameMistakes = filteredMistakes.filter(m => m.gameId === activeGameId);
+  if (gameMistakes.length === 0) { panel.style.display = 'none'; return; }
+
+  panel.style.display = '';
+  list.innerHTML = '';
+  const done = getCompletedSet();
+
+  for (const m of gameMistakes) {
+    const globalIdx = filteredMistakes.indexOf(m);
+    const isDone = done.has(posId(m));
+    const isActive = globalIdx === currentMistakeIdx;
+    const item = document.createElement('div');
+    item.className = `queue-item${isActive ? ' active' : ''}${isDone ? ' done' : ''}`;
+    item.onclick = () => loadPosition(globalIdx);
+
+    const lossClass = m.wpDrop >= 15 ? 'loss-blunder' : 'loss-mistake';
+    item.innerHTML = `
+      <span><span class="ply">${m.moveNumber}${m.playerColor==='white'?'.':'…'}</span> ???</span>
+      <span class="loss ${lossClass}">−${m.wpDrop}%</span>
+    `;
+    list.appendChild(item);
+  }
+}
+
+// ─── Load a position ───
+function loadPosition(globalIdx) {
+  if (globalIdx < 0 || globalIdx >= filteredMistakes.length) return;
+  currentMistakeIdx = globalIdx;
+  currentAttempts = 0;
+  firstAttemptFailed = false;
+  srsRecorded = false;
+  const m = filteredMistakes[globalIdx];
+
+  document.getElementById('emptyMsg').classList.add('hidden');
+  document.getElementById('btnRetry').classList.add('hidden');
+  document.getElementById('btnLichess').classList.remove('hidden');
+  preAnalysisPaused = false;
+  engineLine = null;
+  browsingLine = false;
+  clearHighlights();
+  hideArrow();
+
+  // Set up chess engine at the mistake position
+  gameEngine = new Chess(m.fenBefore);
+
+  // Set up board
+  boardObj.orientation(m.playerColor);
+  boardObj.position(m.fenBefore, true);
+
+  // Update counter
+  const gameMistakes = filteredMistakes.filter(mm => mm.gameId === m.gameId);
+  const localIdx = gameMistakes.indexOf(m);
+  document.getElementById('posCounter').textContent = `${localIdx + 1} / ${gameMistakes.length}`;
+
+  // Show position info
+  const infoCard = document.getElementById('posInfoCard');
+  infoCard.style.display = '';
+  document.getElementById('posInfoContent').innerHTML = `
+    <div style="font-size:13px;line-height:1.7">
+      <div>Move <code class="mono">${m.moveNumber}${m.playerColor==='white'?'.':'…'}</code> — win% dropped <span style="color:var(--red);font-weight:600">−${m.wpDrop}%</span> <span style="color:var(--text-muted)">(${m.cpLoss}cp)</span></div>
+      <div id="mistakeReveal">
+        <button class="btn btn-ghost btn-sm" style="margin-top:6px;font-size:11px;" onclick="this.parentElement.innerHTML='You played <code class=mono>${escHtml(m.sanPlayed)}</code>'">Show original mistake</button>
+      </div>
+      <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
+    </div>
+  `;
+
+  // Clear feedback
+  document.getElementById('feedbackContainer').innerHTML = '';
+  renderQueue();
+  updateSessionProgress();
+
+  // Stream pre-analysis (runs up to depth 30 while user thinks)
+  startPreAnalysis(m.fenBefore);
+}
+
+// ─── Board interaction ───
+function onDragStart(source, piece) {
+  if (!gameEngine || browsingLine) return false;
+  const m = filteredMistakes[currentMistakeIdx];
+  if (!m) return false;
+  if (gameEngine.game_over()) return false;
+  // Check it's the right color's turn
+  if ((gameEngine.turn() === 'w' && piece.search(/^b/) !== -1) ||
+      (gameEngine.turn() === 'b' && piece.search(/^w/) !== -1)) {
+    return false;
+  }
+  return true;
+}
+
+function onDrop(source, target) {
+  if (!gameEngine) return 'snapback';
+
+  const move = gameEngine.move({
+    from: source,
+    to: target,
+    promotion: 'q'
+  });
+
+  if (move === null) return 'snapback';
+
+  clearSelection();
+  currentAttempts++;
+  evaluateMove(source, target, move);
+  return undefined; // allow the drop
+}
+
+function onSnapEnd() {
+  if (gameEngine) boardObj.position(gameEngine.fen());
+}
+
+// ─── Evaluate the user's move via Stockfish ───
+async function evaluateMove(from, to, move) {
+  const m = filteredMistakes[currentMistakeIdx];
+  const container = document.getElementById('feedbackContainer');
+
+  if (!sfReady) {
+    showFeedback('info', 'Engine loading…', 'Stockfish is still initializing. Try again in a moment.');
+    gameEngine.undo();
+    boardObj.position(gameEngine.fen());
+    currentAttempts--;
+    return;
+  }
+
+  // Show loading
+  const loadingId = 'eval-loading-' + Date.now();
+  container.innerHTML = `<div id="${loadingId}" class="feedback-box info">
+    <div class="feedback-title">Evaluating…</div>
+    <div class="feedback-text"><div class="spinner" style="margin:8px 0"></div></div>
+  </div>` + container.innerHTML;
+
+  try {
+    let bestCp, bestMoveUci, bestMoveSan;
+
+    // Wait for pre-analysis to reach at least depth 16
+    const pre = await waitForPreAnalysis(16);
+
+    if (pre && preAnalysisFen === m.fenBefore) {
+      bestCp = pre.bestCp;
+      bestMoveUci = pre.bestMove;
+      bestMoveSan = pre.pvs[0]?.san || uciToSan(m.fenBefore, bestMoveUci);
+
+      // Check if the user's move matches one of the pre-analyzed PVs
+      const userUci = from + to + (move.promotion || '');
+      const matchedPv = pre.pvs.find(pv => pv.move === userUci);
+      if (matchedPv) {
+        const loadEl = document.getElementById(loadingId);
+        if (loadEl) loadEl.remove();
+        const cpLoss = bestCp - matchedPv.cp;
+        // Continuation: user's move + rest of PV (drop first UCI move since that's the user's move)
+        const contUci = matchedPv.uciLine ? matchedPv.uciLine.split(' ').slice(1).join(' ') : '';
+        handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUci);
+        return;
+      }
+    } else {
+      // Pre-analysis failed — stop it and run a quick one-shot
+      stopPreAnalysis();
+      const preResult = await sfAnalyze(m.fenBefore, 16, 1);
+      bestCp = preResult?.pvs[0]?.cp ?? 0;
+      bestMoveUci = preResult?.bestMove || '?';
+      bestMoveSan = uciToSan(m.fenBefore, bestMoveUci);
+    }
+
+    // User's move wasn't in the top PVs — stop pre-analysis and analyze the result
+    stopPreAnalysis();
+    const afterFen = gameEngine.fen();
+    const afterResult = await sfAnalyze(afterFen, 16, 1);
+
+    const loadEl = document.getElementById(loadingId);
+    if (loadEl) loadEl.remove();
+
+    if (!afterResult) {
+      showFeedback('info', 'Analysis error', 'Stockfish returned no result. Try again.');
+      gameEngine.undo();
+      boardObj.position(gameEngine.fen());
+      return;
+    }
+
+    // afterResult.cp is from opponent's perspective — negate for ours
+    const afterCp = -(afterResult.pvs[0]?.cp ?? 0);
+    const cpLoss = bestCp - afterCp;
+
+    // Continuation from the resulting position's analysis
+    const contUci = afterResult.pvs[0]?.moves || '';
+    handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUci);
+
+  } catch (err) {
+    const loadEl = document.getElementById(loadingId);
+    if (loadEl) loadEl.remove();
+    showFeedback('info', 'Error', 'Analysis failed: ' + escHtml(err.message));
+    gameEngine.undo();
+    boardObj.position(gameEngine.fen());
+  }
+}
+
+// ─── Win% Drop → Color gradient ───
+function wpDropToColor(wpDrop) {
+  const stops = [
+    [0,   62, 207, 142],   // pure green — best move
+    [2,   110, 200, 90],   // green — excellent
+    [5,   180, 200, 50],   // yellow-green — good enough threshold
+    [10,  230, 170, 50],   // orange-yellow — inaccurate
+    [15,  239, 120, 60],   // orange — bad
+    [25,  239, 95, 95],    // pure red — blunder
+  ];
+  return lerpStops(stops, wpDrop, false);
+}
+
+function wpDropToColorDim(wpDrop) {
+  const stops = [
+    [0,   62, 207, 142],
+    [2,   110, 200, 90],
+    [5,   180, 200, 50],
+    [10,  230, 170, 50],
+    [15,  239, 120, 60],
+    [25,  239, 95, 95],
+  ];
+  return lerpStops(stops, wpDrop, true);
+}
+
+function lerpStops(stops, val, dim) {
+  val = Math.max(0, val);
+  if (val >= stops[stops.length - 1][0]) {
+    const s = stops[stops.length - 1];
+    return dim ? `rgba(${s[1]},${s[2]},${s[3]},0.10)` : `rgb(${s[1]},${s[2]},${s[3]})`;
+  }
+  for (let i = 0; i < stops.length - 1; i++) {
+    if (val <= stops[i + 1][0]) {
+      const t = (val - stops[i][0]) / (stops[i + 1][0] - stops[i][0]);
+      const r = Math.round(stops[i][1] + t * (stops[i + 1][1] - stops[i][1]));
+      const g = Math.round(stops[i][2] + t * (stops[i + 1][2] - stops[i][2]));
+      const b = Math.round(stops[i][3] + t * (stops[i + 1][3] - stops[i][3]));
+      return dim ? `rgba(${r},${g},${b},0.10)` : `rgb(${r},${g},${b})`;
+    }
+  }
+  return dim ? 'rgba(239,95,95,0.10)' : 'rgb(239,95,95)';
+}
+
+function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUci) {
+  const wpBefore = cpToWinPct(bestCp);
+  const wpAfter = cpToWinPct(bestCp - cpLoss);
+  const wpDrop = wpBefore - wpAfter;
+
+  const color = wpDropToColor(wpDrop);
+  const colorDim = wpDropToColorDim(wpDrop);
+  const bestMoveUci = preAnalysis?.bestMove;
+  const revealId = 'reveal-' + Date.now();
+  const wpStr = Math.round(wpDrop * 10) / 10;
+  const pid = posId(m);
+
+  if (wpDrop <= 5) {
+    clearHighlights();
+    highlightSquaresWithColor(from, to, color);
+    const isExactBest = move.san === bestMoveSan;
+
+    // Compute SRS grade
+    let grade, gradeLabel;
+    if (firstAttemptFailed) {
+      grade = FSRS_GRADE.again; gradeLabel = 'Again';
+    } else if (isExactBest) {
+      grade = FSRS_GRADE.easy; gradeLabel = 'Easy';
+    } else {
+      grade = FSRS_GRADE.good; gradeLabel = 'Good';
+    }
+
+    let title, body;
+    if (isExactBest && !firstAttemptFailed) {
+      title = 'Best move!';
+      body = `<code>${escHtml(move.san)}</code> is the engine's top choice.`;
+    } else if (wpDrop <= 2) {
+      title = firstAttemptFailed ? 'Got it on retry' : 'Excellent!';
+      body = `<code>${escHtml(move.san)}</code> is nearly as good as the best move (−${wpStr}% win).` +
+        bestMoveButton(revealId, bestMoveSan, bestMoveUci, m);
+    } else {
+      title = firstAttemptFailed ? 'Got it on retry' : 'Good enough!';
+      body = `<code>${escHtml(move.san)}</code> is a reasonable alternative (−${wpStr}% win, −${Math.round(cpLoss)}cp).` +
+        bestMoveButton(revealId, bestMoveSan, bestMoveUci, m);
+    }
+
+    let srsInfo = '';
+    if (!srsRecorded) {
+      const srsCard = recordReview(pid, grade);
+      srsRecorded = true;
+      srsInfo = srsTag(gradeLabel, srsCard);
+    }
+    showColorFeedback(color, colorDim, title, body + srsInfo);
+    updateSessionProgress();
+    renderQueue();
+  } else if (wpDrop <= 10) {
+    clearHighlights();
+    highlightSquaresWithColor(from, to, color);
+
+    let grade, gradeLabel;
+    if (firstAttemptFailed) {
+      grade = FSRS_GRADE.again; gradeLabel = 'Again';
+    } else {
+      grade = FSRS_GRADE.hard; gradeLabel = 'Hard';
+    }
+
+    let srsInfo2 = '';
+    if (!srsRecorded) {
+      const srsCard = recordReview(pid, grade);
+      srsRecorded = true;
+      srsInfo2 = srsTag(gradeLabel, srsCard);
+    }
+    showColorFeedback(color, colorDim, 'Inaccurate',
+      `<code>${escHtml(move.san)}</code> loses ${wpStr}% winning chances (−${Math.round(cpLoss)}cp).` +
+      bestMoveButton(revealId, bestMoveSan, bestMoveUci, m) +
+      `<div class="attempts-indicator">${renderAttemptDots()}</div>` +
+      srsInfo2);
+    updateSessionProgress();
+    renderQueue();
+  } else {
+    // Wrong move — mark first attempt as failed
+    if (currentAttempts === 1) firstAttemptFailed = true;
+
+    showColorFeedback(color, colorDim, 'Not quite',
+      `<code>${escHtml(move.san)}</code> loses ${wpStr}% winning chances (−${Math.round(cpLoss)}cp). Try again!` +
+      bestMoveButton(revealId, bestMoveSan, bestMoveUci, m) +
+      `<div class="attempts-indicator">${renderAttemptDots()}</div>`);
+
+    gameEngine.undo();
+    boardObj.position(gameEngine.fen());
+
+    if (currentAttempts >= 3) {
+      revealBestMove(bestMoveUci, m);
+      if (!srsRecorded) {
+        const srsCard = recordReview(pid, FSRS_GRADE.again);
+        srsRecorded = true;
+        showFeedback('info', 'SRS: Again', `Next review: ${srsCard.due}`);
+      }
+      updateSessionProgress();
+      renderQueue();
+    }
+  }
+
+  document.getElementById('btnRetry').classList.remove('hidden');
+  buildEngineLine(m.fenBefore, move, contUci || '');
+}
+
+function srsTag(gradeLabel, card) {
+  const colors = { Easy: 'var(--green)', Good: 'var(--green)', Hard: 'var(--yellow)', Again: 'var(--red)' };
+  return `<div style="margin-top:8px;font-size:11px;color:var(--text-muted);">` +
+    `SRS: <span style="color:${colors[gradeLabel] || 'var(--text-secondary)'};font-weight:600;">${gradeLabel}</span>` +
+    ` · next review: <span class="mono">${card.due || 'today'}</span>` +
+    `</div>`;
+}
+
+function bestMoveButton(revealId, bestMoveSan, bestMoveUci, m) {
+  // Store reveal data on window so the onclick can access it
+  window['_rev_' + revealId] = { bestMoveSan, bestMoveUci, m };
+  return `<div id="${revealId}" style="margin-top:6px;">` +
+    `<button class="btn btn-ghost btn-sm" style="font-size:11px;" ` +
+    `onclick="onRevealBestMove('${revealId}')">Show engine's best</button></div>`;
+}
+
+function onRevealBestMove(revealId) {
+  const data = window['_rev_' + revealId];
+  if (!data) return;
+  const { bestMoveSan, bestMoveUci, m } = data;
+  const el = document.getElementById(revealId);
+  if (el) {
+    el.innerHTML = `<span style="font-size:12px;">Engine's top pick: <code>${escHtml(bestMoveSan)}</code></span>`;
+  }
+  // Reset board to original puzzle position
+  exitEngineLine();
+  gameEngine = new Chess(m.fenBefore);
+  boardObj.position(m.fenBefore, false);
+  if (bestMoveUci) {
+    const fromSq = bestMoveUci.substring(0, 2);
+    const toSq = bestMoveUci.substring(2, 4);
+    clearHighlights();
+    highlightSquaresWithColor(fromSq, toSq, 'rgb(62,207,142)');
+    drawArrow(fromSq, toSq);
+  }
+}
+
+function revealBestMove(bestMoveUci, m) {
+  if (!bestMoveUci) return;
+  // Reset board to original puzzle position
+  exitEngineLine();
+  gameEngine = new Chess(m.fenBefore);
+  boardObj.position(m.fenBefore, false);
+  const bestSan = uciToSan(m.fenBefore, bestMoveUci);
+  const fromSq = bestMoveUci.substring(0, 2);
+  const toSq = bestMoveUci.substring(2, 4);
+  clearHighlights();
+  highlightSquaresWithColor(fromSq, toSq, 'rgb(62,207,142)');
+  drawArrow(fromSq, toSq);
+  showFeedback('info', 'Best move revealed',
+    `The engine's top choice is <code>${escHtml(bestSan)}</code>.`);
+}
+
+function showColorFeedback(borderColor, bgColor, title, text) {
+  const container = document.getElementById('feedbackContainer');
+  const div = document.createElement('div');
+  div.className = 'feedback-box';
+  div.style.cssText = `background:${bgColor};border-left:3px solid ${borderColor};`;
+  div.innerHTML = `<div class="feedback-title" style="color:${borderColor}">${title}</div><div class="feedback-text">${text}</div>`;
+  container.insertBefore(div, container.firstChild);
+  while (container.children.length > 5) container.removeChild(container.lastChild);
+}
+
+// ─── UCI to SAN conversion ───
+function uciToSan(fen, uci) {
+  try {
+    const c = new Chess(fen);
+    const from = uci.substring(0, 2);
+    const to = uci.substring(2, 4);
+    const promo = uci.length > 4 ? uci[4] : undefined;
+    const move = c.move({ from, to, promotion: promo });
+    return move ? move.san : uci;
+  } catch {
+    return uci;
+  }
+}
+
+// ─── Engine Line Browser ───
+function buildEngineLine(baseFen, userMove, contUci) {
+  // Build a sequence: user's move + engine continuation
+  const chess = new Chess(baseFen);
+  const moves = [];
+
+  // The user's move is move index 0
+  chess.move({ from: userMove.from, to: userMove.to, promotion: userMove.promotion || undefined });
+  moves.push({
+    san: userMove.san,
+    uci: userMove.from + userMove.to + (userMove.promotion || ''),
+    fen: chess.fen(),
+    isUser: true,
+  });
+
+  // Parse continuation UCI moves
+  if (contUci) {
+    const uciMoves = contUci.trim().split(/\s+/).filter(Boolean);
+    for (const uci of uciMoves) {
+      const from = uci.substring(0, 2);
+      const to = uci.substring(2, 4);
+      const promo = uci.length > 4 ? uci[4] : undefined;
+      const result = chess.move({ from, to, promotion: promo });
+      if (!result) break;
+      moves.push({
+        san: result.san,
+        uci: uci,
+        fen: chess.fen(),
+        isUser: false,
+      });
+    }
+  }
+
+  if (moves.length <= 1) return; // no continuation to show
+
+  engineLine = { baseFen, moves, currentIdx: 0 }; // start highlighting user's move
+  renderEngineLine();
+}
+
+function renderEngineLine() {
+  if (!engineLine) return;
+  const container = document.getElementById('feedbackContainer');
+
+  // Remove previous engine line if any
+  const existing = document.getElementById('engineLineBox');
+  if (existing) existing.remove();
+
+  const div = document.createElement('div');
+  div.className = 'engine-line';
+  div.id = 'engineLineBox';
+
+  // Determine starting move number from the base FEN
+  const fenParts = engineLine.baseFen.split(' ');
+  let moveNum = parseInt(fenParts[5]) || 1;
+  let isWhiteTurn = fenParts[1] === 'w';
+
+  let movesHtml = '';
+  for (let i = 0; i < engineLine.moves.length; i++) {
+    const mv = engineLine.moves[i];
+    const activeClass = i === engineLine.currentIdx ? ' active' : '';
+    const userClass = mv.isUser ? ' user-move' : '';
+
+    if (isWhiteTurn) {
+      movesHtml += `<span class="move-num">${moveNum}.</span>`;
+    } else if (i === 0) {
+      movesHtml += `<span class="move-num">${moveNum}…</span>`;
+    }
+
+    movesHtml += `<span class="move${activeClass}${userClass}" onclick="goToLineMove(${i})">${escHtml(mv.san)}</span> `;
+
+    if (!isWhiteTurn) moveNum++;
+    isWhiteTurn = !isWhiteTurn;
+  }
+
+  div.innerHTML = `
+    <h4>Engine Line</h4>
+    <div class="engine-line-moves">${movesHtml}</div>
+    <div class="engine-line-nav">
+      <button class="btn btn-ghost btn-sm" onclick="lineStep(-1)">‹</button>
+      <button class="btn btn-ghost btn-sm" onclick="lineStep(1)">›</button>
+      <button class="btn btn-ghost btn-sm" onclick="exitEngineLine()">Back</button>
+      <span class="hint">← → to step</span>
+    </div>
+  `;
+
+  // Insert after the first feedback box
+  const firstFeedback = container.querySelector('.feedback-box');
+  if (firstFeedback) {
+    firstFeedback.insertAdjacentElement('afterend', div);
+  } else {
+    container.insertBefore(div, container.firstChild);
+  }
+}
+
+function goToLineMove(idx) {
+  if (!engineLine || idx < -1 || idx >= engineLine.moves.length) return;
+  engineLine.currentIdx = idx;
+  browsingLine = true;
+
+  if (idx === -1) {
+    // Back to base position (before user's move)
+    boardObj.position(engineLine.baseFen, false);
+  } else {
+    boardObj.position(engineLine.moves[idx].fen, false);
+    // Highlight the move
+    const uci = engineLine.moves[idx].uci;
+    const from = uci.substring(0, 2);
+    const to = uci.substring(2, 4);
+    clearHighlights();
+    highlightSquaresWithColor(from, to, engineLine.moves[idx].isUser ? 'rgb(124,108,240)' : 'rgb(91,156,240)');
+  }
+
+  // Update active class in the move list
+  const moveEls = document.querySelectorAll('#engineLineBox .move');
+  moveEls.forEach((el, i) => {
+    el.classList.toggle('active', i === idx);
+  });
+}
+
+function lineStep(delta) {
+  if (!engineLine) return;
+  const newIdx = engineLine.currentIdx + delta;
+  if (newIdx >= -1 && newIdx < engineLine.moves.length) {
+    goToLineMove(newIdx);
+  }
+}
+
+function exitEngineLine() {
+  browsingLine = false;
+
+  if (engineLine) {
+    // Restore the puzzle position
+    const m = filteredMistakes[currentMistakeIdx];
+    if (m && gameEngine) {
+      boardObj.position(gameEngine.fen(), false);
+    }
+  }
+
+  engineLine = null;
+  const box = document.getElementById('engineLineBox');
+  if (box) box.remove();
+  clearHighlights();
+}
+
+// ─── Navigation ───
+function prevPosition() {
+  if (currentMistakeIdx <= 0) return;
+  if (reviewMode) {
+    const currentInQueue = reviewQueue.findIndex(m => filteredMistakes.indexOf(m) === currentMistakeIdx);
+    if (currentInQueue > 0) {
+      loadPosition(filteredMistakes.indexOf(reviewQueue[currentInQueue - 1]));
+    }
+    return;
+  }
+  const m = filteredMistakes[currentMistakeIdx];
+  const gameMistakes = filteredMistakes.filter(mm => mm.gameId === m.gameId);
+  const localIdx = gameMistakes.indexOf(m);
+  if (localIdx > 0) {
+    loadPosition(filteredMistakes.indexOf(gameMistakes[localIdx - 1]));
+  }
+}
+
+function nextPosition() {
+  if (currentMistakeIdx < 0) return;
+  if (reviewMode) {
+    advanceReviewQueue();
+    return;
+  }
+  const m = filteredMistakes[currentMistakeIdx];
+  const gameMistakes = filteredMistakes.filter(mm => mm.gameId === m.gameId);
+  const localIdx = gameMistakes.indexOf(m);
+  if (localIdx < gameMistakes.length - 1) {
+    loadPosition(filteredMistakes.indexOf(gameMistakes[localIdx + 1]));
+  }
+}
+
+function skipPosition() {
+  if (currentMistakeIdx < 0) return;
+  const m = filteredMistakes[currentMistakeIdx];
+  // Skip = record as "Again" so it comes back soon (only if not already graded)
+  if (!srsRecorded) {
+    recordReview(posId(m), FSRS_GRADE.again);
+    srsRecorded = true;
+  }
+  updateSessionProgress();
+  if (reviewMode) {
+    advanceReviewQueue();
+  } else {
+    const gameMistakes = filteredMistakes.filter(mm => mm.gameId === m.gameId);
+    const localIdx = gameMistakes.indexOf(m);
+    if (localIdx < gameMistakes.length - 1) {
+      loadPosition(filteredMistakes.indexOf(gameMistakes[localIdx + 1]));
+    } else {
+      renderQueue();
+      showFeedback('info', 'Skipped', 'Position marked as seen. No more positions in this game.');
+    }
+  }
+}
+
+function advanceReviewQueue() {
+  buildReviewQueue();
+  // Find next position in queue that isn't the current one
+  const next = reviewQueue.find(m => filteredMistakes.indexOf(m) !== currentMistakeIdx);
+  if (next) {
+    loadPosition(filteredMistakes.indexOf(next));
+  } else {
+    showFeedback('info', 'Review complete', 'No more positions due for review!');
+    renderReviewList();
+  }
+}
+
+function retryPosition() {
+  if (currentMistakeIdx < 0) return;
+  const m = filteredMistakes[currentMistakeIdx];
+
+  currentAttempts = 0;
+  firstAttemptFailed = false;
+  document.getElementById('btnRetry').classList.add('hidden');
+  engineLine = null;
+  browsingLine = false;
+  clearHighlights();
+  hideArrow();
+
+  // Reset chess engine and board to original position
+  gameEngine = new Chess(m.fenBefore);
+  boardObj.position(m.fenBefore, true);
+
+  // Reset info card (keep analysis status)
+  document.getElementById('posInfoContent').innerHTML = `
+    <div style="font-size:13px;line-height:1.7">
+      <div>Move <code class="mono">${m.moveNumber}${m.playerColor==='white'?'.':'…'}</code> — win% dropped <span style="color:var(--red);font-weight:600">−${m.wpDrop}%</span> <span style="color:var(--text-muted)">(${m.cpLoss}cp)</span></div>
+      <div id="mistakeReveal">
+        <button class="btn btn-ghost btn-sm" style="margin-top:6px;font-size:11px;" onclick="this.parentElement.innerHTML='You played <code class=mono>${escHtml(m.sanPlayed)}</code>'">Show original mistake</button>
+      </div>
+      <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)"></div>
+    </div>
+  `;
+  updatePreAnalysisUI();
+
+  document.getElementById('feedbackContainer').innerHTML = '';
+}
+
+// ─── UI Helpers ───
+function showFeedback(type, title, text, prepend = false) {
+  const container = document.getElementById('feedbackContainer');
+  const div = document.createElement('div');
+  div.className = `feedback-box ${type}`;
+  div.innerHTML = `<div class="feedback-title">${title}</div><div class="feedback-text">${text}</div>`;
+  if (prepend) {
+    container.insertBefore(div, container.firstChild);
+  } else {
+    container.insertBefore(div, container.firstChild);
+  }
+  // Keep max 5 feedback entries
+  while (container.children.length > 5) container.removeChild(container.lastChild);
+}
+
+function renderAttemptDots() {
+  let dots = '';
+  for (let i = 0; i < 3; i++) {
+    dots += `<div class="attempt-dot${i < currentAttempts ? ' used' : ''}"></div>`;
+  }
+  return dots;
+}
+
+function clearBoard() {
+  if (boardObj) boardObj.position('start');
+  gameEngine = null;
+  document.getElementById('posInfoCard').style.display = 'none';
+  document.getElementById('feedbackContainer').innerHTML = '';
+  document.getElementById('posCounter').textContent = '—';
+}
+
+function clearHighlights() {
+  document.querySelectorAll('[data-hl]')
+    .forEach(el => {
+      el.style.removeProperty('background-color');
+      el.removeAttribute('data-hl');
+    });
+  clearSelection();
+}
+
+function highlightSquaresWithColor(from, to, color) {
+  const match = color.match(/(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+  if (!match) return;
+  const [, r, g, b] = match;
+  const fromColor = `rgba(${r},${g},${b},0.4)`;
+  const toColor = `rgba(${r},${g},${b},0.6)`;
+  
+  const fromEl = document.querySelector(`.square-${from}`);
+  const toEl = document.querySelector(`.square-${to}`);
+  if (fromEl) { fromEl.style.setProperty('background-color', fromColor, 'important'); fromEl.setAttribute('data-hl', '1'); }
+  if (toEl) { toEl.style.setProperty('background-color', toColor, 'important'); toEl.setAttribute('data-hl', '1'); }
+}
+
+// ─── Arrow drawing ───
+function drawArrow(from, to) {
+  const svg = document.getElementById('arrowSvg');
+  const boardEl = document.getElementById('board');
+  const rect = boardEl.getBoundingClientRect();
+  const sqSize = rect.width / 8;
+
+  svg.classList.remove('hidden');
+  svg.setAttribute('width', rect.width);
+  svg.setAttribute('height', rect.height);
+  svg.style.width = rect.width + 'px';
+  svg.style.height = rect.height + 'px';
+
+  const m = filteredMistakes[currentMistakeIdx];
+  const flipped = m && m.playerColor === 'black';
+
+  const coords = (sq) => {
+    const file = sq.charCodeAt(0) - 97; // a=0
+    const rank = parseInt(sq[1]) - 1;   // 1=0
+    const x = flipped ? (7 - file) * sqSize + sqSize / 2 : file * sqSize + sqSize / 2;
+    const y = flipped ? rank * sqSize + sqSize / 2 : (7 - rank) * sqSize + sqSize / 2;
+    return { x, y };
+  };
+
+  const f = coords(from), t = coords(to);
+
+  svg.innerHTML = `
+    <defs>
+      <marker id="arrowhead" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+        <polygon points="0 0, 10 4, 0 8" fill="var(--green)" opacity="0.85"/>
+      </marker>
+    </defs>
+    <line x1="${f.x}" y1="${f.y}" x2="${t.x}" y2="${t.y}"
+          stroke="var(--green)" stroke-width="6" stroke-opacity="0.7"
+          stroke-linecap="round" marker-end="url(#arrowhead)"/>
+  `;
+}
+
+function hideArrow() {
+  const svg = document.getElementById('arrowSvg');
+  svg.classList.add('hidden');
+  svg.innerHTML = '';
+}
+
+function escHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s || '';
+  return d.innerHTML;
+}
+
+// ─── Keyboard shortcuts ───
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    if (browsingLine) { exitEngineLine(); return; }
+    closeSettings();
+  }
+  if (e.target.tagName === 'INPUT') return;
+  // Arrow keys: engine line stepping takes priority
+  if (e.key === 'ArrowLeft') { if (engineLine) lineStep(-1); else prevPosition(); return; }
+  if (e.key === 'ArrowRight') { if (engineLine) lineStep(1); else nextPosition(); return; }
+  if (e.key === 's' || e.key === 'S') skipPosition();
+  if (e.key === 'r' || e.key === 'R') { if (!document.getElementById('btnRetry').classList.contains('hidden')) retryPosition(); }
+});
+
+// Flush pending sync before page unload
+window.addEventListener('beforeunload', () => {
+  if (syncDebounceTimer && gistData && isGistConfigured()) {
+    clearTimeout(syncDebounceTimer);
+    // Best-effort sync (may be cancelled by browser)
+    syncToGist();
+  }
+});
+</script>
+</body>
+</html>
