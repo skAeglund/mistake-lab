@@ -41,6 +41,13 @@
     overflow-x: hidden;
   }
 
+  #arrowSvg {
+    position: absolute;
+    top: 0;
+    left: 0;
+    pointer-events: none;
+    z-index: 100;
+  }
   /* Header */
   .header {
     display: flex;
@@ -407,12 +414,6 @@
   }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  /* Arrow overlay for revealing best move */
-  .arrow-overlay {
-    position: absolute; top: 0; left: 0;
-    pointer-events: none; z-index: 10;
-  }
-
   /* Misc */
   .hidden { display: none !important; }
   .mono { font-family: 'JetBrains Mono', monospace; }
@@ -606,7 +607,7 @@
   <div class="panel-center">
     <div class="board-container" id="boardContainer">
       <div id="board" style="width:100%"></div>
-      <svg class="arrow-overlay hidden" id="arrowSvg"></svg>
+      <svg class="hidden" id="arrowSvg"></svg>
     </div>
     <div class="position-nav" id="positionNav">
       <button class="btn btn-ghost btn-sm" onclick="prevPosition()">← Prev</button>
@@ -664,6 +665,13 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/chessboard-1.0.0.min.js"></script>
 <script>
 // ─── State ───
+// ─── Arrow drawing ───
+let arrowStartSquare = null;
+let activeArrows = new Set(); // Stores strings like "e2e4"
+let ghostArrow = null; // { from: 'e2', to: 'e4' }
+let bestMoveArrow = null; // { from: 'e2', to: 'e4' } — shown for engine best move reveals
+let isRightClicking = false;
+
 let currentUsername = '';
 let allGames = [];           // raw game objects from Lichess
 let allMistakes = [];        // extracted mistake positions
@@ -1810,16 +1818,35 @@ function initBoard() {
     onDrop: onDrop,
     onSnapEnd: onSnapEnd,
   });
-  window.addEventListener('resize', () => boardObj.resize());
-
+  window.addEventListener('resize', () => { boardObj.resize(); renderArrows(); });
+  initArrowListeners();
   // Click-to-move: capture phase so we fire before chessboard.js drag handlers
   document.getElementById('board').addEventListener('mousedown', onBoardClick, true);
 }
-
+    
 function onBoardClick(e) {
+  isRightClicking = (e.button === 2);
+  // Left click clears arrows 
+  if (!isRightClicking) {
+    clearArrows();
+  }
+  
+  // Right click starts drawing 
+  else {
+    const sq = getSquareFromMouseEvent(e);
+    if (sq) {
+      arrowStartSquare = sq;
+      ghostArrow = null;
+    }
+    return;
+  }
+
   if (!gameEngine || browsingLine) return;
+
   const m = filteredMistakes[currentMistakeIdx];
   if (!m) return;
+
+  
 
   // Find which square was clicked
   const squareEl = e.target.closest('[data-square]');
@@ -1913,6 +1940,7 @@ function selectGame(gameId) {
   loadPosition(globalIdx);
   renderGameList();
   renderQueue();
+  clearArrows();
 }
 
 // ─── Position queue ───
@@ -2005,6 +2033,7 @@ function loadPosition(globalIdx) {
 // ─── Board interaction ───
 function onDragStart(source, piece) {
   if (!gameEngine || browsingLine) return false;
+  if (isRightClicking) return false;
   const m = filteredMistakes[currentMistakeIdx];
   if (!m) return false;
   if (gameEngine.game_over()) return false;
@@ -2018,7 +2047,7 @@ function onDragStart(source, piece) {
 
 function onDrop(source, target) {
   if (!gameEngine) return 'snapback';
-
+  clearArrows();
   const move = gameEngine.move({
     from: source,
     to: target,
@@ -2535,6 +2564,7 @@ function exitEngineLine() {
 // ─── Navigation ───
 function prevPosition() {
   if (currentMistakeIdx <= 0) return;
+  clearArrows()
   if (reviewMode) {
     const currentInQueue = reviewQueue.findIndex(m => filteredMistakes.indexOf(m) === currentMistakeIdx);
     if (currentInQueue > 0) {
@@ -2552,6 +2582,7 @@ function prevPosition() {
 
 function nextPosition() {
   if (currentMistakeIdx < 0) return;
+  clearArrows()
   if (reviewMode) {
     advanceReviewQueue();
     return;
@@ -2566,6 +2597,7 @@ function nextPosition() {
 
 function skipPosition() {
   if (currentMistakeIdx < 0) return;
+  clearArrows()
   const m = filteredMistakes[currentMistakeIdx];
   // Skip = record as "Again" so it comes back soon (only if not already graded)
   if (!srsRecorded) {
@@ -2683,48 +2715,167 @@ function highlightSquaresWithColor(from, to, color) {
   if (toEl) { toEl.style.setProperty('background-color', toColor, 'important'); toEl.setAttribute('data-hl', '1'); }
 }
 
-// ─── Arrow drawing ───
-function drawArrow(from, to) {
-  const svg = document.getElementById('arrowSvg');
+// Initialize listeners once the board is ready
+function initArrowListeners() {
   const boardEl = document.getElementById('board');
+
+  // Disable context menu on the board to allow RMB drawing
+  boardEl.addEventListener('contextmenu', (e) => e.preventDefault());
+
+
+  window.addEventListener('mousemove', (e) => {
+    if (!arrowStartSquare) return;
+    
+    const currentSq = getSquareFromMouseEvent(e);
+    if (currentSq && currentSq !== arrowStartSquare) {
+      ghostArrow = { from: arrowStartSquare, to: currentSq };
+      renderArrows();
+    }
+  });
+
+  window.addEventListener('mouseup', (e) => {
+    if (e.button === 2 && arrowStartSquare) {
+      const endSq = getSquareFromMouseEvent(e);
+      
+      if (endSq && endSq !== arrowStartSquare) {
+        const arrowKey = `${arrowStartSquare}${endSq}`;
+        // Toggle behavior
+        if (activeArrows.has(arrowKey)) {
+          activeArrows.delete(arrowKey);
+        } else {
+          activeArrows.add(arrowKey);
+        }
+      }
+      
+      arrowStartSquare = null;
+      ghostArrow = null;
+      isRightClicking = false;
+      renderArrows();
+    }
+  });
+}
+
+function getSquareFromMouseEvent(e) {
+  const boardEl = document.querySelector('#board [class^="board-"]');
   const rect = boardEl.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+  
+  if (x < 0 || y < 0 || x > rect.width || y > rect.height) return null;
+
   const sqSize = rect.width / 8;
+  let fileIdx = Math.floor(x / sqSize);
+  let rankIdx = Math.floor(y / sqSize);
 
-  svg.classList.remove('hidden');
-  svg.setAttribute('width', rect.width);
-  svg.setAttribute('height', rect.height);
-  svg.style.width = rect.width + 'px';
-  svg.style.height = rect.height + 'px';
+  // Handle board orientation
+  const isWhite = boardObj.orientation() === 'white';
+  const file = isWhite ? String.fromCharCode(97 + fileIdx) : String.fromCharCode(104 - fileIdx);
+  const rank = isWhite ? (8 - rankIdx) : (1 + rankIdx);
 
-  const m = filteredMistakes[currentMistakeIdx];
-  const flipped = m && m.playerColor === 'black';
+  return file + rank;
+}
 
-  const coords = (sq) => {
-    const file = sq.charCodeAt(0) - 97; // a=0
-    const rank = parseInt(sq[1]) - 1;   // 1=0
-    const x = flipped ? (7 - file) * sqSize + sqSize / 2 : file * sqSize + sqSize / 2;
-    const y = flipped ? rank * sqSize + sqSize / 2 : (7 - rank) * sqSize + sqSize / 2;
-    return { x, y };
+function clearArrows() {
+  activeArrows.clear();
+  ghostArrow = null;
+  bestMoveArrow = null;
+  renderArrows();
+}
+
+function renderArrows() {
+    const svg = document.getElementById('arrowSvg');
+    const boardEl = document.querySelector('#board [class^="board-"]');
+    if (!boardEl) return;
+
+    const hasSomething = activeArrows.size > 0 || ghostArrow || bestMoveArrow;
+    svg.classList.toggle('hidden', !hasSomething);
+    if (!hasSomething) { svg.innerHTML = ''; return; }
+
+    // Position SVG exactly over the board element within the container
+    const boardRect = boardEl.getBoundingClientRect();
+    const containerRect = document.getElementById('boardContainer').getBoundingClientRect();
+    svg.style.left = (boardRect.left - containerRect.left) + 'px';
+    svg.style.top = (boardRect.top - containerRect.top) + 'px';
+    svg.style.width = boardRect.width + 'px';
+    svg.style.height = boardRect.height + 'px';
+    svg.setAttribute('viewBox', `0 0 ${boardRect.width} ${boardRect.height}`);
+
+    // Read square centers from actual DOM elements (immune to layout quirks)
+    const sqCenter = (sq) => {
+      const el = document.querySelector(`[data-square="${sq}"]`);
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return {
+        x: r.left - boardRect.left + r.width / 2,
+        y: r.top - boardRect.top + r.height / 2,
+      };
+    };
+
+    let html = '';
+    const sqSize = boardRect.width / 8;
+    const shaftWidth = sqSize * 0.18;
+    const headWidth = shaftWidth * 3.5;
+    const headLength = headWidth * 0.75;
+
+    const drawOne = (from, to, color, opacity) => {
+      const start = sqCenter(from);
+      const end = sqCenter(to);
+      if (!start || !end) return;
+      const angle = Math.atan2(end.y - start.y, end.x - start.x);
+
+      // Tiny overlap to prevent transparent gap between shaft and head
+      const overlap = 0.1;
+      const shaftEndX = end.x - (headLength - overlap) * Math.cos(angle);
+      const shaftEndY = end.y - (headLength - overlap) * Math.sin(angle);
+
+      const p1x = end.x, p1y = end.y;
+      const p2x = end.x - headLength * Math.cos(angle) + (headWidth / 2) * Math.sin(angle);
+      const p2y = end.y - headLength * Math.sin(angle) - (headWidth / 2) * Math.cos(angle);
+      const p3x = end.x - headLength * Math.cos(angle) - (headWidth / 2) * Math.sin(angle);
+      const p3y = end.y - headLength * Math.sin(angle) + (headWidth / 2) * Math.cos(angle);
+
+      html += `
+        <g opacity="${opacity}">
+          <line x1="${start.x}" y1="${start.y}" x2="${shaftEndX}" y2="${shaftEndY}"
+                stroke="${color}" stroke-width="${shaftWidth}" stroke-linecap="butt" />
+          <polygon points="${p1x},${p1y} ${p2x},${p2y} ${p3x},${p3y}" fill="${color}" />
+        </g>`;
+    };
+
+    // Best move arrow first (behind user arrows)
+    if (bestMoveArrow) drawOne(bestMoveArrow.from, bestMoveArrow.to, 'rgba(62, 207, 142, 0.7)', 1);
+    // User-drawn arrows
+    activeArrows.forEach(key => drawOne(key.substring(0, 2), key.substring(2, 4), 'rgba(21, 120, 27, 0.6)', 1));
+    // Ghost arrow while dragging
+    if (ghostArrow) drawOne(ghostArrow.from, ghostArrow.to, 'rgba(21, 120, 27, 0.6)', 0.3);
+
+    svg.innerHTML = html;
+}
+
+function getSquareCenter(sq, boardWidth) {
+  // Used by getSquareFromMouseEvent fallback — mathematical calculation
+  const isWhite = boardObj.orientation() === 'white';
+  const file = sq.charCodeAt(0) - 97;
+  const rank = parseInt(sq[1]) - 1;
+
+  const sqSize = boardWidth / 8;
+  const fIdx = isWhite ? file : 7 - file;
+  const rIdx = isWhite ? 7 - rank : rank;
+
+  return {
+    x: (fIdx + 0.5) * sqSize,
+    y: (rIdx + 0.5) * sqSize
   };
+}
 
-  const f = coords(from), t = coords(to);
-
-  svg.innerHTML = `
-    <defs>
-      <marker id="arrowhead" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
-        <polygon points="0 0, 10 4, 0 8" fill="var(--green)" opacity="0.85"/>
-      </marker>
-    </defs>
-    <line x1="${f.x}" y1="${f.y}" x2="${t.x}" y2="${t.y}"
-          stroke="var(--green)" stroke-width="6" stroke-opacity="0.7"
-          stroke-linecap="round" marker-end="url(#arrowhead)"/>
-  `;
+function drawArrow(from, to) {
+  bestMoveArrow = { from, to };
+  renderArrows();
 }
 
 function hideArrow() {
-  const svg = document.getElementById('arrowSvg');
-  svg.classList.add('hidden');
-  svg.innerHTML = '';
+  bestMoveArrow = null;
+  renderArrows();
 }
 
 function escHtml(s) {
