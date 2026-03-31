@@ -1089,6 +1089,12 @@ async function initStockfish() {
     const jsResp = await fetch('engine/stockfish-18-single.js');
     const jsText = await jsResp.text();
     const patched = `
+      var Module = {
+        locateFile: function(path) {
+          if (path.endsWith('.wasm')) return "${wasmUrl}";
+          return path;
+        }
+      };
       self.originalFetch = self.fetch;
       self.fetch = function(url, opts) {
         if (typeof url === 'string' && url.endsWith('.wasm')) {
