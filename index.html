@@ -1068,11 +1068,10 @@ function disconnectGist() {
 }
 
 // ─── Stockfish Engine ───
-const SF_PATH = 'engine/stockfish-18-single.js';
-let sfWasmBuffer = null; // cached decompressed WASM for re-init
-let sfJsText = null;     // cached JS source for re-init
+const SF_PATH = 'engine/stockfish-18-lite-single.js';
 
 async function initStockfish() {
+  // Allow re-initialization: terminate old worker if it exists
   if (sfWorker) {
     sfLog('initStockfish', 'terminating existing worker for re-init');
     sfWorker.terminate();
@@ -1081,47 +1080,12 @@ async function initStockfish() {
     sfSearchActive = false;
   }
   try {
-    // Decompress WASM and cache for re-init
-    if (!sfWasmBuffer) {
-      const wasmResp = await fetch('engine/stockfish-18-single.wasm.gz');
-      const wasmStream = wasmResp.body.pipeThrough(new DecompressionStream('gzip'));
-      sfWasmBuffer = await new Response(wasmStream).arrayBuffer();
-    }
-    if (!sfJsText) {
-      const jsResp = await fetch('engine/stockfish-18-single.js');
-      sfJsText = await jsResp.text();
-    }
+    sfWorker = new Worker(SF_PATH);
 
-    // Patch: receive WASM binary via postMessage, bypass all URL resolution
-    const patched = `
-      var _wasmResolve;
-      var _wasmBuffer = new Promise(function(r) { _wasmResolve = r; });
-      self.addEventListener('message', function _initWasm(e) {
-        if (e.data && e.data.type === 'wasmInit') {
-          self.removeEventListener('message', _initWasm);
-          _wasmResolve(e.data.buffer);
-        }
-      });
-      var Module = {
-        instantiateWasm: function(imports, successCallback) {
-          _wasmBuffer.then(function(buf) {
-            WebAssembly.instantiate(buf, imports).then(function(output) {
-              successCallback(output.instance, output.module);
-            });
-          });
-          return {};
-        }
-      };
-    ` + sfJsText;
-    const workerUrl = URL.createObjectURL(new Blob([patched], { type: 'application/javascript' }));
-    sfWorker = new Worker(workerUrl);
-
+    // Crash detection: WASM RuntimeError kills the worker permanently
     sfWorker.addEventListener('error', handleSfCrash);
 
-    // Send WASM binary to worker (copy so sfWasmBuffer stays valid for re-init)
-    const bufferCopy = sfWasmBuffer.slice(0);
-    sfWorker.postMessage({ type: 'wasmInit', buffer: bufferCopy }, [bufferCopy]);
-
+    // Wait for UCI init
     await new Promise((resolve) => {
       function handler(e) {
         if (typeof e.data === 'string' && e.data === 'uciok') {
@@ -1132,7 +1096,7 @@ async function initStockfish() {
       sfWorker.addEventListener('message', handler);
       sfWorker.postMessage('uci');
     });
-    sfWorker.postMessage('setoption name Hash value 128');
+    sfWorker.postMessage('setoption name Hash value 64');
     sfWorker.postMessage('isready');
     await new Promise((resolve) => {
       function handler(e) {
