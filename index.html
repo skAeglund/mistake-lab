@@ -698,6 +698,9 @@ let sfSearchActive = false;     // true when a go command has been sent and best
 let selectedSquare = null;      // for click-to-move
 let engineLine = null;          // { baseFen, moves: [{uci,san,fen}], currentIdx: -1, userMove: {san,from,to} }
 let browsingLine = false;       // true when stepping through engine line
+let continuationMode = false;   // true when in continuation practice
+let continuationContUci = '';   // stored for deferred engine line display
+let currentSolveFen = null;     // FEN the user is solving (differs from m.fenBefore in continuation)
 let firstAttemptFailed = false;  // tracks if first try on current position was wrong
 let srsRecorded = false;         // true after SRS grade is recorded; prevents retry from re-grading
 let reviewMode = false;          // true = show only due SRS positions
@@ -1990,6 +1993,7 @@ function loadPosition(globalIdx) {
   document.getElementById('btnRetry').classList.add('hidden');
   document.getElementById('btnLichess').classList.remove('hidden');
   preAnalysisPaused = false;
+  continuationMode = false;
   engineLine = null;
   browsingLine = false;
   clearHighlights();
@@ -1997,6 +2001,7 @@ function loadPosition(globalIdx) {
 
   // Set up chess engine at the mistake position
   gameEngine = new Chess(m.fenBefore);
+  currentSolveFen = m.fenBefore;
 
   // Set up board
   boardObj.orientation(m.playerColor);
@@ -2101,17 +2106,17 @@ async function evaluateMove(from, to, move) {
       return;
     }
 
-    if (pre && preAnalysisFen === m.fenBefore) {
-      sfLog('evaluateMove', `preAnalysis FEN MATCH: preAnalysisFen=${preAnalysisFen?.split(' ').slice(0,2).join(' ')}… == m.fenBefore`);
+    if (pre && preAnalysisFen === currentSolveFen) {
+      sfLog('evaluateMove', `preAnalysis FEN MATCH: preAnalysisFen=${preAnalysisFen?.split(' ').slice(0,2).join(' ')}… == currentSolveFen`);
       // Validate: verify best move is legal in this position (guards against stale data)
-      const testChess = new Chess(m.fenBefore);
+      const testChess = new Chess(currentSolveFen);
       const testMove = pre.bestMove ? testChess.move({
         from: pre.bestMove.substring(0, 2),
         to: pre.bestMove.substring(2, 4),
         promotion: pre.bestMove.length > 4 ? pre.bestMove[4] : undefined
       }) : null;
 
-      sfLog('evaluateMove', `legality check: bestMove=${pre.bestMove} legal=${!!testMove} testFen=${m.fenBefore.split(' ').slice(0,2).join(' ')}…`);
+      sfLog('evaluateMove', `legality check: bestMove=${pre.bestMove} legal=${!!testMove} testFen=${currentSolveFen.split(' ').slice(0,2).join(' ')}…`);
 
       if (testMove) {
         bestCp = pre.bestCp;
@@ -2132,18 +2137,18 @@ async function evaluateMove(from, to, move) {
           return;
         }
       } else {
-        sfLog('evaluateMove', `ILLEGAL BEST MOVE — discarding pre-analysis. bestMove=${pre.bestMove} fen=${m.fenBefore}`);
+        sfLog('evaluateMove', `ILLEGAL BEST MOVE — discarding pre-analysis. bestMove=${pre.bestMove} fen=${currentSolveFen}`);
         console.warn('Pre-analysis best move illegal in position — discarding stale data');
       }
     } else {
-      sfLog('evaluateMove', `preAnalysis FEN MISMATCH or null: preAnalysisFen=${preAnalysisFen?.split(' ').slice(0,2).join(' ')}… vs m.fenBefore=${m.fenBefore.split(' ').slice(0,2).join(' ')}…`);
+      sfLog('evaluateMove', `preAnalysis FEN MISMATCH or null: preAnalysisFen=${preAnalysisFen?.split(' ').slice(0,2).join(' ')}… vs currentSolveFen=${currentSolveFen.split(' ').slice(0,2).join(' ')}…`);
     }
 
     if (!bestCp && bestCp !== 0) {
       // Pre-analysis unavailable — run a fresh one-shot analysis of the position
-      sfLog('evaluateMove', `FALLBACK: one-shot analysis of position fen=${m.fenBefore.split(' ').slice(0,2).join(' ')}…`);
+      sfLog('evaluateMove', `FALLBACK: one-shot analysis of position fen=${currentSolveFen.split(' ').slice(0,2).join(' ')}…`);
       stopPreAnalysis();
-      const preResult = await sfAnalyze(m.fenBefore, 16, 1);
+      const preResult = await sfAnalyze(currentSolveFen, 16, 1);
       sfLog('evaluateMove', `one-shot result: bestMove=${preResult?.bestMove} mistakeIdx snapshot=${mistakeIdx} current=${currentMistakeIdx}`);
       if (currentMistakeIdx !== mistakeIdx) {
         sfLog('evaluateMove', `ABORT after one-shot: user navigated away`);
@@ -2151,7 +2156,7 @@ async function evaluateMove(from, to, move) {
       }
       bestCp = preResult?.pvs[0]?.cp ?? 0;
       bestMoveUci = preResult?.bestMove || '?';
-      bestMoveSan = uciToSan(m.fenBefore, bestMoveUci);
+      bestMoveSan = uciToSan(currentSolveFen, bestMoveUci);
     }
 
     // User's move wasn't in the top PVs — analyze the resulting position
@@ -2255,76 +2260,99 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
     highlightSquaresWithColor(from, to, color);
     const isExactBest = move.san === bestMoveSan;
 
-    // Compute SRS grade
-    let grade, gradeLabel;
-    if (firstAttemptFailed) {
-      grade = FSRS_GRADE.again; gradeLabel = 'Again';
-    } else if (isExactBest) {
-      grade = FSRS_GRADE.easy; gradeLabel = 'Easy';
+    if (continuationMode) {
+      // Continuation mode: simple feedback, no SRS
+      const title = isExactBest ? 'Best move!' : wpDrop <= 2 ? 'Excellent!' : 'Good enough!';
+      const body = isExactBest
+        ? `<code>${escHtml(move.san)}</code> is the engine's top choice.`
+        : `<code>${escHtml(move.san)}</code> (−${wpStr}% win).`;
+      showColorFeedback(color, colorDim, title, body);
     } else {
-      grade = FSRS_GRADE.good; gradeLabel = 'Good';
-    }
+      // Normal mode: full SRS + reveal button
+      // Compute SRS grade
+      let grade, gradeLabel;
+      if (firstAttemptFailed) {
+        grade = FSRS_GRADE.again; gradeLabel = 'Again';
+      } else if (isExactBest) {
+        grade = FSRS_GRADE.easy; gradeLabel = 'Easy';
+      } else {
+        grade = FSRS_GRADE.good; gradeLabel = 'Good';
+      }
 
-    let title, body;
-    if (isExactBest && !firstAttemptFailed) {
-      title = 'Best move!';
-      body = `<code>${escHtml(move.san)}</code> is the engine's top choice.`;
-    } else if (wpDrop <= 2) {
-      title = firstAttemptFailed ? 'Got it on retry' : 'Excellent!';
-      body = `<code>${escHtml(move.san)}</code> is nearly as good as the best move (−${wpStr}% win).` +
-        bestMoveButton(revealId, bestMoveSan, bestMoveUci, m);
-    } else {
-      title = firstAttemptFailed ? 'Got it on retry' : 'Good enough!';
-      body = `<code>${escHtml(move.san)}</code> is a reasonable alternative (−${wpStr}% win, −${Math.round(cpLoss)}cp).` +
-        bestMoveButton(revealId, bestMoveSan, bestMoveUci, m);
-    }
+      let title, body;
+      if (isExactBest && !firstAttemptFailed) {
+        title = 'Best move!';
+        body = `<code>${escHtml(move.san)}</code> is the engine's top choice.`;
+      } else if (wpDrop <= 2) {
+        title = firstAttemptFailed ? 'Got it on retry' : 'Excellent!';
+        body = `<code>${escHtml(move.san)}</code> is nearly as good as the best move (−${wpStr}% win).` +
+          bestMoveButton(revealId, bestMoveSan, bestMoveUci, m);
+      } else {
+        title = firstAttemptFailed ? 'Got it on retry' : 'Good enough!';
+        body = `<code>${escHtml(move.san)}</code> is a reasonable alternative (−${wpStr}% win, −${Math.round(cpLoss)}cp).` +
+          bestMoveButton(revealId, bestMoveSan, bestMoveUci, m);
+      }
 
-    let srsInfo = '';
-    if (!srsRecorded) {
-      const srsCard = recordReview(pid, grade);
-      srsRecorded = true;
-      srsInfo = srsTag(gradeLabel, srsCard);
+      let srsInfo = '';
+      if (!srsRecorded) {
+        const srsCard = recordReview(pid, grade);
+        srsRecorded = true;
+        srsInfo = srsTag(gradeLabel, srsCard);
+      }
+      showColorFeedback(color, colorDim, title, body + srsInfo);
+      updateSessionProgress();
+      renderQueue();
     }
-    showColorFeedback(color, colorDim, title, body + srsInfo);
-    updateSessionProgress();
-    renderQueue();
   } else if (wpDrop <= 10) {
     clearHighlights();
     highlightSquaresWithColor(from, to, color);
 
-    let grade, gradeLabel;
-    if (firstAttemptFailed) {
-      grade = FSRS_GRADE.again; gradeLabel = 'Again';
+    if (continuationMode) {
+      // Continuation mode: inaccurate still counts as good enough to continue
+      showColorFeedback(color, colorDim, 'Inaccurate but OK',
+        `<code>${escHtml(move.san)}</code> loses ${wpStr}% winning chances (−${Math.round(cpLoss)}cp). Continuing…`);
     } else {
-      grade = FSRS_GRADE.hard; gradeLabel = 'Hard';
-    }
+      // Normal mode: full SRS + reveal
+      let grade, gradeLabel;
+      if (firstAttemptFailed) {
+        grade = FSRS_GRADE.again; gradeLabel = 'Again';
+      } else {
+        grade = FSRS_GRADE.hard; gradeLabel = 'Hard';
+      }
 
-    let srsInfo2 = '';
-    if (!srsRecorded) {
-      const srsCard = recordReview(pid, grade);
-      srsRecorded = true;
-      srsInfo2 = srsTag(gradeLabel, srsCard);
+      let srsInfo2 = '';
+      if (!srsRecorded) {
+        const srsCard = recordReview(pid, grade);
+        srsRecorded = true;
+        srsInfo2 = srsTag(gradeLabel, srsCard);
+      }
+      showColorFeedback(color, colorDim, 'Inaccurate',
+        `<code>${escHtml(move.san)}</code> loses ${wpStr}% winning chances (−${Math.round(cpLoss)}cp).` +
+        bestMoveButton(revealId, bestMoveSan, bestMoveUci, m) +
+        `<div class="attempts-indicator">${renderAttemptDots()}</div>` +
+        srsInfo2);
+      updateSessionProgress();
+      renderQueue();
     }
-    showColorFeedback(color, colorDim, 'Inaccurate',
-      `<code>${escHtml(move.san)}</code> loses ${wpStr}% winning chances (−${Math.round(cpLoss)}cp).` +
-      bestMoveButton(revealId, bestMoveSan, bestMoveUci, m) +
-      `<div class="attempts-indicator">${renderAttemptDots()}</div>` +
-      srsInfo2);
-    updateSessionProgress();
-    renderQueue();
   } else {
     // Wrong move — mark first attempt as failed
     if (currentAttempts === 1) firstAttemptFailed = true;
 
-    showColorFeedback(color, colorDim, 'Not quite',
-      `<code>${escHtml(move.san)}</code> loses ${wpStr}% winning chances (−${Math.round(cpLoss)}cp). Try again!` +
-      bestMoveButton(revealId, bestMoveSan, bestMoveUci, m) +
-      `<div class="attempts-indicator">${renderAttemptDots()}</div>`);
+    if (continuationMode) {
+      // Continuation mode: simpler feedback, no attempt limit, no reveal
+      showColorFeedback(color, colorDim, 'Try again',
+        `<code>${escHtml(move.san)}</code> loses ${wpStr}% winning chances (−${Math.round(cpLoss)}cp).`);
+    } else {
+      showColorFeedback(color, colorDim, 'Not quite',
+        `<code>${escHtml(move.san)}</code> loses ${wpStr}% winning chances (−${Math.round(cpLoss)}cp). Try again!` +
+        bestMoveButton(revealId, bestMoveSan, bestMoveUci, m) +
+        `<div class="attempts-indicator">${renderAttemptDots()}</div>`);
+    }
 
     gameEngine.undo();
     boardObj.position(gameEngine.fen());
 
-    if (currentAttempts >= 3) {
+    if (!continuationMode && currentAttempts >= 3) {
       revealBestMove(bestMoveUci, m);
       if (!srsRecorded) {
         const srsCard = recordReview(pid, FSRS_GRADE.again);
@@ -2336,8 +2364,20 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
     }
   }
 
-  document.getElementById('btnRetry').classList.remove('hidden');
-  buildEngineLine(m.fenBefore, move, contUci || '');
+  if (continuationMode) {
+    // In continuation: good move (≤10%) advances, bad move (>10%) was already undone — user retries
+    if (wpDrop <= 10) {
+      setTimeout(() => advanceContinuation(contUci), 500);
+    }
+  } else if (wpDrop <= 5) {
+    // Good move in normal mode — show buttons instead of auto engine line
+    document.getElementById('btnRetry').classList.remove('hidden');
+    showContinuationOptions(m, move, contUci || '');
+  } else {
+    // Inaccurate or wrong in normal mode — show engine line as before
+    document.getElementById('btnRetry').classList.remove('hidden');
+    buildEngineLine(currentSolveFen, move, contUci || '');
+  }
 }
 
 function srsTag(gradeLabel, card) {
@@ -2561,6 +2601,140 @@ function exitEngineLine() {
   clearHighlights();
 }
 
+// ─── Continuation Practice ───
+function showContinuationOptions(m, move, contUci) {
+  continuationContUci = contUci;
+  // Store data for deferred engine line display
+  window._deferredEngineLine = { baseFen: currentSolveFen, move, contUci };
+
+  const container = document.getElementById('feedbackContainer');
+  const div = document.createElement('div');
+  div.id = 'continuationOptions';
+  div.style.cssText = 'display:flex;gap:8px;animation:fadeSlideIn 0.3s ease;';
+  div.innerHTML = `
+    <button class="btn btn-primary btn-sm" onclick="startContinuationMode()" style="font-size:12px;">▶ Play Continuation</button>
+    <button class="btn btn-ghost btn-sm" onclick="showDeferredEngineLine()" style="font-size:12px;">Show engine line</button>
+  `;
+  // Insert after the first feedback box
+  const firstFeedback = container.querySelector('.feedback-box');
+  if (firstFeedback) {
+    firstFeedback.insertAdjacentElement('afterend', div);
+  } else {
+    container.insertBefore(div, container.firstChild);
+  }
+}
+
+function showDeferredEngineLine() {
+  const opts = document.getElementById('continuationOptions');
+  if (opts) opts.remove();
+
+  const data = window._deferredEngineLine;
+  if (data) {
+    buildEngineLine(data.baseFen, data.move, data.contUci);
+  }
+}
+
+function startContinuationMode() {
+  continuationMode = true;
+  const opts = document.getElementById('continuationOptions');
+  if (opts) opts.remove();
+
+  // gameEngine already has the user's good move applied
+  // Use the stored contUci to play opponent's response
+  advanceContinuation(continuationContUci);
+}
+
+async function advanceContinuation(contUci) {
+  // Check if game is already over (user's move was checkmate/draw)
+  if (gameEngine.game_over()) {
+    continuationMode = false;
+    if (gameEngine.in_checkmate()) {
+      showFeedback('correct', 'Checkmate!', 'You delivered checkmate!');
+    } else if (gameEngine.in_draw()) {
+      showFeedback('info', 'Draw', 'The position is drawn.');
+    }
+    document.getElementById('btnRetry').classList.remove('hidden');
+    return;
+  }
+
+  let opponentUci;
+
+  if (contUci && contUci.trim()) {
+    opponentUci = contUci.trim().split(/\s+/)[0];
+  } else {
+    // No continuation line available — analyze to find opponent's best move
+    showFeedback('info', 'Analyzing…', 'Finding opponent\'s best response…');
+    stopPreAnalysis();
+    const result = await sfAnalyze(gameEngine.fen(), 16, 1);
+    if (!result || !result.bestMove) {
+      continuationMode = false;
+      showFeedback('info', 'Continuation ended', 'Could not determine opponent\'s best response.');
+      document.getElementById('btnRetry').classList.remove('hidden');
+      return;
+    }
+    opponentUci = result.bestMove;
+  }
+
+  const fromSq = opponentUci.substring(0, 2);
+  const toSq = opponentUci.substring(2, 4);
+  const promo = opponentUci.length > 4 ? opponentUci[4] : undefined;
+
+  const result = gameEngine.move({ from: fromSq, to: toSq, promotion: promo });
+  if (!result) {
+    continuationMode = false;
+    showFeedback('info', 'Continuation ended', 'Could not play opponent\'s move.');
+    document.getElementById('btnRetry').classList.remove('hidden');
+    return;
+  }
+
+  // Animate and highlight the opponent's move
+  boardObj.position(gameEngine.fen(), true);
+  clearHighlights();
+  highlightSquaresWithColor(fromSq, toSq, 'rgb(91, 156, 240)');
+
+  // Check if game is over after opponent's move
+  if (gameEngine.game_over()) {
+    continuationMode = false;
+    const m = filteredMistakes[currentMistakeIdx];
+    if (gameEngine.in_checkmate()) {
+      showFeedback('wrong', 'Checkmated', 'The opponent delivered checkmate. Continuation over.');
+    } else if (gameEngine.in_draw()) {
+      showFeedback('info', 'Draw', 'The position is drawn. Continuation over.');
+    }
+    document.getElementById('btnRetry').classList.remove('hidden');
+    return;
+  }
+
+  // Verify it's the user's turn
+  const m = filteredMistakes[currentMistakeIdx];
+  const userTurn = (m.playerColor === 'white' && gameEngine.turn() === 'w') ||
+                   (m.playerColor === 'black' && gameEngine.turn() === 'b');
+  if (!userTurn) {
+    continuationMode = false;
+    showFeedback('info', 'Continuation ended', 'Unexpected turn.');
+    document.getElementById('btnRetry').classList.remove('hidden');
+    return;
+  }
+
+  // Update solve FEN and start pre-analysis for the new position
+  currentSolveFen = gameEngine.fen();
+  currentAttempts = 0;
+  startPreAnalysis(currentSolveFen);
+
+  // Update info panel for continuation
+  document.getElementById('feedbackContainer').innerHTML = '';
+  const infoCard = document.getElementById('posInfoCard');
+  infoCard.style.display = '';
+  document.getElementById('posInfoContent').innerHTML = `
+    <div style="font-size:13px;line-height:1.7">
+      <div style="color:var(--blue);font-weight:600;">Continuation Practice</div>
+      <div>Opponent played <code class="mono">${escHtml(result.san)}</code></div>
+      <div>Find the best move!</div>
+      <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
+    </div>
+  `;
+}
+
 // ─── Navigation ───
 function prevPosition() {
   if (currentMistakeIdx <= 0) return;
@@ -2637,6 +2811,7 @@ function retryPosition() {
 
   currentAttempts = 0;
   firstAttemptFailed = false;
+  continuationMode = false;
   document.getElementById('btnRetry').classList.add('hidden');
   engineLine = null;
   browsingLine = false;
@@ -2645,6 +2820,7 @@ function retryPosition() {
 
   // Reset chess engine and board to original position
   gameEngine = new Chess(m.fenBefore);
+  currentSolveFen = m.fenBefore;
   boardObj.position(m.fenBefore, true);
 
   // Reset info card (keep analysis status)
