@@ -1088,10 +1088,15 @@ async function initStockfish() {
     // Fetch the JS, patch the WASM url into it, create a blob worker
     const jsResp = await fetch('engine/stockfish-18-single.js');
     const jsText = await jsResp.text();
-    const patched = jsText.replace(
-      /["'`][^"'`]*\.wasm["'`]/g,
-      `"${wasmUrl}"`
-    );
+    const patched = `
+      self.originalFetch = self.fetch;
+      self.fetch = function(url, opts) {
+        if (typeof url === 'string' && url.endsWith('.wasm')) {
+          return self.originalFetch("${wasmUrl}", opts);
+        }
+        return self.originalFetch(url, opts);
+      };
+      ` + jsText;
     const workerUrl = URL.createObjectURL(new Blob([patched], { type: 'application/javascript' }));
     sfWorker = new Worker(workerUrl);
 
