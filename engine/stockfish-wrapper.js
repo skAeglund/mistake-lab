@@ -1,5 +1,6 @@
 async function init() {
-  const resp = await fetch('stockfish-18-single.wasm.gz');
+  const base = self.location.href.replace(/\/[^/]+$/, '/');
+  const resp = await fetch(base + 'stockfish-18-single.wasm.gz');
   const stream = resp.body.pipeThrough(new DecompressionStream('gzip'));
   const buffer = await new Response(stream).arrayBuffer();
   const blob = new Blob([buffer], { type: 'application/wasm' });
