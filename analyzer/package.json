@@ -1,0 +1,9 @@
+{
+  "name": "mistakelab-analyzer",
+  "version": "1.0.0",
+  "description": "Batch Stockfish analysis for MistakeLab — analyzes Lichess/Chess.com games locally",
+  "main": "analyze.js",
+  "dependencies": {
+    "chess.js": "0.13.4"
+  }
+}

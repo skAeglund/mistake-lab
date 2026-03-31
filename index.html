@@ -642,6 +642,11 @@
         <button class="filter-chip active" data-filter="severity" data-value="all" onclick="setFilter(this)">All mistakes</button>
         <button class="filter-chip" data-filter="severity" data-value="blunders" onclick="setFilter(this)">Blunders only</button>
       </div>
+      <div class="filter-row" style="margin-top:6px;">
+        <button class="filter-chip active" data-filter="platform" data-value="all" onclick="setFilter(this)">All</button>
+        <button class="filter-chip" data-filter="platform" data-value="lichess" onclick="setFilter(this)">Lichess</button>
+        <button class="filter-chip" data-filter="platform" data-value="chesscom" onclick="setFilter(this)">Chess.com</button>
+      </div>
     </div>
     <div class="game-list" id="gameList"></div>
   </div>
@@ -767,7 +772,7 @@ let srsRecorded = false;         // true after SRS grade is recorded; prevents r
 let reviewMode = false;          // true = show only due SRS positions
 let reviewQueue = [];            // positions due for review
 
-const filters = { color: 'both', severity: 'all' };
+const filters = { color: 'both', severity: 'all', platform: 'all' };
 
 // ─── Maia 3 state ───
 let maiaSession = null;       // ONNX InferenceSession
@@ -1107,7 +1112,15 @@ function buildGameCacheObj(username, games) {
 function mergeGames(cached, fetched) {
   const byId = new Map();
   for (const g of cached) byId.set(g.id, g);
-  for (const g of fetched) byId.set(g.id, g); // fetched wins on collision
+  for (const g of fetched) {
+    const existing = byId.get(g.id);
+    if (existing) {
+      // Preserve analyzer metadata that Lichess API doesn't provide
+      if (existing._playerColor && !g._playerColor) g._playerColor = existing._playerColor;
+      if (existing._source && !g._source) g._source = existing._source;
+    }
+    byId.set(g.id, g); // fetched wins on collision (with metadata preserved)
+  }
   const merged = [...byId.values()];
   merged.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   return merged;
@@ -1897,15 +1910,33 @@ async function fetchGames(autoUsername) {
     let cache = loadGamesCache(username);
     let cachedGames = cache ? cache.games.filter(g => g.analysis && g.analysis.length > 0) : [];
 
-    // Try Gist L2 cache if we have no local cache but Gist is configured
-    if (cachedGames.length === 0 && isGistConfigured()) {
+    // Try Gist L2 cache — always merge if configured (picks up analyzer's locally-analyzed games)
+    if (isGistConfigured()) {
       try {
         const gistCache = await gistReadGames();
         if (gistCache && gistCache.username === username.toLowerCase() && Array.isArray(gistCache.games)) {
-          cachedGames = gistCache.games.filter(g => g.analysis && g.analysis.length > 0);
-          cache = gistCache;
-          // Save to localStorage L1
-          saveGamesCache(username, gistCache);
+          const gistGames = gistCache.games.filter(g => g.analysis && g.analysis.length > 0);
+          if (cachedGames.length === 0) {
+            // No local cache — use Gist as primary source
+            cachedGames = gistGames;
+            cache = gistCache;
+          } else {
+            // Merge: add any Gist-only games (e.g. from the batch analyzer) into local cache
+            const localIds = new Set(cachedGames.map(g => g.id));
+            let added = 0;
+            for (const g of gistGames) {
+              if (!localIds.has(g.id)) {
+                cachedGames.push(g);
+                added++;
+              }
+            }
+            if (added > 0) {
+              cachedGames.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+              console.log(`[GameCache] Merged ${added} new game(s) from Gist`);
+            }
+          }
+          // Update localStorage L1 with merged data
+          saveGamesCache(username, buildGameCacheObj(username, cachedGames));
         }
       } catch (e) {
         console.warn('[GameCache] Gist read failed (non-fatal):', e.message);
@@ -2000,9 +2031,14 @@ function extractAllMistakes() {
   for (const game of allGames) {
     const moves = game.moves ? game.moves.split(' ') : [];
     const analysis = game.analysis || [];
-    const isWhite = game.players?.white?.user?.name?.toLowerCase() === currentUsername.toLowerCase()
-                 || game.players?.white?.user?.id?.toLowerCase() === currentUsername.toLowerCase();
-    const playerColor = isWhite ? 'white' : 'black';
+    let playerColor;
+    if (game._playerColor) {
+      playerColor = game._playerColor;
+    } else {
+      const isWhite = game.players?.white?.user?.name?.toLowerCase() === currentUsername.toLowerCase()
+                   || game.players?.white?.user?.id?.toLowerCase() === currentUsername.toLowerCase();
+      playerColor = isWhite ? 'white' : 'black';
+    }
 
     // Walk the moves, rebuild positions with chess.js
     const chess = new Chess();
@@ -2087,6 +2123,11 @@ function applyFilters() {
   filteredMistakes = allMistakes.filter(m => {
     if (filters.color !== 'both' && m.playerColor !== filters.color) return false;
     if (filters.severity === 'blunders' && m.wpDrop < 15) return false;
+    if (filters.platform !== 'all') {
+      const isChesscom = m.game?._source === 'chesscom' || m.gameId.startsWith('chesscom_');
+      if (filters.platform === 'chesscom' && !isChesscom) return false;
+      if (filters.platform === 'lichess' && isChesscom) return false;
+    }
     return true;
   });
 }
@@ -2144,9 +2185,20 @@ function renderGameList() {
   // Group mistakes by game
   const gameMap = new Map();
   for (const g of allGames) {
-    const isWhite = g.players?.white?.user?.name?.toLowerCase() === currentUsername.toLowerCase()
-                 || g.players?.white?.user?.id?.toLowerCase() === currentUsername.toLowerCase();
-    const color = isWhite ? 'white' : 'black';
+    // Platform filter
+    if (filters.platform !== 'all') {
+      const isChesscom = g._source === 'chesscom' || g.id.startsWith('chesscom_');
+      if (filters.platform === 'chesscom' && !isChesscom) continue;
+      if (filters.platform === 'lichess' && isChesscom) continue;
+    }
+    let color;
+    if (g._playerColor) {
+      color = g._playerColor;
+    } else {
+      const isWhite = g.players?.white?.user?.name?.toLowerCase() === currentUsername.toLowerCase()
+                   || g.players?.white?.user?.id?.toLowerCase() === currentUsername.toLowerCase();
+      color = isWhite ? 'white' : 'black';
+    }
     if (filters.color !== 'both' && color !== filters.color) continue;
 
     const mistakes = filteredMistakes.filter(m => m.gameId === g.id);
