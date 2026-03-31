@@ -1068,10 +1068,9 @@ function disconnectGist() {
 }
 
 // ─── Stockfish Engine ───
-const SF_PATH = 'engine/stockfish-wrapper.js';
+const SF_PATH = 'engine/stockfish-18-single.js';
 
 async function initStockfish() {
-  // Allow re-initialization: terminate old worker if it exists
   if (sfWorker) {
     sfLog('initStockfish', 'terminating existing worker for re-init');
     sfWorker.terminate();
@@ -1080,12 +1079,24 @@ async function initStockfish() {
     sfSearchActive = false;
   }
   try {
-    sfWorker = new Worker(SF_PATH);
+    // Decompress WASM and create blob URL
+    const wasmResp = await fetch('engine/stockfish-18-single.wasm.gz');
+    const wasmStream = wasmResp.body.pipeThrough(new DecompressionStream('gzip'));
+    const wasmBuffer = await new Response(wasmStream).arrayBuffer();
+    const wasmUrl = URL.createObjectURL(new Blob([wasmBuffer], { type: 'application/wasm' }));
 
-    // Crash detection: WASM RuntimeError kills the worker permanently
+    // Fetch the JS, patch the WASM url into it, create a blob worker
+    const jsResp = await fetch('engine/stockfish-18-single.js');
+    const jsText = await jsResp.text();
+    const patched = jsText.replace(
+      /["'`][^"'`]*\.wasm["'`]/g,
+      `"${wasmUrl}"`
+    );
+    const workerUrl = URL.createObjectURL(new Blob([patched], { type: 'application/javascript' }));
+    sfWorker = new Worker(workerUrl);
+
     sfWorker.addEventListener('error', handleSfCrash);
 
-    // Wait for UCI init
     await new Promise((resolve) => {
       function handler(e) {
         if (typeof e.data === 'string' && e.data === 'uciok') {
@@ -1096,7 +1107,7 @@ async function initStockfish() {
       sfWorker.addEventListener('message', handler);
       sfWorker.postMessage('uci');
     });
-    sfWorker.postMessage('setoption name Hash value 512');
+    sfWorker.postMessage('setoption name Hash value 128');
     sfWorker.postMessage('isready');
     await new Promise((resolve) => {
       function handler(e) {
