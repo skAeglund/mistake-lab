@@ -6,7 +6,7 @@ async function init() {
   const blob = new Blob([buffer], { type: 'application/wasm' });
   const wasmUrl = URL.createObjectURL(blob);
 
-  self.locateFile = (file) => file.includes('.wasm') ? wasmUrl : file;
+  self.locateFile = (file) => file.endsWith('.wasm') ? wasmUrl : file;
 
   importScripts('stockfish-18-single.js');
 }
