@@ -529,6 +529,49 @@
   .gist-saved {
     font-size: 11px; color: var(--green); margin-top: 4px; min-height: 16px;
   }
+
+  /* Maia controls */
+  .maia-controls {
+    padding: 12px 16px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--bg-card);
+    animation: fadeSlideIn 0.3s ease;
+  }
+  .maia-controls h4 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+    color: var(--text-muted); margin-bottom: 10px; font-weight: 600;
+  }
+  .maia-slider-row {
+    display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
+  }
+  .maia-slider-row:last-child { margin-bottom: 0; }
+  .maia-slider-label {
+    font-size: 11px; color: var(--text-secondary); min-width: 62px;
+    flex-shrink: 0;
+  }
+  .maia-slider-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px; font-weight: 600; color: var(--text-primary);
+    min-width: 36px; text-align: right; flex-shrink: 0;
+  }
+  .maia-slider {
+    -webkit-appearance: none; appearance: none;
+    flex: 1; height: 4px; border-radius: 2px;
+    background: var(--bg-input); outline: none;
+    cursor: pointer;
+  }
+  .maia-slider::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 14px; height: 14px; border-radius: 50%;
+    background: var(--accent); cursor: pointer;
+    border: 2px solid var(--bg-panel);
+    transition: transform 0.1s;
+  }
+  .maia-slider::-webkit-slider-thumb:hover { transform: scale(1.2); }
+  .maia-slider::-moz-range-thumb {
+    width: 14px; height: 14px; border-radius: 50%;
+    background: var(--accent); cursor: pointer;
+    border: 2px solid var(--bg-panel);
+  }
 </style>
 </head>
 <body>
@@ -632,6 +675,23 @@
         <h4>Current Position</h4>
         <div id="posInfoContent"></div>
       </div>
+      <div class="maia-controls hidden" id="maiaControls">
+        <h4>Maia Opponent</h4>
+        <div class="maia-slider-row">
+          <span class="maia-slider-label">Strength</span>
+          <input type="range" class="maia-slider" id="maiaEloSlider"
+                 min="1600" max="2200" step="25" value="1900"
+                 oninput="onMaiaEloChange(this.value)">
+          <span class="maia-slider-value" id="maiaEloValue">1900</span>
+        </div>
+        <div class="maia-slider-row">
+          <span class="maia-slider-label">Precision</span>
+          <input type="range" class="maia-slider" id="maiaPrecisionSlider"
+                 min="0" max="1" step="0.05" value="0.5"
+                 oninput="onMaiaPrecisionChange(this.value)">
+          <span class="maia-slider-value" id="maiaPrecisionValue">0.50</span>
+        </div>
+      </div>
       <div id="feedbackContainer"></div>
     </div>
     <div class="position-queue" id="queuePanel" style="display:none">
@@ -716,7 +776,8 @@ let maiaMovesForward = null;  // UCI string → index (e.g. "e2e4" → 123)
 let maiaMovesReverse = null;  // index → UCI string (e.g. 123 → "e2e4")
 let maiaInputNames = null;    // discovered from the ONNX model
 let maiaOutputNames = null;
-const MAIA_ELO = 1900;        // ELO to use for Maia predictions
+let maiaElo = 1900;           // ELO for Maia predictions (adjustable via slider)
+let maiaPrecision = 0.5;      // 1.0 = argmax, 0.0 = high temperature sampling
 
 // ─── Debug logging toggle ───
 const DEBUG_SF = true;
@@ -1571,6 +1632,73 @@ function maiaEncodeBoard(fen) {
   return tensor;
 }
 
+// ─── Maia UI controls ───
+function onMaiaEloChange(val) {
+  maiaElo = parseInt(val);
+  document.getElementById('maiaEloValue').textContent = val;
+}
+
+function onMaiaPrecisionChange(val) {
+  maiaPrecision = parseFloat(val);
+  document.getElementById('maiaPrecisionValue').textContent = parseFloat(val).toFixed(2);
+}
+
+function showMaiaControls() {
+  const el = document.getElementById('maiaControls');
+  if (el && maiaReady) el.classList.remove('hidden');
+}
+
+function hideMaiaControls() {
+  const el = document.getElementById('maiaControls');
+  if (el) el.classList.add('hidden');
+}
+
+/**
+ * Sample a move index from logits using temperature-scaled softmax.
+ * Lower temperature → sharper (more deterministic), higher → flatter (more random).
+ */
+function maiaSampleMove(logits, legalMask, precision) {
+  // precision=1 → argmax, precision=0 → temperature=2.0 (very random)
+  if (precision >= 1.0) {
+    // Pure argmax
+    let bestIdx = -1, bestVal = -Infinity;
+    for (let i = 0; i < logits.length; i++) {
+      if (legalMask[i] > 0 && logits[i] > bestVal) {
+        bestVal = logits[i]; bestIdx = i;
+      }
+    }
+    return bestIdx;
+  }
+
+  const temperature = (1 - precision) * 2; // precision 0.5→temp 1.0, precision 0→temp 2.0
+
+  // Gather legal logits and apply temperature
+  const legalIndices = [];
+  const scaledLogits = [];
+  for (let i = 0; i < logits.length; i++) {
+    if (legalMask[i] > 0) {
+      legalIndices.push(i);
+      scaledLogits.push(logits[i] / temperature);
+    }
+  }
+  if (legalIndices.length === 0) return -1;
+
+  // Softmax
+  const maxL = Math.max(...scaledLogits);
+  const exps = scaledLogits.map(l => Math.exp(l - maxL));
+  const sum = exps.reduce((a, b) => a + b, 0);
+  const probs = exps.map(e => e / sum);
+
+  // Weighted random sample
+  const r = Math.random();
+  let cumulative = 0;
+  for (let i = 0; i < probs.length; i++) {
+    cumulative += probs[i];
+    if (r <= cumulative) return legalIndices[i];
+  }
+  return legalIndices[legalIndices.length - 1];
+}
+
 /**
  * Predict the best move for the given FEN using Maia 3 (argmax over legal moves).
  * Returns a UCI string (e.g. "e2e4") or null if Maia is unavailable.
@@ -1603,13 +1731,13 @@ async function maiaPredict(fen) {
       if (n.includes('board') || n.includes('token') || n.includes('input')) {
         feeds[name] = new ort.Tensor('float32', boardTokens, [1, 64, 12]);
       } else if (n.includes('self')) {
-        feeds[name] = new ort.Tensor('float32', Float32Array.from([MAIA_ELO]), [1]);
+        feeds[name] = new ort.Tensor('float32', Float32Array.from([maiaElo]), [1]);
       } else if (n.includes('oppo')) {
-        feeds[name] = new ort.Tensor('float32', Float32Array.from([MAIA_ELO]), [1]);
+        feeds[name] = new ort.Tensor('float32', Float32Array.from([maiaElo]), [1]);
       } else {
         // Unknown input — try as a scalar ELO
         console.warn(`[Maia] Unknown input "${name}", treating as ELO scalar`);
-        feeds[name] = new ort.Tensor('float32', Float32Array.from([MAIA_ELO]), [1]);
+        feeds[name] = new ort.Tensor('float32', Float32Array.from([maiaElo]), [1]);
       }
     }
 
@@ -1626,22 +1754,16 @@ async function maiaPredict(fen) {
       return null;
     }
 
-    // Argmax over legal moves
-    let bestIdx = -1;
-    let bestLogit = -Infinity;
-    for (let i = 0; i < 4352; i++) {
-      if (legalMask[i] > 0 && logits[i] > bestLogit) {
-        bestLogit = logits[i];
-        bestIdx = i;
-      }
-    }
+    // Select move: argmax or temperature-scaled sampling based on precision slider
+    const bestIdx = maiaSampleMove(logits, legalMask, maiaPrecision);
 
     if (bestIdx < 0) return null;
 
     let bestUci = maiaMovesReverse[String(bestIdx)];
     if (isBlack) bestUci = maiaMirrorMove(bestUci);
 
-    console.log(`[Maia] Predicted: ${bestUci} (logit=${bestLogit.toFixed(3)}) for ${fen.split(' ').slice(0,2).join(' ')}…`);
+    const mode = maiaPrecision >= 1.0 ? 'argmax' : `temp=${((1-maiaPrecision)*2).toFixed(2)}`;
+    console.log(`[Maia] Predicted: ${bestUci} (elo=${maiaElo}, ${mode}) for ${fen.split(' ').slice(0,2).join(' ')}…`);
     return bestUci;
   } catch (err) {
     console.error('[Maia] Prediction failed:', err);
@@ -2187,6 +2309,7 @@ function loadPosition(globalIdx) {
   document.getElementById('btnLichess').classList.remove('hidden');
   preAnalysisPaused = false;
   continuationMode = false;
+  hideMaiaControls();
   engineLine = null;
   browsingLine = false;
   clearHighlights();
@@ -2829,6 +2952,7 @@ function showDeferredEngineLine() {
 
 function startContinuationMode() {
   continuationMode = true;
+  showMaiaControls();
   const opts = document.getElementById('continuationOptions');
   if (opts) opts.remove();
 
@@ -2841,6 +2965,7 @@ async function advanceContinuation(contUci) {
   // Check if game is already over (user's move was checkmate/draw)
   if (gameEngine.game_over()) {
     continuationMode = false;
+    hideMaiaControls();
     if (gameEngine.in_checkmate()) {
       showFeedback('correct', 'Checkmate!', 'You delivered checkmate!');
     } else if (gameEngine.in_draw()) {
@@ -2873,6 +2998,7 @@ async function advanceContinuation(contUci) {
       const result = await sfAnalyze(gameEngine.fen(), 16, 1);
       if (!result || !result.bestMove) {
         continuationMode = false;
+        hideMaiaControls();
         showFeedback('info', 'Continuation ended', 'Could not determine opponent\'s best response.');
         document.getElementById('btnRetry').classList.remove('hidden');
         return;
@@ -2889,6 +3015,7 @@ async function advanceContinuation(contUci) {
   const result = gameEngine.move({ from: fromSq, to: toSq, promotion: promo });
   if (!result) {
     continuationMode = false;
+    hideMaiaControls();
     showFeedback('info', 'Continuation ended', 'Could not play opponent\'s move.');
     document.getElementById('btnRetry').classList.remove('hidden');
     return;
@@ -2902,6 +3029,7 @@ async function advanceContinuation(contUci) {
   // Check if game is over after opponent's move
   if (gameEngine.game_over()) {
     continuationMode = false;
+    hideMaiaControls();
     const m = filteredMistakes[currentMistakeIdx];
     if (gameEngine.in_checkmate()) {
       showFeedback('wrong', 'Checkmated', 'The opponent delivered checkmate. Continuation over.');
@@ -2918,6 +3046,7 @@ async function advanceContinuation(contUci) {
                    (m.playerColor === 'black' && gameEngine.turn() === 'b');
   if (!userTurn) {
     continuationMode = false;
+    hideMaiaControls();
     showFeedback('info', 'Continuation ended', 'Unexpected turn.');
     document.getElementById('btnRetry').classList.remove('hidden');
     return;
@@ -3019,6 +3148,7 @@ function retryPosition() {
   currentAttempts = 0;
   firstAttemptFailed = false;
   continuationMode = false;
+  hideMaiaControls();
   document.getElementById('btnRetry').classList.add('hidden');
   engineLine = null;
   browsingLine = false;
