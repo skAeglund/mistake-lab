@@ -663,6 +663,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/chessboard-1.0.0.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/ort.min.js"></script>
 <script>
 // ─── State ───
 // ─── Arrow drawing ───
@@ -707,6 +708,15 @@ let reviewMode = false;          // true = show only due SRS positions
 let reviewQueue = [];            // positions due for review
 
 const filters = { color: 'both', severity: 'all' };
+
+// ─── Maia 3 state ───
+let maiaSession = null;       // ONNX InferenceSession
+let maiaReady = false;
+let maiaMovesForward = null;  // UCI string → index (e.g. "e2e4" → 123)
+let maiaMovesReverse = null;  // index → UCI string (e.g. 123 → "e2e4")
+let maiaInputNames = null;    // discovered from the ONNX model
+let maiaOutputNames = null;
+const MAIA_ELO = 1900;        // ELO to use for Maia predictions
 
 // ─── Debug logging toggle ───
 const DEBUG_SF = true;
@@ -1457,6 +1467,188 @@ function openLichessAnalysis() {
   window.open(`https://lichess.org/analysis/${fen}?color=${color}`, '_blank');
 }
 
+// ─── Maia 3 Engine ───
+const MAIA_MODEL_PATH = 'maia/maia3_simplified.onnx';
+const MAIA_MOVES_FWD_PATH = 'maia/all_moves_maia3.json';
+const MAIA_MOVES_REV_PATH = 'maia/all_moves_maia3_reversed.json';
+
+async function initMaia() {
+  if (typeof ort === 'undefined') {
+    console.warn('[Maia] onnxruntime-web not loaded, Maia disabled');
+    return;
+  }
+  try {
+    console.log('[Maia] Loading move mappings…');
+    const [fwdResp, revResp] = await Promise.all([
+      fetch(MAIA_MOVES_FWD_PATH),
+      fetch(MAIA_MOVES_REV_PATH),
+    ]);
+    if (!fwdResp.ok || !revResp.ok) {
+      console.warn('[Maia] Move mapping files not found, Maia disabled');
+      return;
+    }
+    maiaMovesForward = await fwdResp.json();
+    maiaMovesReverse = await revResp.json();
+
+    console.log('[Maia] Loading ONNX model…');
+    ort.env.wasm.numThreads = 1;
+    maiaSession = await ort.InferenceSession.create(MAIA_MODEL_PATH, {
+      executionProviders: ['wasm'],
+    });
+
+    maiaInputNames = maiaSession.inputNames;
+    maiaOutputNames = maiaSession.outputNames;
+    console.log('[Maia] Model loaded. Inputs:', maiaInputNames, 'Outputs:', maiaOutputNames);
+    maiaReady = true;
+  } catch (err) {
+    console.warn('[Maia] Init failed (non-fatal, will use Stockfish):', err.message || err);
+    maiaReady = false;
+  }
+}
+
+// ─── Maia FEN mirroring (black → white perspective) ───
+function maiaMirrorSquare(sq) {
+  return sq[0] + String(9 - parseInt(sq[1]));
+}
+
+function maiaMirrorMove(uci) {
+  const from = uci.substring(0, 2);
+  const to = uci.substring(2, 4);
+  const promo = uci.length > 4 ? uci.substring(4) : '';
+  return maiaMirrorSquare(from) + maiaMirrorSquare(to) + promo;
+}
+
+function maiaSwapColorsInRank(rank) {
+  let result = '';
+  for (const ch of rank) {
+    if (/[A-Z]/.test(ch)) result += ch.toLowerCase();
+    else if (/[a-z]/.test(ch)) result += ch.toUpperCase();
+    else result += ch;
+  }
+  return result;
+}
+
+function maiaSwapCastlingRights(castling) {
+  if (castling === '-') return '-';
+  let out = '';
+  if (castling.includes('k')) out += 'K';
+  if (castling.includes('q')) out += 'Q';
+  if (castling.includes('K')) out += 'k';
+  if (castling.includes('Q')) out += 'q';
+  return out || '-';
+}
+
+function maiaMirrorFEN(fen) {
+  const [pos, color, castling, ep, half, full] = fen.split(' ');
+  const ranks = pos.split('/');
+  const mirrored = ranks.slice().reverse().map(r => maiaSwapColorsInRank(r)).join('/');
+  const mirColor = color === 'w' ? 'b' : 'w';
+  const mirCastling = maiaSwapCastlingRights(castling);
+  const mirEp = ep !== '-' ? maiaMirrorSquare(ep) : '-';
+  return `${mirrored} ${mirColor} ${mirCastling} ${mirEp} ${half} ${full}`;
+}
+
+// ─── Maia board encoding: 64 squares × 12 piece channels ───
+function maiaEncodeBoard(fen) {
+  const piecePlacement = fen.split(' ')[0];
+  const pieceTypes = ['P','N','B','R','Q','K','p','n','b','r','q','k'];
+  const tensor = new Float32Array(64 * 12);
+  const rows = piecePlacement.split('/');
+  for (let rank = 0; rank < 8; rank++) {
+    const row = 7 - rank;
+    let file = 0;
+    for (const ch of rows[rank]) {
+      const n = parseInt(ch);
+      if (isNaN(n)) {
+        const idx = pieceTypes.indexOf(ch);
+        if (idx >= 0) tensor[(row * 8 + file) * 12 + idx] = 1.0;
+        file++;
+      } else {
+        file += n;
+      }
+    }
+  }
+  return tensor;
+}
+
+/**
+ * Predict the best move for the given FEN using Maia 3 (argmax over legal moves).
+ * Returns a UCI string (e.g. "e2e4") or null if Maia is unavailable.
+ */
+async function maiaPredict(fen) {
+  if (!maiaReady || !maiaSession || !maiaMovesForward || !maiaMovesReverse) return null;
+
+  try {
+    const isBlack = fen.split(' ')[1] === 'b';
+    const workFen = isBlack ? maiaMirrorFEN(fen) : fen;
+
+    // Encode board
+    const boardTokens = maiaEncodeBoard(workFen);
+
+    // Build legal moves mask using chess.js on the (possibly mirrored) FEN
+    const chess = new Chess(workFen);
+    const legalMoves = chess.moves({ verbose: true });
+    const legalMask = new Float32Array(4352);
+    for (const m of legalMoves) {
+      const promo = m.promotion || '';
+      const uci = m.from + m.to + promo;
+      const idx = maiaMovesForward[uci];
+      if (idx !== undefined) legalMask[idx] = 1.0;
+    }
+
+    // Build ONNX input tensors — match by name pattern since model input order may vary
+    const feeds = {};
+    for (const name of maiaInputNames) {
+      const n = name.toLowerCase();
+      if (n.includes('board') || n.includes('token') || n.includes('input')) {
+        feeds[name] = new ort.Tensor('float32', boardTokens, [1, 64, 12]);
+      } else if (n.includes('self')) {
+        feeds[name] = new ort.Tensor('float32', Float32Array.from([MAIA_ELO]), [1]);
+      } else if (n.includes('oppo')) {
+        feeds[name] = new ort.Tensor('float32', Float32Array.from([MAIA_ELO]), [1]);
+      } else {
+        // Unknown input — try as a scalar ELO
+        console.warn(`[Maia] Unknown input "${name}", treating as ELO scalar`);
+        feeds[name] = new ort.Tensor('float32', Float32Array.from([MAIA_ELO]), [1]);
+      }
+    }
+
+    const result = await maiaSession.run(feeds);
+
+    // Find the policy output (the larger one)
+    let logits = null;
+    for (const name of maiaOutputNames) {
+      const data = result[name].data;
+      if (data.length >= 4352) { logits = data; break; }
+    }
+    if (!logits) {
+      console.warn('[Maia] Could not find policy output');
+      return null;
+    }
+
+    // Argmax over legal moves
+    let bestIdx = -1;
+    let bestLogit = -Infinity;
+    for (let i = 0; i < 4352; i++) {
+      if (legalMask[i] > 0 && logits[i] > bestLogit) {
+        bestLogit = logits[i];
+        bestIdx = i;
+      }
+    }
+
+    if (bestIdx < 0) return null;
+
+    let bestUci = maiaMovesReverse[String(bestIdx)];
+    if (isBlack) bestUci = maiaMirrorMove(bestUci);
+
+    console.log(`[Maia] Predicted: ${bestUci} (logit=${bestLogit.toFixed(3)}) for ${fen.split(' ').slice(0,2).join(' ')}…`);
+    return bestUci;
+  } catch (err) {
+    console.error('[Maia] Prediction failed:', err);
+    return null;
+  }
+}
+
 // ─── Login / Logout ───
 function logout() {
   // Flush any pending sync
@@ -1642,6 +1834,7 @@ function showMainApp() {
   updateSessionProgress();
   initBoard();
   initStockfish();
+  initMaia(); // loads in background — non-blocking
 }
 
 function updateSessionProgress() {
@@ -2658,21 +2851,35 @@ async function advanceContinuation(contUci) {
   }
 
   let opponentUci;
+  let moveSource = '';
 
-  if (contUci && contUci.trim()) {
-    opponentUci = contUci.trim().split(/\s+/)[0];
-  } else {
-    // No continuation line available — analyze to find opponent's best move
-    showFeedback('info', 'Analyzing…', 'Finding opponent\'s best response…');
-    stopPreAnalysis();
-    const result = await sfAnalyze(gameEngine.fen(), 16, 1);
-    if (!result || !result.bestMove) {
-      continuationMode = false;
-      showFeedback('info', 'Continuation ended', 'Could not determine opponent\'s best response.');
-      document.getElementById('btnRetry').classList.remove('hidden');
-      return;
+  // Try Maia 3 first for human-like opponent moves
+  if (maiaReady) {
+    const maiaMove = await maiaPredict(gameEngine.fen());
+    if (maiaMove) {
+      opponentUci = maiaMove;
+      moveSource = 'Maia';
     }
-    opponentUci = result.bestMove;
+  }
+
+  // Fallback: use engine continuation or Stockfish
+  if (!opponentUci) {
+    if (contUci && contUci.trim()) {
+      opponentUci = contUci.trim().split(/\s+/)[0];
+      moveSource = 'Stockfish';
+    } else {
+      showFeedback('info', 'Analyzing…', 'Finding opponent\'s best response…');
+      stopPreAnalysis();
+      const result = await sfAnalyze(gameEngine.fen(), 16, 1);
+      if (!result || !result.bestMove) {
+        continuationMode = false;
+        showFeedback('info', 'Continuation ended', 'Could not determine opponent\'s best response.');
+        document.getElementById('btnRetry').classList.remove('hidden');
+        return;
+      }
+      opponentUci = result.bestMove;
+      moveSource = 'Stockfish';
+    }
   }
 
   const fromSq = opponentUci.substring(0, 2);
@@ -2728,7 +2935,7 @@ async function advanceContinuation(contUci) {
   document.getElementById('posInfoContent').innerHTML = `
     <div style="font-size:13px;line-height:1.7">
       <div style="color:var(--blue);font-weight:600;">Continuation Practice</div>
-      <div>Opponent played <code class="mono">${escHtml(result.san)}</code></div>
+      <div>Opponent played <code class="mono">${escHtml(result.san)}</code> <span style="font-size:10px;color:var(--text-muted)">(${moveSource})</span></div>
       <div>Find the best move!</div>
       <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
     </div>
