@@ -1068,7 +1068,7 @@ function disconnectGist() {
 }
 
 // ─── Stockfish Engine ───
-const SF_PATH = 'engine/stockfish-18-lite-single.js';
+const SF_PATH = 'engine/stockfish-wrapper.js';
 
 async function initStockfish() {
   // Allow re-initialization: terminate old worker if it exists
@@ -1096,7 +1096,7 @@ async function initStockfish() {
       sfWorker.addEventListener('message', handler);
       sfWorker.postMessage('uci');
     });
-    sfWorker.postMessage('setoption name Hash value 64');
+    sfWorker.postMessage('setoption name Hash value 512');
     sfWorker.postMessage('isready');
     await new Promise((resolve) => {
       function handler(e) {

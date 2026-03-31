@@ -1,0 +1,2 @@
+*stockfish-18-single.wasm filter=lfs diff=lfs merge=lfs -text
+*.wasm filter=lfs diff=lfs merge=lfs -text
