@@ -1069,6 +1069,8 @@ function disconnectGist() {
 
 // ─── Stockfish Engine ───
 const SF_PATH = 'engine/stockfish-18-single.js';
+let sfWasmBuffer = null; // cached decompressed WASM for re-init
+let sfJsText = null;     // cached JS source for re-init
 
 async function initStockfish() {
   if (sfWorker) {
@@ -1079,34 +1081,46 @@ async function initStockfish() {
     sfSearchActive = false;
   }
   try {
-    // Decompress WASM and create blob URL
-    const wasmResp = await fetch('engine/stockfish-18-single.wasm.gz');
-    const wasmStream = wasmResp.body.pipeThrough(new DecompressionStream('gzip'));
-    const wasmBuffer = await new Response(wasmStream).arrayBuffer();
-    const wasmUrl = URL.createObjectURL(new Blob([wasmBuffer], { type: 'application/wasm' }));
+    // Decompress WASM and cache for re-init
+    if (!sfWasmBuffer) {
+      const wasmResp = await fetch('engine/stockfish-18-single.wasm.gz');
+      const wasmStream = wasmResp.body.pipeThrough(new DecompressionStream('gzip'));
+      sfWasmBuffer = await new Response(wasmStream).arrayBuffer();
+    }
+    if (!sfJsText) {
+      const jsResp = await fetch('engine/stockfish-18-single.js');
+      sfJsText = await jsResp.text();
+    }
 
-    // Fetch the JS, patch the WASM url into it, create a blob worker
-    const jsResp = await fetch('engine/stockfish-18-single.js');
-    const jsText = await jsResp.text();
+    // Patch: receive WASM binary via postMessage, bypass all URL resolution
     const patched = `
+      var _wasmResolve;
+      var _wasmBuffer = new Promise(function(r) { _wasmResolve = r; });
+      self.addEventListener('message', function _initWasm(e) {
+        if (e.data && e.data.type === 'wasmInit') {
+          self.removeEventListener('message', _initWasm);
+          _wasmResolve(e.data.buffer);
+        }
+      });
       var Module = {
-        locateFile: function(path) {
-          if (path.endsWith('.wasm')) return "${wasmUrl}";
-          return path;
+        instantiateWasm: function(imports, successCallback) {
+          _wasmBuffer.then(function(buf) {
+            WebAssembly.instantiate(buf, imports).then(function(output) {
+              successCallback(output.instance, output.module);
+            });
+          });
+          return {};
         }
       };
-      self.originalFetch = self.fetch;
-      self.fetch = function(url, opts) {
-        if (typeof url === 'string' && url.endsWith('.wasm')) {
-          return self.originalFetch("${wasmUrl}", opts);
-        }
-        return self.originalFetch(url, opts);
-      };
-      ` + jsText;
+    ` + sfJsText;
     const workerUrl = URL.createObjectURL(new Blob([patched], { type: 'application/javascript' }));
     sfWorker = new Worker(workerUrl);
 
     sfWorker.addEventListener('error', handleSfCrash);
+
+    // Send WASM binary to worker (copy so sfWasmBuffer stays valid for re-init)
+    const bufferCopy = sfWasmBuffer.slice(0);
+    sfWorker.postMessage({ type: 'wasmInit', buffer: bufferCopy }, [bufferCopy]);
 
     await new Promise((resolve) => {
       function handler(e) {
