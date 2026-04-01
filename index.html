@@ -429,10 +429,11 @@
   [data-hl-fading] {
     transition: background-color 0.4s ease;
   }
-  /* Click-to-move selection */
+  /* Click-to-move selection — very subtle tint */
   .square-selected {
-    background-color: rgba(124, 108, 240, 0.15) !important;
+    background-color: rgba(21, 120, 67, 0.25) !important;
   }
+  /* Legal move dot (empty square target) */
   .square-legal-dot {
     position: relative;
     cursor: pointer;
@@ -442,37 +443,36 @@
     position: absolute;
     top: 50%; left: 50%;
     transform: translate(-50%, -50%);
-    width: 26%; height: 26%;
+    width: 28%; height: 28%;
     border-radius: 50%;
-    background: rgba(124, 108, 240, 0.35);
+    background: rgba(21, 120, 67, 0.4);
     pointer-events: none;
-    transition: width 0.12s ease, height 0.12s ease, background 0.12s ease;
+    transition: opacity 0.1s ease;
   }
   .square-legal-dot:hover::after {
-    width: 36%; height: 36%;
-    background: rgba(124, 108, 240, 0.5);
+    opacity: 0;
   }
   .square-legal-dot:hover {
-    background-color: rgba(124, 108, 240, 0.08) !important;
+    background-color: rgba(21, 120, 67, 0.45) !important;
   }
+  /* Legal capture indicator — corner triangles via gradients (scales with square) */
   .square-legal-capture {
     position: relative;
+    cursor: pointer;
   }
   .square-legal-capture::after {
     content: '';
     position: absolute;
     inset: 0;
-    border-radius: 50%;
-    box-shadow: inset 0 0 0 7px rgba(124, 108, 240, 0.3);
     pointer-events: none;
-    transition: box-shadow 0.12s ease;
-  }
-  .square-legal-capture:hover::after {
-    box-shadow: inset 0 0 0 7px rgba(124, 108, 240, 0.55);
+    background:
+      linear-gradient(to bottom right, rgba(21,120,67,0.55) 50%, transparent 50.5%) top left / 22% 22% no-repeat,
+      linear-gradient(to bottom left, rgba(21,120,67,0.55) 50%, transparent 50.5%) top right / 22% 22% no-repeat,
+      linear-gradient(to top right, rgba(21,120,67,0.55) 50%, transparent 50.5%) bottom left / 22% 22% no-repeat,
+      linear-gradient(to top left, rgba(21,120,67,0.55) 50%, transparent 50.5%) bottom right / 22% 22% no-repeat;
   }
   .square-legal-capture:hover {
-    background-color: rgba(124, 108, 240, 0.08) !important;
-    cursor: pointer;
+    background-color: rgba(21, 120, 67, 0.45) !important;
   }
 
   /* Override chessboard colors for dark theme */
@@ -2700,6 +2700,7 @@ function onBoardClick(e) {
 
     clearSelection();
     if (move) {
+      clearHighlights();
       boardObj.position(gameEngine.fen());
       currentAttempts++;
       evaluateMove(move.from, move.to, move);
@@ -2901,6 +2902,7 @@ function onDrop(source, target) {
   if (move === null) return 'snapback';
 
   clearSelection();
+  clearHighlights();
   currentAttempts++;
   evaluateMove(source, target, move);
   return undefined; // allow the drop
@@ -3752,7 +3754,9 @@ function clearHighlights() {
     // Force style recalc so the transition property is applied before we change the color
     hlEls[0]?.offsetHeight;
     hlEls.forEach(el => {
-      el.style.setProperty('background-color', 'transparent', 'important');
+      // Fade to the square's actual base color (not transparent) for a clean transition
+      const baseColor = el.classList.contains('black-3c85d') ? '#5a6488' : '#b8c0d8';
+      el.style.setProperty('background-color', baseColor, 'important');
     });
     // Clean up inline styles after the transition completes
     setTimeout(() => {
