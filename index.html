@@ -434,9 +434,13 @@
     from { opacity: 1; }
     to { opacity: 0; }
   }
-  /* Click-to-move selection — very subtle tint */
-  .square-selected {
-    background-color: rgba(21, 120, 67, 0.5) !important;
+  /* Click-to-move selection overlay */
+  .square-selected::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: rgba(21, 120, 67, 0.5);
+    pointer-events: none;
   }
   /* Legal move dot (empty square target) */
   .square-legal-dot {
@@ -452,13 +456,6 @@
     border-radius: 50%;
     background: rgba(21, 120, 67, 0.5);
     pointer-events: none;
-    transition: opacity 0.1s ease;
-  }
-  .square-legal-dot:hover::after {
-    opacity: 0;
-  }
-  .square-legal-dot:hover {
-    background-color: rgba(21, 120, 67, 0.5) !important;
   }
   /* Legal capture indicator — corner triangles via gradients (scales with square) */
   .square-legal-capture {
@@ -475,9 +472,6 @@
       linear-gradient(to bottom left, rgba(21,120,67,0.5) 50%, transparent 50.5%) top right / 22% 22% no-repeat,
       linear-gradient(to top right, rgba(21,120,67,0.5) 50%, transparent 50.5%) bottom left / 22% 22% no-repeat,
       linear-gradient(to top left, rgba(21,120,67,0.5) 50%, transparent 50.5%) bottom right / 22% 22% no-repeat;
-  }
-  .square-legal-capture:hover {
-    background-color: rgba(21, 120, 67, 0.5) !important;
   }
 
   /* Override chessboard colors for dark theme */
