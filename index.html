@@ -285,7 +285,7 @@
   .board-container {
     width: 100%; max-width: 520px; position: relative;
   }
-  #board { width: 100%; }
+  #board { width: 100%; touch-action: none; -webkit-touch-callout: none; user-select: none; }
   .board-label-row {
     display: flex; justify-content: space-between;
     font-family: 'JetBrains Mono', monospace;
@@ -737,6 +737,7 @@ let activeArrows = new Set(); // Stores strings like "e2e4"
 let ghostArrow = null; // { from: 'e2', to: 'e4' }
 let bestMoveArrow = null; // { from: 'e2', to: 'e4' } — shown for engine best move reveals
 let isRightClicking = false;
+let lastTouchTime = 0; // prevents synthetic mousedown from double-firing after touch
 
 let currentUsername = '';
 let allGames = [];           // raw game objects from Lichess
@@ -2349,11 +2350,20 @@ function initBoard() {
   initArrowListeners();
   // Click-to-move: capture phase so we fire before chessboard.js drag handlers
   document.getElementById('board').addEventListener('mousedown', onBoardClick, true);
+  document.getElementById('board').addEventListener('touchstart', onBoardClick, true);
 }
     
 function onBoardClick(e) {
-  isRightClicking = (e.button === 2);
-  // Left click clears arrows 
+  const isTouch = e.type === 'touchstart';
+
+  // Guard: skip synthetic mousedown fired after a recent touch event
+  if (!isTouch && Date.now() - lastTouchTime < 500) return;
+  if (isTouch) lastTouchTime = Date.now();
+
+  // Touch has no right-click — treat all touches as left click
+  isRightClicking = !isTouch && (e.button === 2);
+
+  // Left click / tap clears arrows
   if (!isRightClicking) {
     clearArrows();
   }
@@ -2375,7 +2385,7 @@ function onBoardClick(e) {
 
   
 
-  // Find which square was clicked
+  // Find which square was clicked/tapped
   const squareEl = e.target.closest('[data-square]');
   if (!squareEl) return;
   const sq = squareEl.getAttribute('data-square');
