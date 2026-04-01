@@ -428,6 +428,7 @@
     inset: 0;
     background: var(--hl-color);
     pointer-events: none;
+    z-index: 1;
     animation: hl-fade 4s ease forwards;
   }
   @keyframes hl-fade {
@@ -441,7 +442,10 @@
     inset: 0;
     background: rgba(21, 120, 67, 0.5);
     pointer-events: none;
+    z-index: 1;
   }
+  /* Piece images must sit above ::before overlays but below ::after indicators */
+  #board img { position: relative; z-index: 2; }
   /* Legal move dot (empty square target) */
   .square-legal-dot {
     position: relative;
@@ -456,6 +460,7 @@
     border-radius: 50%;
     background: rgba(21, 120, 67, 0.5);
     pointer-events: none;
+    z-index: 3;
   }
   /* Legal capture indicator — corner triangles via gradients (scales with square) */
   .square-legal-capture {
@@ -467,6 +472,7 @@
     position: absolute;
     inset: 0;
     pointer-events: none;
+    z-index: 3;
     background:
       linear-gradient(to bottom right, rgba(21,120,67,0.5) 50%, transparent 50.5%) top left / 22% 22% no-repeat,
       linear-gradient(to bottom left, rgba(21,120,67,0.5) 50%, transparent 50.5%) top right / 22% 22% no-repeat,
