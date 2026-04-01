@@ -2406,7 +2406,6 @@ function showMainApp() {
   sessionTotal = filteredMistakes.length;
   sessionCompleted = 0;
   updateSessionProgress();
-  initBoard();
   initStockfish();
   initMaia(); // loads in background — non-blocking
 }
@@ -2714,8 +2713,11 @@ function clearSelection() {
 
 // ─── Select game ───
 function selectGame(gameId) {
-  document.body.classList.remove('mobile-browsing');
-  document.body.classList.add('mobile-training');
+  // Ensure we leave browsing mode (safety net for no-mistakes early return)
+  if (document.body.classList.contains('mobile-browsing')) {
+    document.body.classList.remove('mobile-browsing');
+    document.body.classList.add('mobile-training');
+  }
   closeDrawer();
   activeGameId = gameId;
   const gameMistakes = filteredMistakes.filter(m => m.gameId === gameId);
@@ -2780,6 +2782,18 @@ function loadPosition(globalIdx) {
 
   sfLog('loadPosition', `idx=${globalIdx} fen=${m.fenBefore.split(' ').slice(0,2).join(' ')}… gameId=${m.gameId} ply=${m.movePly} prevSession=${prevSession} prevFen=${prevFen?.split(' ').slice(0,2).join(' ')}…`);
 
+  // Switch from browsing to training mode on mobile (covers review items, direct loadPosition calls)
+  const wasBrowsing = document.body.classList.contains('mobile-browsing');
+  if (wasBrowsing) {
+    document.body.classList.remove('mobile-browsing');
+    document.body.classList.add('mobile-training');
+  }
+
+  // Initialize board on first load (deferred from showMainApp so container is visible)
+  // Force reflow after class changes so chessboard.js reads correct container width
+  if (!boardObj) document.getElementById('board').offsetHeight;
+  initBoard();
+
   document.getElementById('emptyMsg').classList.add('hidden');
   document.getElementById('btnRetry').classList.add('hidden');
   document.getElementById('btnLichess').classList.remove('hidden');
@@ -2799,6 +2813,9 @@ function loadPosition(globalIdx) {
   // Set up board
   boardObj.orientation(m.playerColor);
   boardObj.position(m.fenBefore, true);
+
+  // Resize after layout settles (important on first load when container may have just become visible)
+  requestAnimationFrame(() => { if (boardObj) { boardObj.resize(); renderArrows(); } });
 
   // Update counter
   const gameMistakes = filteredMistakes.filter(mm => mm.gameId === m.gameId);
