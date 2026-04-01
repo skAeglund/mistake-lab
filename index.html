@@ -474,11 +474,10 @@
   /* Override chessboard colors for dark theme */
   .board-b72b1z .white-1e1d7 { background-color: #b8c0d8; color: #3a3f52; }
   .board-b72b1z .black-3c85d { background-color: #5a6488; color: #b8c0d8; }
-  /* Override chessboard.js built-in drag highlights */
-  [class*="highlight1-"] { box-shadow: none !important; }
-  [class*="highlight2-"] {
+  /* Disable chessboard.js built-in move/drag highlights (we use our own) */
+  [class*="highlight1-"], [class*="highlight2-"] {
     box-shadow: none !important;
-    background-color: rgba(21, 120, 67, 0.5) !important;
+    background-color: transparent !important;
   }
 
   /* Responsive */
