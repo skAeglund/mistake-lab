@@ -434,7 +434,7 @@
   }
   /* Click-to-move selection — very subtle tint */
   .square-selected {
-    background-color: rgba(21, 120, 67, 0.25) !important;
+    background-color: rgba(21, 120, 67, 0.5) !important;
   }
   /* Legal move dot (empty square target) */
   .square-legal-dot {
@@ -448,7 +448,7 @@
     transform: translate(-50%, -50%);
     width: 28%; height: 28%;
     border-radius: 50%;
-    background: rgba(21, 120, 67, 0.52);
+    background: rgba(21, 120, 67, 0.5);
     pointer-events: none;
     transition: opacity 0.1s ease;
   }
@@ -456,7 +456,7 @@
     opacity: 0;
   }
   .square-legal-dot:hover {
-    background-color: rgba(21, 120, 67, 0.58) !important;
+    background-color: rgba(21, 120, 67, 0.5) !important;
   }
   /* Legal capture indicator — corner triangles via gradients (scales with square) */
   .square-legal-capture {
@@ -469,13 +469,13 @@
     inset: 0;
     pointer-events: none;
     background:
-      linear-gradient(to bottom right, rgba(21,120,67,0.7) 50%, transparent 50.5%) top left / 22% 22% no-repeat,
-      linear-gradient(to bottom left, rgba(21,120,67,0.7) 50%, transparent 50.5%) top right / 22% 22% no-repeat,
-      linear-gradient(to top right, rgba(21,120,67,0.7) 50%, transparent 50.5%) bottom left / 22% 22% no-repeat,
-      linear-gradient(to top left, rgba(21,120,67,0.7) 50%, transparent 50.5%) bottom right / 22% 22% no-repeat;
+      linear-gradient(to bottom right, rgba(21,120,67,0.5) 50%, transparent 50.5%) top left / 22% 22% no-repeat,
+      linear-gradient(to bottom left, rgba(21,120,67,0.5) 50%, transparent 50.5%) top right / 22% 22% no-repeat,
+      linear-gradient(to top right, rgba(21,120,67,0.5) 50%, transparent 50.5%) bottom left / 22% 22% no-repeat,
+      linear-gradient(to top left, rgba(21,120,67,0.5) 50%, transparent 50.5%) bottom right / 22% 22% no-repeat;
   }
   .square-legal-capture:hover {
-    background-color: rgba(21, 120, 67, 0.58) !important;
+    background-color: rgba(21, 120, 67, 0.5) !important;
   }
 
   /* Override chessboard colors for dark theme */
@@ -485,7 +485,7 @@
   [class*="highlight1-"] { box-shadow: none !important; }
   [class*="highlight2-"] {
     box-shadow: none !important;
-    background-color: rgba(21, 120, 67, 0.58) !important;
+    background-color: rgba(21, 120, 67, 0.5) !important;
   }
 
   /* Responsive */
@@ -2710,7 +2710,6 @@ function onBoardClick(e) {
     clearSelection();
     if (move) {
       boardObj.position(gameEngine.fen());
-      highlightSquaresWithColor(move.from, move.to, 'rgb(160, 170, 190)'); // temporary neutral highlight
       currentAttempts++;
       evaluateMove(move.from, move.to, move);
     }
@@ -2911,7 +2910,6 @@ function onDrop(source, target) {
   if (move === null) return 'snapback';
 
   clearSelection();
-  highlightSquaresWithColor(source, target, 'rgb(160, 170, 190)'); // temporary neutral highlight
   currentAttempts++;
   evaluateMove(source, target, move);
   return undefined; // allow the drop
@@ -3423,7 +3421,6 @@ function goToLineMove(idx) {
     const from = uci.substring(0, 2);
     const to = uci.substring(2, 4);
     clearHighlights();
-    highlightSquaresWithColor(from, to, engineLine.moves[idx].isUser ? 'rgb(124,108,240)' : 'rgb(91,156,240)');
   }
 
   // Update active class in the move list
@@ -3562,9 +3559,8 @@ async function advanceContinuation(contUci) {
     return;
   }
 
-  // Animate and highlight the opponent's move
+  // Animate the opponent's move
   boardObj.position(gameEngine.fen(), true);
-  highlightSquaresWithColor(fromSq, toSq, 'rgb(91, 156, 240)');
 
   // Check if game is over after opponent's move
   if (gameEngine.game_over()) {
