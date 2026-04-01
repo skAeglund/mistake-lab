@@ -3755,13 +3755,18 @@ function clearHighlights() {
 function highlightSquaresWithColor(from, to, color) {
   const match = color.match(/(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
   if (!match) return;
-  const [, r, g, b] = match;
-  const fromColor = `rgba(${r},${g},${b},0.4)`;
-  const toColor = `rgba(${r},${g},${b},0.6)`;
+  const [, r, g, b] = [null, +match[1], +match[2], +match[3]];
+
+  // Pre-blend highlight over base color to get fully opaque results (no transparency artifacts)
+  const blend = (hr, hg, hb, a, br, bg, bb) =>
+    `rgb(${Math.round(br*(1-a)+hr*a)},${Math.round(bg*(1-a)+hg*a)},${Math.round(bb*(1-a)+hb*a)})`;
   
-  const applyHl = (el, hlColor) => {
+  const applyHl = (el, alpha) => {
     if (!el) return;
-    const baseColor = el.classList.contains('black-3c85d') ? '#5a6488' : '#b8c0d8';
+    const isDark = el.classList.contains('black-3c85d');
+    const [br, bg, bb] = isDark ? [90, 100, 136] : [184, 192, 216];
+    const hlColor = blend(r, g, b, alpha, br, bg, bb);
+    const baseColor = isDark ? '#5a6488' : '#b8c0d8';
     // Strip chessboard.js highlight classes
     el.className = el.className.replace(/\s*highlight\S+/g, '');
     // Remove old transition listener if re-highlighting the same square
@@ -3787,8 +3792,8 @@ function highlightSquaresWithColor(from, to, color) {
     el._hlCleanup = onDone;
     el.addEventListener('transitionend', onDone);
   };
-  applyHl(document.querySelector(`.square-${from}`), fromColor);
-  applyHl(document.querySelector(`.square-${to}`), toColor);
+  applyHl(document.querySelector(`.square-${from}`), 0.4);
+  applyHl(document.querySelector(`.square-${to}`), 0.6);
 }
 
 // Initialize listeners once the board is ready
