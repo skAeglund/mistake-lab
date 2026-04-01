@@ -627,6 +627,53 @@
 
     /* Modal adjustments */
     .modal { padding: 20px; }
+
+    /* ─── Full-screen game list before game selection ─── */
+    body.mobile-browsing .main-layout {
+      display: flex !important;
+      flex-direction: column;
+      height: calc(100vh - 53px);
+    }
+    body.mobile-browsing .panel-left {
+      flex: 1 !important;
+      width: 100% !important;
+      max-height: none !important;
+      border-right: none !important;
+      transform: none !important;
+      position: static !important;
+    }
+    body.mobile-browsing .panel-center,
+    body.mobile-browsing .panel-right,
+    body.mobile-browsing .mobile-toolbar,
+    body.mobile-browsing .drawer-backdrop {
+      display: none !important;
+    }
+    body.mobile-browsing .drawer-close-btn { display: none !important; }
+
+    /* ─── Mobile feedback popup ─── */
+    .mobile-feedback-overlay {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.45);
+      z-index: 300;
+      display: flex; align-items: center; justify-content: center;
+      padding: 16px;
+    }
+    .mobile-feedback-overlay.hidden { display: none !important; }
+    .mobile-feedback-popup {
+      background: var(--bg-panel); border: 1px solid var(--border);
+      border-radius: 14px; padding: 16px; width: 100%; max-width: 340px;
+      max-height: 70vh; overflow-y: auto;
+      animation: fadeSlideIn 0.2s ease;
+    }
+    .mobile-feedback-popup .feedback-box {
+      animation: none; margin-bottom: 8px;
+    }
+    .mobile-feedback-popup .feedback-box:last-child { margin-bottom: 0; }
+    .mobile-feedback-actions {
+      display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px;
+      padding-top: 12px; border-top: 1px solid var(--border);
+    }
+    .mobile-feedback-actions:empty { display: none; margin: 0; padding: 0; border: none; }
   }
   /* Sync indicator */
   .sync-status {
@@ -918,6 +965,14 @@
       <button class="btn btn-ghost btn-sm" onclick="closeSettings()">Cancel</button>
       <button class="btn btn-primary btn-sm" onclick="saveSettingsGist()">Save & Sync</button>
     </div>
+  </div>
+</div>
+
+<!-- Mobile feedback popup (shown on ≤768px after moves) -->
+<div class="mobile-feedback-overlay hidden" id="mobileFeedbackOverlay" onclick="if(event.target===this)closeMobileFeedback()">
+  <div class="mobile-feedback-popup" id="mobileFeedbackPopup">
+    <div id="mobileFeedbackContent"></div>
+    <div class="mobile-feedback-actions" id="mobileFeedbackActions"></div>
   </div>
 </div>
 
@@ -2087,7 +2142,7 @@ function logout() {
   document.getElementById('sessionProgress').classList.add('hidden');
   document.getElementById('syncStatus').classList.add('hidden');
   document.getElementById('btnLogout').classList.add('hidden');
-  document.body.classList.remove('mobile-training', 'drawer-open');
+  document.body.classList.remove('mobile-training', 'mobile-browsing', 'drawer-open');
   if (boardObj) { boardObj.clear(); boardObj = null; }
 }
 
@@ -2340,7 +2395,7 @@ function showMainApp() {
   document.getElementById('sessionProgress').classList.remove('hidden');
   document.getElementById('btnLogout').classList.remove('hidden');
   document.getElementById('syncStatus').classList.remove('hidden');
-  document.body.classList.add('mobile-training');
+  document.body.classList.add('mobile-browsing');
 
   if (isGistConfigured()) {
     setSyncStatus('ok', 'Synced');
@@ -2659,6 +2714,8 @@ function clearSelection() {
 
 // ─── Select game ───
 function selectGame(gameId) {
+  document.body.classList.remove('mobile-browsing');
+  document.body.classList.add('mobile-training');
   closeDrawer();
   activeGameId = gameId;
   const gameMistakes = filteredMistakes.filter(m => m.gameId === gameId);
@@ -2726,6 +2783,7 @@ function loadPosition(globalIdx) {
   document.getElementById('emptyMsg').classList.add('hidden');
   document.getElementById('btnRetry').classList.add('hidden');
   document.getElementById('btnLichess').classList.remove('hidden');
+  closeMobileFeedback();
   preAnalysisPaused = false;
   continuationMode = false;
   hideMaiaControls();
@@ -3177,6 +3235,11 @@ function showColorFeedback(borderColor, bgColor, title, text) {
   div.innerHTML = `<div class="feedback-title" style="color:${borderColor}">${title}</div><div class="feedback-text">${text}</div>`;
   container.insertBefore(div, container.firstChild);
   while (container.children.length > 5) container.removeChild(container.lastChild);
+
+  const type = borderColor.includes('62,207,142') ? 'correct' :
+               borderColor.includes('240,192,64') ? 'inaccurate' :
+               borderColor.includes('239,95,95') ? 'wrong' : 'info';
+  triggerMobilePopup(title, text, type);
 }
 
 // ─── UCI to SAN conversion ───
@@ -3569,6 +3632,7 @@ function retryPosition() {
   firstAttemptFailed = false;
   continuationMode = false;
   hideMaiaControls();
+  closeMobileFeedback();
   document.getElementById('btnRetry').classList.add('hidden');
   engineLine = null;
   browsingLine = false;
@@ -3608,6 +3672,8 @@ function showFeedback(type, title, text, prepend = false) {
   }
   // Keep max 5 feedback entries
   while (container.children.length > 5) container.removeChild(container.lastChild);
+
+  triggerMobilePopup(title, text, type);
 }
 
 function renderAttemptDots() {
@@ -3842,9 +3908,82 @@ function updateMobileSession() {
   if (barEl) barEl.style.width = sessionTotal > 0 ? `${Math.round(sessionCompleted / sessionTotal * 100)}%` : '0%';
 }
 
+// ─── Mobile feedback popup ───
+let _mobilePopupTimer = null;
+let _mobilePopupQueue = [];
+
+function triggerMobilePopup(title, bodyHtml, type) {
+  if (!isMobileView() || continuationMode) return;
+  _mobilePopupQueue.push({ title, bodyHtml, type });
+  clearTimeout(_mobilePopupTimer);
+  _mobilePopupTimer = setTimeout(_renderMobilePopup, 80);
+}
+
+function _cleanFeedbackHtml(html) {
+  const tmp = document.createElement('div');
+  tmp.innerHTML = html;
+  // Remove "Show engine's best" buttons (they reference IDs in feedbackContainer)
+  tmp.querySelectorAll('[id^="rev_"]').forEach(el => el.remove());
+  // Remove attempt dots (shown in feedbackContainer)
+  tmp.querySelectorAll('.attempts-indicator').forEach(el => el.remove());
+  return tmp.innerHTML;
+}
+
+function _renderMobilePopup() {
+  if (_mobilePopupQueue.length === 0) return;
+
+  const overlay = document.getElementById('mobileFeedbackOverlay');
+  const content = document.getElementById('mobileFeedbackContent');
+  const actions = document.getElementById('mobileFeedbackActions');
+
+  // Build feedback boxes from queue
+  let html = '';
+  for (const item of _mobilePopupQueue) {
+    const cleanBody = _cleanFeedbackHtml(item.bodyHtml);
+    html += `<div class="feedback-box ${item.type}">
+      <div class="feedback-title">${item.title}</div>
+      <div class="feedback-text">${cleanBody}</div>
+    </div>`;
+  }
+  _mobilePopupQueue = [];
+  content.innerHTML = html;
+
+  // Determine action buttons from current DOM state
+  const retryBtn = document.getElementById('btnRetry');
+  const retryVisible = retryBtn && !retryBtn.classList.contains('hidden');
+  const contOpts = document.getElementById('continuationOptions');
+
+  let btns = '';
+  if (contOpts) {
+    btns += `<button class="btn btn-primary btn-sm" style="flex:1;min-height:40px;" onclick="closeMobileFeedback();startContinuationMode()">▶ Continue</button>`;
+    btns += `<button class="btn btn-ghost btn-sm" style="min-height:40px;" onclick="closeMobileFeedback();showDeferredEngineLine()">Engine line</button>`;
+  }
+  if (retryVisible) {
+    btns += `<button class="btn btn-ghost btn-sm" style="min-height:40px;border-color:var(--accent);color:var(--accent)" onclick="closeMobileFeedback();retryPosition()">↺ Retry</button>`;
+  }
+  if (retryVisible || contOpts) {
+    btns += `<button class="btn btn-ghost btn-sm" style="flex:1;min-height:40px;" onclick="closeMobileFeedback();nextPosition()">Next →</button>`;
+  }
+  if (!btns) {
+    // "Try again" or informational — just an OK dismiss
+    btns = `<button class="btn btn-ghost btn-sm" style="flex:1;min-height:40px;" onclick="closeMobileFeedback()">OK</button>`;
+  }
+
+  actions.innerHTML = btns;
+  overlay.classList.remove('hidden');
+}
+
+function closeMobileFeedback() {
+  const overlay = document.getElementById('mobileFeedbackOverlay');
+  if (overlay) overlay.classList.add('hidden');
+  _mobilePopupQueue = [];
+  clearTimeout(_mobilePopupTimer);
+}
+
 // ─── Keyboard shortcuts ───
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    if (!document.getElementById('mobileFeedbackOverlay').classList.contains('hidden')) { closeMobileFeedback(); return; }
     if (document.body.classList.contains('drawer-open')) { closeDrawer(); return; }
     if (browsingLine) { exitEngineLine(); return; }
     closeSettings();
