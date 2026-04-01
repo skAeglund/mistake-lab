@@ -2645,6 +2645,14 @@ function initBoard() {
     onSnapEnd: onSnapEnd,
   });
   window.addEventListener('resize', () => { boardObj.resize(); renderArrows(); });
+  // Strip chessboard.js highlight classes the instant they're added (during drag)
+  new MutationObserver(muts => {
+    for (const m of muts) {
+      if (m.target.className.includes('highlight')) {
+        m.target.className = m.target.className.replace(/\s*highlight\S+/g, '');
+      }
+    }
+  }).observe(document.getElementById('board'), { attributes: true, attributeFilter: ['class'], subtree: true });
   initArrowListeners();
   // Click-to-move: capture phase so we fire before chessboard.js drag handlers
   document.getElementById('board').addEventListener('mousedown', onBoardClick, true);
@@ -2925,10 +2933,6 @@ function onDrop(source, target) {
 
 function onSnapEnd() {
   if (gameEngine) boardObj.position(gameEngine.fen());
-  // Strip chessboard.js highlight classes that can linger after drag
-  document.querySelectorAll('[class*="highlight"]').forEach(el => {
-    el.className = el.className.replace(/\s*highlight\S+/g, '');
-  });
 }
 
 // ─── Evaluate the user's move via Stockfish ───
@@ -3758,10 +3762,6 @@ function clearHighlights() {
     el.classList.remove('square-hl');
     el.style.removeProperty('--hl-color');
   });
-  // Strip any lingering chessboard.js highlight classes
-  document.querySelectorAll('[class*="highlight"]').forEach(el => {
-    el.className = el.className.replace(/\s*highlight\S+/g, '');
-  });
   clearSelection();
 }
 
@@ -3772,8 +3772,6 @@ function highlightSquaresWithColor(from, to, color) {
 
   const applyHl = (el, alpha) => {
     if (!el) return;
-    // Strip chessboard.js highlight classes
-    el.className = el.className.replace(/\s*highlight\S+/g, '');
     // Remove existing highlight to allow re-triggering animation on same square
     el.classList.remove('square-hl');
     el.style.removeProperty('--hl-color');
