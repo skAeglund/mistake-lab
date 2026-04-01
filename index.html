@@ -421,14 +421,25 @@
   .hidden { display: none !important; }
   .mono { font-family: 'JetBrains Mono', monospace; }
 
-  /* Square highlight overlay via ::before — never touches the square's own background */
+  /*
+   * Stacking order within each square (isolation creates a local stacking context):
+   *   1. Square background
+   *   2. ::before overlays (z-index: -1) — highlights, selection
+   *   3. Piece <img> (non-positioned, in-flow)
+   *   4. ::after indicators (positioned) — legal dots, capture triangles
+   * During drag, chessboard.js moves the piece out of the square into the
+   * board container, so the square's stacking context no longer limits it.
+   */
+  .square-55d63 { isolation: isolate; }
+
+  /* Square highlight overlay via ::before */
   .square-hl::before {
     content: '';
     position: absolute;
     inset: 0;
     background: var(--hl-color);
     pointer-events: none;
-    z-index: 1;
+    z-index: -1;
     animation: hl-fade 4s ease forwards;
   }
   @keyframes hl-fade {
@@ -442,10 +453,8 @@
     inset: 0;
     background: rgba(21, 120, 67, 0.5);
     pointer-events: none;
-    z-index: 1;
+    z-index: -1;
   }
-  /* Piece images must sit above ::before overlays but below ::after indicators */
-  #board img { position: relative; z-index: 2; }
   /* Legal move dot (empty square target) */
   .square-legal-dot {
     position: relative;
@@ -460,7 +469,6 @@
     border-radius: 50%;
     background: rgba(21, 120, 67, 0.5);
     pointer-events: none;
-    z-index: 3;
   }
   /* Legal capture indicator — corner triangles via gradients (scales with square) */
   .square-legal-capture {
@@ -472,7 +480,6 @@
     position: absolute;
     inset: 0;
     pointer-events: none;
-    z-index: 3;
     background:
       linear-gradient(to bottom right, rgba(21,120,67,0.5) 50%, transparent 50.5%) top left / 22% 22% no-repeat,
       linear-gradient(to bottom left, rgba(21,120,67,0.5) 50%, transparent 50.5%) top right / 22% 22% no-repeat,
