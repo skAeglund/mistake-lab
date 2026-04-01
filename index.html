@@ -421,9 +421,18 @@
   .hidden { display: none !important; }
   .mono { font-family: 'JetBrains Mono', monospace; }
 
-  /* Dynamic square highlights — auto-fade via inline transitions */
-  .square-highlighted {
-    position: relative;
+  /* Square highlight overlay via ::before — never touches the square's own background */
+  .square-hl::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: var(--hl-color);
+    pointer-events: none;
+    animation: hl-fade 4s ease forwards;
+  }
+  @keyframes hl-fade {
+    from { opacity: 1; }
+    to { opacity: 0; }
   }
   /* Click-to-move selection — very subtle tint */
   .square-selected {
@@ -3738,11 +3747,9 @@ function clearBoard() {
 }
 
 function clearHighlights() {
-  document.querySelectorAll('[data-hl]').forEach(el => {
-    if (el._hlCleanup) { el.removeEventListener('transitionend', el._hlCleanup); el._hlCleanup = null; }
-    el.removeAttribute('data-hl');
-    el.style.removeProperty('background-color');
-    el.style.removeProperty('transition');
+  document.querySelectorAll('.square-hl').forEach(el => {
+    el.classList.remove('square-hl');
+    el.style.removeProperty('--hl-color');
   });
   // Strip any lingering chessboard.js highlight classes
   document.querySelectorAll('[class*="highlight"]').forEach(el => {
@@ -3754,42 +3761,24 @@ function clearHighlights() {
 function highlightSquaresWithColor(from, to, color) {
   const match = color.match(/(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
   if (!match) return;
-  const [, r, g, b] = [null, +match[1], +match[2], +match[3]];
+  const [, r, g, b] = match;
 
-  // Pre-blend highlight over base color to get fully opaque results (no transparency artifacts)
-  const blend = (hr, hg, hb, a, br, bg, bb) =>
-    `rgb(${Math.round(br*(1-a)+hr*a)},${Math.round(bg*(1-a)+hg*a)},${Math.round(bb*(1-a)+hb*a)})`;
-  
   const applyHl = (el, alpha) => {
     if (!el) return;
-    const isDark = el.classList.contains('black-3c85d');
-    const [br, bg, bb] = isDark ? [90, 100, 136] : [184, 192, 216];
-    const hlColor = blend(r, g, b, alpha, br, bg, bb);
-    const baseColor = isDark ? '#5a6488' : '#b8c0d8';
     // Strip chessboard.js highlight classes
     el.className = el.className.replace(/\s*highlight\S+/g, '');
-    // Remove old transition listener if re-highlighting the same square
-    if (el._hlCleanup) { el.removeEventListener('transitionend', el._hlCleanup); el._hlCleanup = null; }
-    // Apply highlight color immediately with no transition
-    el.style.setProperty('transition', 'none', 'important');
-    el.style.setProperty('background-color', hlColor, 'important');
-    el.setAttribute('data-hl', '1');
-    // Next frame: enable 4s transition and fade to base color
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      if (!el.hasAttribute('data-hl')) return;
-      el.style.setProperty('transition', 'background-color 4s ease', 'important');
-      el.style.setProperty('background-color', baseColor, 'important');
-    }));
-    // Clean up inline styles when transition finishes
-    const onDone = () => {
-      el.removeEventListener('transitionend', onDone);
-      el._hlCleanup = null;
-      el.removeAttribute('data-hl');
-      el.style.removeProperty('background-color');
-      el.style.removeProperty('transition');
-    };
-    el._hlCleanup = onDone;
-    el.addEventListener('transitionend', onDone);
+    // Remove existing highlight to allow re-triggering animation on same square
+    el.classList.remove('square-hl');
+    el.style.removeProperty('--hl-color');
+    void el.offsetWidth; // force reflow to restart animation
+    // Apply overlay
+    el.style.setProperty('--hl-color', `rgba(${r},${g},${b},${alpha})`);
+    el.classList.add('square-hl');
+    // Clean up after fade animation completes
+    el.addEventListener('animationend', () => {
+      el.classList.remove('square-hl');
+      el.style.removeProperty('--hl-color');
+    }, { once: true });
   };
   applyHl(document.querySelector(`.square-${from}`), 0.4);
   applyHl(document.querySelector(`.square-${to}`), 0.6);
