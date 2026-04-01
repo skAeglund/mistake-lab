@@ -434,7 +434,7 @@
   }
   /* Click-to-move selection — very subtle tint */
   .square-selected {
-    background-color: rgba(21, 120, 67, 0.19) !important;
+    background-color: rgba(21, 120, 67, 0.25) !important;
   }
   /* Legal move dot (empty square target) */
   .square-legal-dot {
@@ -448,7 +448,7 @@
     transform: translate(-50%, -50%);
     width: 28%; height: 28%;
     border-radius: 50%;
-    background: rgba(21, 120, 67, 0.4);
+    background: rgba(21, 120, 67, 0.52);
     pointer-events: none;
     transition: opacity 0.1s ease;
   }
@@ -456,7 +456,7 @@
     opacity: 0;
   }
   .square-legal-dot:hover {
-    background-color: rgba(21, 120, 67, 0.45) !important;
+    background-color: rgba(21, 120, 67, 0.58) !important;
   }
   /* Legal capture indicator — corner triangles via gradients (scales with square) */
   .square-legal-capture {
@@ -469,23 +469,23 @@
     inset: 0;
     pointer-events: none;
     background:
-      linear-gradient(to bottom right, rgba(21,120,67,0.55) 50%, transparent 50.5%) top left / 22% 22% no-repeat,
-      linear-gradient(to bottom left, rgba(21,120,67,0.55) 50%, transparent 50.5%) top right / 22% 22% no-repeat,
-      linear-gradient(to top right, rgba(21,120,67,0.55) 50%, transparent 50.5%) bottom left / 22% 22% no-repeat,
-      linear-gradient(to top left, rgba(21,120,67,0.55) 50%, transparent 50.5%) bottom right / 22% 22% no-repeat;
+      linear-gradient(to bottom right, rgba(21,120,67,0.7) 50%, transparent 50.5%) top left / 22% 22% no-repeat,
+      linear-gradient(to bottom left, rgba(21,120,67,0.7) 50%, transparent 50.5%) top right / 22% 22% no-repeat,
+      linear-gradient(to top right, rgba(21,120,67,0.7) 50%, transparent 50.5%) bottom left / 22% 22% no-repeat,
+      linear-gradient(to top left, rgba(21,120,67,0.7) 50%, transparent 50.5%) bottom right / 22% 22% no-repeat;
   }
   .square-legal-capture:hover {
-    background-color: rgba(21, 120, 67, 0.45) !important;
+    background-color: rgba(21, 120, 67, 0.58) !important;
   }
 
   /* Override chessboard colors for dark theme */
   .board-b72b1z .white-1e1d7 { background-color: #b8c0d8; color: #3a3f52; }
   .board-b72b1z .black-3c85d { background-color: #5a6488; color: #b8c0d8; }
   /* Override chessboard.js built-in drag highlights */
-  .highlight1-32417 { box-shadow: none !important; }
-  .highlight2-9c5d2 {
+  [class*="highlight1-"] { box-shadow: none !important; }
+  [class*="highlight2-"] {
     box-shadow: none !important;
-    background-color: rgba(21, 120, 67, 0.45) !important;
+    background-color: rgba(21, 120, 67, 0.58) !important;
   }
 
   /* Responsive */
@@ -2919,6 +2919,10 @@ function onDrop(source, target) {
 
 function onSnapEnd() {
   if (gameEngine) boardObj.position(gameEngine.fen());
+  // Strip chessboard.js highlight classes that can linger after drag
+  document.querySelectorAll('[class*="highlight"]').forEach(el => {
+    el.className = el.className.replace(/\s*highlight\S+/g, '');
+  });
 }
 
 // ─── Evaluate the user's move via Stockfish ───
@@ -3751,6 +3755,10 @@ function clearHighlights() {
     el.style.removeProperty('--hl-color');
     el.style.removeProperty('--hl-base');
   });
+  // Strip any lingering chessboard.js highlight classes
+  document.querySelectorAll('[class*="highlight"]').forEach(el => {
+    el.className = el.className.replace(/\s*highlight\S+/g, '');
+  });
   clearSelection();
 }
 
@@ -3770,6 +3778,13 @@ function highlightSquaresWithColor(from, to, color) {
     el.removeAttribute('data-hl');
     void el.offsetHeight;
     el.setAttribute('data-hl', '1');
+    // Auto-cleanup when animation finishes to prevent residual fill
+    el.addEventListener('animationend', function onEnd() {
+      el.removeEventListener('animationend', onEnd);
+      el.removeAttribute('data-hl');
+      el.style.removeProperty('--hl-color');
+      el.style.removeProperty('--hl-base');
+    });
   };
   applyHl(document.querySelector(`.square-${from}`), fromColor);
   applyHl(document.querySelector(`.square-${to}`), toColor);
