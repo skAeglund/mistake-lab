@@ -440,7 +440,7 @@
     background: var(--hl-color);
     pointer-events: none;
     z-index: -1;
-    animation: hl-fade 4s ease forwards;
+    animation: hl-fade 4s ease 1s forwards;
   }
   @keyframes hl-fade {
     from { opacity: 1; }
@@ -3785,8 +3785,8 @@ function highlightSquaresWithColor(from, to, color) {
       el.style.removeProperty('--hl-color');
     }, { once: true });
   };
-  applyHl(document.querySelector(`.square-${from}`), 0.4);
-  applyHl(document.querySelector(`.square-${to}`), 0.6);
+  applyHl(document.querySelector(`.square-${from}`), 0.5);
+  applyHl(document.querySelector(`.square-${to}`), 0.7);
 }
 
 // Initialize listeners once the board is ready
