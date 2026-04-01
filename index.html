@@ -421,16 +421,9 @@
   .hidden { display: none !important; }
   .mono { font-family: 'JetBrains Mono', monospace; }
 
-  /* Dynamic square highlights — auto-fade via CSS animation */
+  /* Dynamic square highlights — auto-fade via inline transitions */
   .square-highlighted {
     position: relative;
-  }
-  @keyframes hl-fade {
-    from { background-color: var(--hl-color); }
-    to   { background-color: var(--hl-base); }
-  }
-  [data-hl] {
-    animation: hl-fade 4s ease forwards;
   }
   /* Click-to-move selection — very subtle tint */
   .square-selected {
@@ -3747,9 +3740,10 @@ function clearBoard() {
 
 function clearHighlights() {
   document.querySelectorAll('[data-hl]').forEach(el => {
+    if (el._hlCleanup) { el.removeEventListener('transitionend', el._hlCleanup); el._hlCleanup = null; }
     el.removeAttribute('data-hl');
-    el.style.removeProperty('--hl-color');
-    el.style.removeProperty('--hl-base');
+    el.style.removeProperty('background-color');
+    el.style.removeProperty('transition');
   });
   // Strip any lingering chessboard.js highlight classes
   document.querySelectorAll('[class*="highlight"]').forEach(el => {
@@ -3768,19 +3762,30 @@ function highlightSquaresWithColor(from, to, color) {
   const applyHl = (el, hlColor) => {
     if (!el) return;
     const baseColor = el.classList.contains('black-3c85d') ? '#5a6488' : '#b8c0d8';
-    el.style.setProperty('--hl-color', hlColor);
-    el.style.setProperty('--hl-base', baseColor);
-    // Remove + reflow + re-add to restart the CSS animation
-    el.removeAttribute('data-hl');
-    void el.offsetHeight;
+    // Strip chessboard.js highlight classes
+    el.className = el.className.replace(/\s*highlight\S+/g, '');
+    // Remove old transition listener if re-highlighting the same square
+    if (el._hlCleanup) { el.removeEventListener('transitionend', el._hlCleanup); el._hlCleanup = null; }
+    // Apply highlight color immediately with no transition
+    el.style.setProperty('transition', 'none', 'important');
+    el.style.setProperty('background-color', hlColor, 'important');
     el.setAttribute('data-hl', '1');
-    // Auto-cleanup when animation finishes to prevent residual fill
-    el.addEventListener('animationend', function onEnd() {
-      el.removeEventListener('animationend', onEnd);
+    // Next frame: enable 4s transition and fade to base color
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (!el.hasAttribute('data-hl')) return;
+      el.style.setProperty('transition', 'background-color 4s ease', 'important');
+      el.style.setProperty('background-color', baseColor, 'important');
+    }));
+    // Clean up inline styles when transition finishes
+    const onDone = () => {
+      el.removeEventListener('transitionend', onDone);
+      el._hlCleanup = null;
       el.removeAttribute('data-hl');
-      el.style.removeProperty('--hl-color');
-      el.style.removeProperty('--hl-base');
-    });
+      el.style.removeProperty('background-color');
+      el.style.removeProperty('transition');
+    };
+    el._hlCleanup = onDone;
+    el.addEventListener('transitionend', onDone);
   };
   applyHl(document.querySelector(`.square-${from}`), fromColor);
   applyHl(document.querySelector(`.square-${to}`), toColor);
