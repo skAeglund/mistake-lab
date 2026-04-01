@@ -294,6 +294,9 @@
   .position-nav {
     display: flex; gap: 8px; align-items: center;
   }
+  .position-nav-arrows {
+    display: contents; /* children flow into parent flex layout */
+  }
   .position-counter {
     font-family: 'JetBrains Mono', monospace;
     font-size: 13px; color: var(--text-secondary);
@@ -452,10 +455,178 @@
   @media (max-width: 1100px) {
     .main-layout { grid-template-columns: 240px 1fr 280px; }
   }
-  @media (max-width: 900px) {
+  @media (max-width: 900px) and (min-width: 769px) {
     .main-layout { grid-template-columns: 1fr; grid-template-rows: auto 1fr auto; }
     .panel-left { max-height: 200px; border-right: none; border-bottom: 1px solid var(--border); }
     .panel-right { max-height: 300px; border-left: none; border-top: 1px solid var(--border); }
+  }
+
+  /* ─── Mobile toolbar ─── */
+  .mobile-toolbar {
+    display: none; /* shown only via media query */
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 10px;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 50;
+    min-height: 44px;
+  }
+  .mobile-toolbar-btn {
+    width: 38px; height: 38px; border-radius: 8px;
+    border: 1px solid var(--border); background: transparent;
+    color: var(--text-secondary); font-size: 18px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; flex-shrink: 0;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .mobile-toolbar-btn:active { background: var(--bg-card); }
+  .mobile-toolbar-nav {
+    display: flex; align-items: center; gap: 2px;
+  }
+  .mobile-toolbar-nav .nav-btn {
+    width: 36px; height: 36px; border-radius: 8px;
+    border: 1px solid var(--border); background: transparent;
+    color: var(--text-secondary); font-size: 18px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+  }
+  .mobile-toolbar-nav .nav-btn:active { background: var(--bg-card); color: var(--text-primary); }
+  .mobile-toolbar-counter {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px; color: var(--text-secondary);
+    min-width: 50px; text-align: center;
+  }
+  .mobile-session {
+    display: flex; align-items: center; gap: 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; color: var(--text-muted);
+  }
+  .mobile-progress-track {
+    width: 48px; height: 4px; border-radius: 2px;
+    background: var(--bg-input); overflow: hidden;
+  }
+  .mobile-progress-fill {
+    height: 100%; border-radius: 2px;
+    background: linear-gradient(90deg, var(--accent), var(--green));
+    transition: width 0.4s ease;
+  }
+
+  /* ─── Drawer backdrop ─── */
+  .drawer-backdrop {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.55);
+    z-index: 199;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body.drawer-open .drawer-backdrop { display: block; }
+  body.drawer-open { overflow: hidden; }
+
+  /* ─── Drawer close button (inside panel-left) ─── */
+  .drawer-close-btn {
+    display: none; /* shown only via media query */
+    width: 32px; height: 32px; border-radius: 6px;
+    border: 1px solid var(--border); background: transparent;
+    color: var(--text-secondary); font-size: 18px;
+    align-items: center; justify-content: center;
+    cursor: pointer; flex-shrink: 0;
+  }
+
+  /* ─── Mobile ≤768px ─── */
+  @media (max-width: 768px) {
+    /* Hide full header when training */
+    body.mobile-training .header { display: none; }
+
+    /* Show mobile toolbar when training */
+    body.mobile-training .mobile-toolbar { display: flex; }
+
+    /* Show drawer close button */
+    .drawer-close-btn { display: flex; }
+
+    /* Main layout: flex column instead of grid */
+    body.mobile-training .main-layout {
+      display: flex !important;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+
+    /* Left panel → slide-out drawer */
+    body.mobile-training .panel-left {
+      position: fixed;
+      top: 0; left: 0; bottom: 0;
+      width: min(300px, 85vw);
+      max-height: none !important;
+      z-index: 200;
+      transform: translateX(-100%);
+      transition: transform 0.25s ease;
+      border-right: 1px solid var(--border);
+      border-bottom: none;
+    }
+    body.drawer-open .panel-left {
+      transform: translateX(0);
+    }
+
+    /* Center panel: board-focused, compact */
+    .panel-center {
+      padding: 6px 2px !important;
+      gap: 8px !important;
+    }
+    .board-container { max-width: 100%; }
+    .board-label-row { display: none; }
+
+    /* Position nav: compact */
+    .position-nav {
+      gap: 4px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .position-nav .btn-sm { padding: 6px 10px; font-size: 11px; }
+    .position-counter { min-width: auto; font-size: 12px; display: none; }
+    .position-nav-arrows { display: none; }
+
+    /* Right panel: flows below board, no height cap */
+    .panel-right {
+      border-left: none !important;
+      border-top: 1px solid var(--border);
+      max-height: none !important;
+    }
+
+    /* Feedback: compact */
+    .feedback-area { padding: 10px; gap: 10px; }
+    .feedback-box { padding: 10px 12px; }
+    .feedback-title { font-size: 13px; }
+    .feedback-text { font-size: 12px; }
+    .info-card { padding: 10px 12px; }
+    .info-card h4 { margin-bottom: 6px; }
+    .engine-line { padding: 10px; }
+
+    /* Maia controls compact */
+    .maia-controls { padding: 10px 12px; }
+
+    /* Position queue compact */
+    .position-queue { padding: 10px 12px; }
+
+    /* Login form responsive */
+    .login-form { flex-direction: column; align-items: center; }
+    .login-form input { width: 100%; max-width: 300px; }
+    .login-screen { padding: 20px; }
+    .login-screen h2 { font-size: 22px; }
+    .gist-fields input { width: 100%; max-width: 300px; }
+
+    /* Filter chips: larger touch targets */
+    .filter-chip { padding: 6px 14px; font-size: 12px; }
+
+    /* Buttons: ensure minimum touch target */
+    .btn-sm { min-height: 36px; }
+    .btn { min-height: 40px; }
+
+    /* Header compact (before training mode kicks in) */
+    .header { padding: 10px 14px; }
+    .header-title { font-size: 14px; }
+
+    /* Modal adjustments */
+    .modal { padding: 20px; }
   }
   /* Sync indicator */
   .sync-status {
@@ -624,14 +795,37 @@
 
 <!-- Main app -->
 <div id="mainApp" class="main-layout hidden">
+  <!-- Mobile drawer backdrop -->
+  <div class="drawer-backdrop" id="drawerBackdrop" onclick="closeDrawer()"></div>
+
+  <!-- Mobile toolbar (visible ≤768px when training) -->
+  <div class="mobile-toolbar" id="mobileToolbar">
+    <button class="mobile-toolbar-btn" onclick="toggleDrawer()" aria-label="Open game list">☰</button>
+    <div class="mobile-toolbar-nav">
+      <button class="nav-btn" onclick="prevPosition()" aria-label="Previous position">‹</button>
+      <span class="mobile-toolbar-counter" id="posCounterMobile">—</span>
+      <button class="nav-btn" onclick="nextPosition()" aria-label="Next position">›</button>
+    </div>
+    <div class="mobile-session" id="mobileSession">
+      <span id="sessionTextMobile">0/0</span>
+      <div class="mobile-progress-track">
+        <div class="mobile-progress-fill" id="sessionBarMobile" style="width:0%"></div>
+      </div>
+    </div>
+    <button class="mobile-toolbar-btn" onclick="openSettings()" aria-label="Settings">⚙</button>
+  </div>
+
   <!-- Left panel: Game list -->
   <div class="panel-left">
     <div class="panel-header">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
         <h3 style="margin-bottom:0" id="panelTitle">Games</h3>
-        <button class="btn btn-ghost btn-sm" id="btnReviewMode" onclick="toggleReviewMode()" style="font-size:11px;">
-          ⏰ Review <span id="reviewDueCount"></span>
-        </button>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <button class="btn btn-ghost btn-sm" id="btnReviewMode" onclick="toggleReviewMode()" style="font-size:11px;">
+            ⏰ Review <span id="reviewDueCount"></span>
+          </button>
+          <button class="drawer-close-btn" onclick="closeDrawer()" aria-label="Close game list">✕</button>
+        </div>
       </div>
       <div class="filter-row">
         <button class="filter-chip active" data-filter="color" data-value="both" onclick="setFilter(this)">Both</button>
@@ -658,9 +852,11 @@
       <svg class="hidden" id="arrowSvg"></svg>
     </div>
     <div class="position-nav" id="positionNav">
-      <button class="btn btn-ghost btn-sm" onclick="prevPosition()">← Prev</button>
-      <span class="position-counter" id="posCounter">—</span>
-      <button class="btn btn-ghost btn-sm" onclick="nextPosition()">Next →</button>
+      <span class="position-nav-arrows">
+        <button class="btn btn-ghost btn-sm" onclick="prevPosition()">← Prev</button>
+        <span class="position-counter" id="posCounter">—</span>
+        <button class="btn btn-ghost btn-sm" onclick="nextPosition()">Next →</button>
+      </span>
       <button class="btn btn-ghost btn-sm" onclick="skipPosition()" title="Skip this position">Skip</button>
       <button class="btn btn-ghost btn-sm hidden" id="btnRetry" onclick="retryPosition()" style="border-color:var(--accent);color:var(--accent)">↺ Retry</button>
       <button class="btn btn-ghost btn-sm hidden" id="btnLichess" onclick="openLichessAnalysis()" title="Open in Lichess analysis">♟ Lichess</button>
@@ -1891,6 +2087,7 @@ function logout() {
   document.getElementById('sessionProgress').classList.add('hidden');
   document.getElementById('syncStatus').classList.add('hidden');
   document.getElementById('btnLogout').classList.add('hidden');
+  document.body.classList.remove('mobile-training', 'drawer-open');
   if (boardObj) { boardObj.clear(); boardObj = null; }
 }
 
@@ -2143,6 +2340,7 @@ function showMainApp() {
   document.getElementById('sessionProgress').classList.remove('hidden');
   document.getElementById('btnLogout').classList.remove('hidden');
   document.getElementById('syncStatus').classList.remove('hidden');
+  document.body.classList.add('mobile-training');
 
   if (isGistConfigured()) {
     setSyncStatus('ok', 'Synced');
@@ -2165,6 +2363,7 @@ function updateSessionProgress() {
   document.getElementById('sessionText').textContent = `${sessionCompleted} / ${sessionTotal}`;
   const pct = sessionTotal > 0 ? (sessionCompleted / sessionTotal * 100) : 0;
   document.getElementById('sessionBar').style.width = pct + '%';
+  updateMobileSession();
 
   // Update review due count
   buildReviewQueue();
@@ -2460,6 +2659,7 @@ function clearSelection() {
 
 // ─── Select game ───
 function selectGame(gameId) {
+  closeDrawer();
   activeGameId = gameId;
   const gameMistakes = filteredMistakes.filter(m => m.gameId === gameId);
   if (gameMistakes.length === 0) {
@@ -2546,6 +2746,7 @@ function loadPosition(globalIdx) {
   const gameMistakes = filteredMistakes.filter(mm => mm.gameId === m.gameId);
   const localIdx = gameMistakes.indexOf(m);
   document.getElementById('posCounter').textContent = `${localIdx + 1} / ${gameMistakes.length}`;
+  updateMobileCounter();
 
   // Show position info
   const infoCard = document.getElementById('posInfoCard');
@@ -3616,9 +3817,35 @@ function escHtml(s) {
   return d.innerHTML;
 }
 
+// ─── Mobile helpers ───
+function isMobileView() {
+  return window.innerWidth <= 768;
+}
+
+function toggleDrawer() {
+  document.body.classList.toggle('drawer-open');
+}
+
+function closeDrawer() {
+  document.body.classList.remove('drawer-open');
+}
+
+function updateMobileCounter() {
+  const el = document.getElementById('posCounterMobile');
+  if (el) el.textContent = document.getElementById('posCounter').textContent;
+}
+
+function updateMobileSession() {
+  const textEl = document.getElementById('sessionTextMobile');
+  const barEl = document.getElementById('sessionBarMobile');
+  if (textEl) textEl.textContent = `${sessionCompleted}/${sessionTotal}`;
+  if (barEl) barEl.style.width = sessionTotal > 0 ? `${Math.round(sessionCompleted / sessionTotal * 100)}%` : '0%';
+}
+
 // ─── Keyboard shortcuts ───
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    if (document.body.classList.contains('drawer-open')) { closeDrawer(); return; }
     if (browsingLine) { exitEngineLine(); return; }
     closeSettings();
   }
