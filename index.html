@@ -421,17 +421,20 @@
   .hidden { display: none !important; }
   .mono { font-family: 'JetBrains Mono', monospace; }
 
-  /* Dynamic square highlights (applied via inline styles) */
+  /* Dynamic square highlights — auto-fade via CSS animation */
   .square-highlighted {
     position: relative;
   }
-  /* Fade-out transition for move highlights */
-  [data-hl-fading] {
-    transition: background-color 0.4s ease;
+  @keyframes hl-fade {
+    from { background-color: var(--hl-color); }
+    to   { background-color: var(--hl-base); }
+  }
+  [data-hl] {
+    animation: hl-fade 4s ease forwards;
   }
   /* Click-to-move selection — very subtle tint */
   .square-selected {
-    background-color: rgba(21, 120, 67, 0.25) !important;
+    background-color: rgba(21, 120, 67, 0.19) !important;
   }
   /* Legal move dot (empty square target) */
   .square-legal-dot {
@@ -2700,8 +2703,8 @@ function onBoardClick(e) {
 
     clearSelection();
     if (move) {
-      clearHighlights();
       boardObj.position(gameEngine.fen());
+      highlightSquaresWithColor(move.from, move.to, 'rgb(160, 170, 190)'); // temporary neutral highlight
       currentAttempts++;
       evaluateMove(move.from, move.to, move);
     }
@@ -2902,7 +2905,7 @@ function onDrop(source, target) {
   if (move === null) return 'snapback';
 
   clearSelection();
-  clearHighlights();
+  highlightSquaresWithColor(source, target, 'rgb(160, 170, 190)'); // temporary neutral highlight
   currentAttempts++;
   evaluateMove(source, target, move);
   return undefined; // allow the drop
@@ -3097,7 +3100,6 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
   const pid = posId(m);
 
   if (wpDrop <= 5) {
-    clearHighlights();
     highlightSquaresWithColor(from, to, color);
     const isExactBest = move.san === bestMoveSan;
 
@@ -3145,7 +3147,6 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
       renderQueue();
     }
   } else if (wpDrop <= 10) {
-    clearHighlights();
     highlightSquaresWithColor(from, to, color);
 
     if (continuationMode) {
@@ -3553,7 +3554,6 @@ async function advanceContinuation(contUci) {
 
   // Animate and highlight the opponent's move
   boardObj.position(gameEngine.fen(), true);
-  clearHighlights();
   highlightSquaresWithColor(fromSq, toSq, 'rgb(91, 156, 240)');
 
   // Check if game is over after opponent's move
@@ -3740,32 +3740,11 @@ function clearBoard() {
 }
 
 function clearHighlights() {
-  // Clean up any stale fade-outs still in progress
-  document.querySelectorAll('[data-hl-fading]').forEach(el => {
-    el.style.removeProperty('background-color');
-    el.removeAttribute('data-hl-fading');
+  document.querySelectorAll('[data-hl]').forEach(el => {
+    el.removeAttribute('data-hl');
+    el.style.removeProperty('--hl-color');
+    el.style.removeProperty('--hl-base');
   });
-  const hlEls = document.querySelectorAll('[data-hl]');
-  if (hlEls.length > 0) {
-    hlEls.forEach(el => {
-      el.setAttribute('data-hl-fading', '1');
-      el.removeAttribute('data-hl');
-    });
-    // Force style recalc so the transition property is applied before we change the color
-    hlEls[0]?.offsetHeight;
-    hlEls.forEach(el => {
-      // Fade to the square's actual base color (not transparent) for a clean transition
-      const baseColor = el.classList.contains('black-3c85d') ? '#5a6488' : '#b8c0d8';
-      el.style.setProperty('background-color', baseColor, 'important');
-    });
-    // Clean up inline styles after the transition completes
-    setTimeout(() => {
-      hlEls.forEach(el => {
-        el.style.removeProperty('background-color');
-        el.removeAttribute('data-hl-fading');
-      });
-    }, 420);
-  }
   clearSelection();
 }
 
@@ -3776,12 +3755,18 @@ function highlightSquaresWithColor(from, to, color) {
   const fromColor = `rgba(${r},${g},${b},0.4)`;
   const toColor = `rgba(${r},${g},${b},0.6)`;
   
-  const fromEl = document.querySelector(`.square-${from}`);
-  const toEl = document.querySelector(`.square-${to}`);
-  // Cancel any ongoing fade-out so new highlight applies instantly
-  [fromEl, toEl].forEach(el => { if (el) el.removeAttribute('data-hl-fading'); });
-  if (fromEl) { fromEl.style.setProperty('background-color', fromColor, 'important'); fromEl.setAttribute('data-hl', '1'); }
-  if (toEl) { toEl.style.setProperty('background-color', toColor, 'important'); toEl.setAttribute('data-hl', '1'); }
+  const applyHl = (el, hlColor) => {
+    if (!el) return;
+    const baseColor = el.classList.contains('black-3c85d') ? '#5a6488' : '#b8c0d8';
+    el.style.setProperty('--hl-color', hlColor);
+    el.style.setProperty('--hl-base', baseColor);
+    // Remove + reflow + re-add to restart the CSS animation
+    el.removeAttribute('data-hl');
+    void el.offsetHeight;
+    el.setAttribute('data-hl', '1');
+  };
+  applyHl(document.querySelector(`.square-${from}`), fromColor);
+  applyHl(document.querySelector(`.square-${to}`), toColor);
 }
 
 // Initialize listeners once the board is ready
