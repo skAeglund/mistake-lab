@@ -182,6 +182,8 @@
   .game-card.completed { opacity: 0.5; }
   .game-card.completed:hover { opacity: 0.75; }
   .game-card.completed .game-opening { text-decoration: line-through; text-decoration-color: var(--text-muted); }
+  .show-more-btn { padding:10px; text-align:center; color:var(--blue); font-size:13px; cursor:pointer; border-top:1px solid var(--border); }
+  .show-more-btn:hover { background:var(--bg-hover); }
   .badge-done { background: var(--green-dim); color: var(--green); }
 
   /* Review mode */
@@ -1156,6 +1158,8 @@ let hintMove = null;             // frozen UCI string of the best move when hint
 let hintArrow = null;            // { from, to } for hint arrow drawn on second press
 let reviewMode = false;          // true = show only due SRS positions
 let reviewQueue = [];            // positions due for review
+let gameListDisplayLimit = 50;
+let reviewListDisplayLimit = 50;
 
 const filters = { color: 'both', severity: 'all', platform: 'all' };
 
@@ -2699,6 +2703,7 @@ function setFilter(el) {
   document.querySelectorAll(`.filter-chip[data-filter="${filterType}"]`).forEach(c => c.classList.remove('active'));
   el.classList.add('active');
   applyFilters();
+  gameListDisplayLimit = 50;
   renderGameList();
   // Reset position
   if (activeGameId) selectGame(activeGameId);
@@ -2792,8 +2797,10 @@ function renderGameList() {
   }
 
   const done = getCompletedSet();
+  const allEntries = [...gameMap];
+  const visibleEntries = allEntries.slice(0, gameListDisplayLimit);
 
-  for (const [gid, { game, mistakes, color }] of gameMap) {
+  for (const [gid, { game, mistakes, color }] of visibleEntries) {
     const completedCount = mistakes.filter(m => done.has(posId(m))).length;
     const allDone = mistakes.length > 0 && completedCount === mistakes.length;
 
@@ -2840,6 +2847,15 @@ function renderGameList() {
     `;
     list.appendChild(card);
   }
+
+  if (allEntries.length > gameListDisplayLimit) {
+    const remaining = allEntries.length - gameListDisplayLimit;
+    const btn = document.createElement('div');
+    btn.className = 'show-more-btn';
+    btn.textContent = `Show ${Math.min(remaining, 50)} more (${remaining} hidden)`;
+    btn.onclick = () => { gameListDisplayLimit += 50; renderGameList(); };
+    list.appendChild(btn);
+  }
 }
 
 // ─── Review mode ───
@@ -2854,6 +2870,7 @@ function toggleReviewMode() {
     title.textContent = 'Review';
     filterRows.forEach(r => r.style.display = 'none');
     buildReviewQueue();
+    reviewListDisplayLimit = 50;
     renderReviewList();
     // Auto-load first due position
     if (reviewQueue.length > 0) {
@@ -2864,6 +2881,7 @@ function toggleReviewMode() {
     btn.classList.remove('btn-review-active');
     title.textContent = 'Games';
     filterRows.forEach(r => r.style.display = '');
+    gameListDisplayLimit = 50;
     renderGameList();
   }
 }
@@ -2881,8 +2899,9 @@ function renderReviewList() {
   }
 
   const today = new Date().toISOString().split('T')[0];
+  const visibleReviewItems = reviewQueue.slice(0, reviewListDisplayLimit);
 
-  for (const m of reviewQueue) {
+  for (const m of visibleReviewItems) {
     const pid = posId(m);
     const card = getCardForPosition(pid);
     const globalIdx = filteredMistakes.indexOf(m);
@@ -2917,6 +2936,15 @@ function renderReviewList() {
       </div>
     `;
     list.appendChild(item);
+  }
+
+  if (reviewQueue.length > reviewListDisplayLimit) {
+    const remaining = reviewQueue.length - reviewListDisplayLimit;
+    const btn = document.createElement('div');
+    btn.className = 'show-more-btn';
+    btn.textContent = `Show ${Math.min(remaining, 50)} more (${remaining} hidden)`;
+    btn.onclick = () => { reviewListDisplayLimit += 50; renderReviewList(); };
+    list.appendChild(btn);
   }
 }
 
