@@ -3473,7 +3473,7 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
       const body = isExactBest
         ? `<code>${escHtml(move.san)}</code> is the engine's top choice.`
         : `<code>${escHtml(move.san)}</code> (−${wpStr}% win).`;
-      showColorFeedback(color, colorDim, title, body);
+      showColorFeedback(color, colorDim, title, body, 1500);
     } else {
       // Normal mode: full SRS + reveal button
       // Compute SRS grade
@@ -3507,7 +3507,7 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
         srsRecorded = true;
         srsInfo = srsTag(gradeLabel, srsCard);
       }
-      showColorFeedback(color, colorDim, title, body + srsInfo);
+      showColorFeedback(color, colorDim, title, body + srsInfo, 1500);
       updateSessionProgress();
       renderQueue();
     }
@@ -3648,7 +3648,7 @@ function revealBestMove(bestMoveUci, m) {
     `The engine's top choice is <code>${escHtml(bestSan)}</code>.`);
 }
 
-function showColorFeedback(borderColor, bgColor, title, text) {
+function showColorFeedback(borderColor, bgColor, title, text, mobileDelay = 0) {
   const container = document.getElementById('feedbackContainer');
   const div = document.createElement('div');
   div.className = 'feedback-box';
@@ -3660,7 +3660,11 @@ function showColorFeedback(borderColor, bgColor, title, text) {
   const type = borderColor.includes('62,207,142') ? 'correct' :
                borderColor.includes('240,192,64') ? 'inaccurate' :
                borderColor.includes('239,95,95') ? 'wrong' : 'info';
-  triggerMobilePopup(title, text, type);
+  if (mobileDelay > 0 && isMobileView()) {
+    setTimeout(() => triggerMobilePopup(title, text, type), mobileDelay);
+  } else {
+    triggerMobilePopup(title, text, type);
+  }
 }
 
 // ─── UCI to SAN conversion ───
