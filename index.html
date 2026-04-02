@@ -314,7 +314,7 @@
   .eval-bar-top .eval-bar-score { color: #ccc; }
   .eval-bar-bottom .eval-bar-score { color: #333; }
   .eval-bar-toggle {
-    position: absolute; right: calc(100% + 5px); bottom: -22px;
+    position: absolute; right: calc(100% + 5px); bottom: 4px;
     width: 26px; height: 18px;
     display: flex; align-items: center; justify-content: center;
     cursor: pointer; opacity: 0.33;
@@ -1992,9 +1992,11 @@ function updateEvalBarIcon() {
   const bar = document.getElementById('evalBar');
   const isShowing = bar && bar.classList.contains('visible');
   if (isShowing) {
-    // Cross icon
-    icon.innerHTML = '<line x1="2" y1="2" x2="12" y2="12" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round"/>'
-                   + '<line x1="12" y1="2" x2="2" y2="12" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round"/>';
+    // Eye-closed icon
+    icon.innerHTML = '<path d="M2 7 C4 10, 10 10, 12 7" stroke="var(--text-muted)" stroke-width="1.5" stroke-linecap="round" fill="none"/>'
+                   + '<line x1="4" y1="9" x2="3" y2="12" stroke="var(--text-muted)" stroke-width="1.5" stroke-linecap="round"/>'
+                   + '<line x1="7" y1="10" x2="7" y2="13" stroke="var(--text-muted)" stroke-width="1.5" stroke-linecap="round"/>'
+                   + '<line x1="10" y1="9" x2="11" y2="12" stroke="var(--text-muted)" stroke-width="1.5" stroke-linecap="round"/>';
   } else {
     // Mini eval bar icon
     icon.innerHTML = '<rect x="0" y="0" width="14" height="6" rx="1" fill="#e8e8e8"/>'
