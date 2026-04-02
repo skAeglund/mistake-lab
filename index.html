@@ -3444,7 +3444,7 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
       let grade, gradeLabel;
       if (firstAttemptFailed) {
         grade = FSRS_GRADE.again; gradeLabel = 'Again';
-      } else if (isExactBest) {
+      } else if (isExactBest || wpDrop <= 2) {
         grade = FSRS_GRADE.easy; gradeLabel = 'Easy';
       } else {
         grade = FSRS_GRADE.good; gradeLabel = 'Good';
