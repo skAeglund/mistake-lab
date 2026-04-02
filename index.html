@@ -670,10 +670,14 @@
       padding: 6px 2px !important;
       gap: 8px !important;
     }
-    .board-container { max-width: 100%; }
-    .eval-bar { right: calc(100% + 2px); width: 18px; }
+    .board-container { max-width: 100%; display: flex; align-items: stretch; }
+    .board-container > #board { flex: 1; min-width: 0; }
+    .eval-bar { position: static; width: 18px; flex-shrink: 0; }
     .eval-bar-score { font-size: 7px; }
-    .eval-bar-toggle { right: calc(100% + 2px); width: 18px; }
+    .eval-bar-toggle {
+      position: absolute; left: 2px; bottom: 2px; z-index: 50;
+      width: 18px;
+    }
     .board-label-row { display: none; }
 
     /* Position nav: compact */
@@ -2014,7 +2018,11 @@ function updateEvalBar() {
   if (!bar) return;
 
   const shouldShow = evalBarEnabled && evalBarRevealed && preAnalysis && currentMistakeIdx >= 0;
+  const wasVisible = bar.classList.contains('visible');
   bar.classList.toggle('visible', !!shouldShow);
+  if (wasVisible !== !!shouldShow && boardObj) {
+    requestAnimationFrame(() => { boardObj.resize(); renderArrows(); });
+  }
   updateEvalBarIcon();
   if (!shouldShow) return;
 
