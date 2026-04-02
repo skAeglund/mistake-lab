@@ -3473,7 +3473,7 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
       const body = isExactBest
         ? `<code>${escHtml(move.san)}</code> is the engine's top choice.`
         : `<code>${escHtml(move.san)}</code> (−${wpStr}% win).`;
-      showColorFeedback(color, colorDim, title, body, 1500);
+      showColorFeedback(color, colorDim, title, body);
     } else {
       // Normal mode: full SRS + reveal button
       // Compute SRS grade
@@ -3507,7 +3507,7 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
         srsRecorded = true;
         srsInfo = srsTag(gradeLabel, srsCard);
       }
-      showColorFeedback(color, colorDim, title, body + srsInfo, 1500);
+      showColorFeedback(color, colorDim, title, body + srsInfo);
       updateSessionProgress();
       renderQueue();
     }
@@ -3648,7 +3648,7 @@ function revealBestMove(bestMoveUci, m) {
     `The engine's top choice is <code>${escHtml(bestSan)}</code>.`);
 }
 
-function showColorFeedback(borderColor, bgColor, title, text, mobileDelay = 0) {
+function showColorFeedback(borderColor, bgColor, title, text) {
   const container = document.getElementById('feedbackContainer');
   const div = document.createElement('div');
   div.className = 'feedback-box';
@@ -3656,15 +3656,6 @@ function showColorFeedback(borderColor, bgColor, title, text, mobileDelay = 0) {
   div.innerHTML = `<div class="feedback-title" style="color:${borderColor}">${title}</div><div class="feedback-text">${text}</div>`;
   container.insertBefore(div, container.firstChild);
   while (container.children.length > 5) container.removeChild(container.lastChild);
-
-  const type = borderColor.includes('62,207,142') ? 'correct' :
-               borderColor.includes('240,192,64') ? 'inaccurate' :
-               borderColor.includes('239,95,95') ? 'wrong' : 'info';
-  if (mobileDelay > 0 && isMobileView()) {
-    setTimeout(() => triggerMobilePopup(title, text, type), mobileDelay);
-  } else {
-    triggerMobilePopup(title, text, type);
-  }
 }
 
 // ─── UCI to SAN conversion ───
@@ -3766,12 +3757,12 @@ function renderEngineLine() {
     </div>
   `;
 
-  // Insert before the first feedback box (engine line on top)
-  const firstFeedback = container.querySelector('.feedback-box');
-  if (firstFeedback) {
-    firstFeedback.insertAdjacentElement('beforebegin', div);
+  // Insert after feedback boxes (feedback stays on top)
+  const lastFeedback = container.querySelector('.feedback-box:last-of-type');
+  if (lastFeedback) {
+    lastFeedback.insertAdjacentElement('afterend', div);
   } else {
-    container.insertBefore(div, container.firstChild);
+    container.appendChild(div);
   }
 }
 
