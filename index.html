@@ -708,6 +708,7 @@
 
     /* Feedback & engine lines float above "Current Position" on mobile */
     #feedbackContainer { order: -1; }
+    #contLineContainer { order: -1; }
 
     /* Engine line: nav buttons above the move list on mobile */
     .engine-line {
@@ -1083,6 +1084,7 @@
         </div>
       </div>
       <div id="feedbackContainer"></div>
+      <div id="contLineContainer"></div>
     </div>
     <div class="position-queue" id="queuePanel" style="display:none">
       <h4>Position Queue</h4>
@@ -1158,6 +1160,8 @@ let sfSearchActive = false;     // true when a go command has been sent and best
 let selectedSquare = null;      // for click-to-move
 let engineLine = null;          // { baseFen, moves: [{uci,san,fen}], currentIdx: -1, userMove: {san,from,to} }
 let browsingLine = false;       // true when stepping through engine line
+let contLine = null;            // { baseFen, moves: [{san,uci,fen,isUser}], currentIdx }
+let contLineBrowsing = false;   // true when navigating to a non-terminal contLine position
 let afterMoveCpWhite = null;    // cp from white's POV after user's move (for eval bar during line browsing)
 let continuationMode = false;   // true when in continuation practice
 let continuationContUci = '';   // stored for deferred engine line display
@@ -3063,6 +3067,56 @@ function onBoardClick(e) {
     clearSelection();
     if (move) {
       boardObj.position(gameEngine.fen());
+
+      // Making a move while browsing the continuation line
+      if (contLine && contLineBrowsing) {
+        const keepCount = contLine.currentIdx + 1;
+        contLine.moves = contLine.moves.slice(0, keepCount);
+
+        const mm = filteredMistakes[currentMistakeIdx];
+        const movedUserColor = (mm.playerColor === 'white' && move.color === 'w') ||
+                                (mm.playerColor === 'black' && move.color === 'b');
+
+        const uci = move.from + move.to + (move.promotion || '');
+        addContLineMove(move.san, uci, gameEngine.fen(), movedUserColor);
+        contLineBrowsing = false;
+
+        if (movedUserColor) {
+          currentAttempts++;
+          continuationMode = true;
+          showMaiaControls();
+          currentSolveFen = contLine.moves[contLine.currentIdx - 1]?.fen || contLine.baseFen;
+          startPreAnalysis(currentSolveFen);
+          evaluateMove(move.from, move.to, move);
+        } else {
+          continuationMode = true;
+          showMaiaControls();
+          currentSolveFen = gameEngine.fen();
+          currentAttempts = 0;
+          hintLevel = 0;
+          hintMove = null;
+          clearHintHighlights();
+          const hintBtnBranch = document.getElementById('btnHint');
+          if (hintBtnBranch) { hintBtnBranch.classList.remove('hidden'); hintBtnBranch.disabled = false; hintBtnBranch.textContent = '💡 Hint'; hintBtnBranch.style.borderColor = ''; hintBtnBranch.style.color = ''; }
+          document.getElementById('btnRetry').classList.add('hidden');
+          startPreAnalysis(currentSolveFen);
+
+          document.getElementById('feedbackContainer').innerHTML = '';
+          renderContLine();
+          const infoCard = document.getElementById('posInfoCard');
+          infoCard.style.display = '';
+          document.getElementById('posInfoContent').innerHTML = `
+            <div style="font-size:13px;line-height:1.7">
+              <div style="color:var(--blue);font-weight:600;">Continuation Practice</div>
+              <div>Opponent played <code class="mono">${escHtml(move.san)}</code> <span style="font-size:10px;color:var(--text-muted)">(Manual)</span></div>
+              <div>Find the best move!</div>
+              <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
+            </div>
+          `;
+        }
+        return;
+      }
+
       currentAttempts++;
       evaluateMove(move.from, move.to, move);
     }
@@ -3206,6 +3260,8 @@ function loadPosition(globalIdx) {
   hideMaiaControls();
   engineLine = null;
   browsingLine = false;
+  contLine = null;
+  contLineBrowsing = false;
   clearHighlights();
   clearHintHighlights();
   hideArrow();
@@ -3242,6 +3298,7 @@ function loadPosition(globalIdx) {
 
   // Clear feedback
   document.getElementById('feedbackContainer').innerHTML = '';
+  document.getElementById('contLineContainer').innerHTML = '';
   renderQueue();
   updateSessionProgress();
 
@@ -3277,6 +3334,60 @@ function onDrop(source, target) {
   if (move === null) return 'snapback';
 
   clearSelection();
+
+  // Making a move while browsing the continuation line — truncate and branch
+  if (contLine && contLineBrowsing) {
+    // Truncate line after the current browsed position
+    const keepCount = contLine.currentIdx + 1;
+    contLine.moves = contLine.moves.slice(0, keepCount);
+
+    const m = filteredMistakes[currentMistakeIdx];
+    const movedUserColor = (m.playerColor === 'white' && move.color === 'w') ||
+                            (m.playerColor === 'black' && move.color === 'b');
+
+    const uci = source + target + (move.promotion || '');
+    addContLineMove(move.san, uci, gameEngine.fen(), movedUserColor);
+    contLineBrowsing = false;
+
+    if (movedUserColor) {
+      // User played their own color — evaluate the move normally
+      currentAttempts++;
+      continuationMode = true;
+      showMaiaControls();
+      currentSolveFen = contLine.moves[contLine.currentIdx - 1]?.fen || contLine.baseFen;
+      startPreAnalysis(currentSolveFen);
+      evaluateMove(source, target, move);
+    } else {
+      // User changed opponent's move — now it's the user's turn
+      continuationMode = true;
+      showMaiaControls();
+      currentSolveFen = gameEngine.fen();
+      currentAttempts = 0;
+      hintLevel = 0;
+      hintMove = null;
+      clearHintHighlights();
+      const hintBtnBranch = document.getElementById('btnHint');
+      if (hintBtnBranch) { hintBtnBranch.classList.remove('hidden'); hintBtnBranch.disabled = false; hintBtnBranch.textContent = '💡 Hint'; hintBtnBranch.style.borderColor = ''; hintBtnBranch.style.color = ''; }
+      document.getElementById('btnRetry').classList.add('hidden');
+      startPreAnalysis(currentSolveFen);
+
+      // Update info panel
+      document.getElementById('feedbackContainer').innerHTML = '';
+      renderContLine();
+      const infoCard = document.getElementById('posInfoCard');
+      infoCard.style.display = '';
+      document.getElementById('posInfoContent').innerHTML = `
+        <div style="font-size:13px;line-height:1.7">
+          <div style="color:var(--blue);font-weight:600;">Continuation Practice</div>
+          <div>Opponent played <code class="mono">${escHtml(move.san)}</code> <span style="font-size:10px;color:var(--text-muted)">(Manual)</span></div>
+          <div>Find the best move!</div>
+          <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
+        </div>
+      `;
+    }
+    return undefined;
+  }
+
   currentAttempts++;
   evaluateMove(source, target, move);
   return undefined; // allow the drop
@@ -3589,6 +3700,8 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
   if (continuationMode) {
     // In continuation: good move (≤10%) advances, bad move (>10%) was already undone — user retries
     if (wpDrop <= 10) {
+      // Record user's move in the continuation line
+      addContLineMove(move.san, from + to + (move.promotion || ''), gameEngine.fen(), true);
       setTimeout(() => advanceContinuation(contUci), 500);
     }
   } else if (wpDrop <= 5) {
@@ -3831,6 +3944,101 @@ function exitEngineLine() {
   updateEvalBar();
 }
 
+// ─── Continuation Line ───
+function addContLineMove(san, uci, fen, isUser) {
+  if (!contLine) return;
+  contLine.moves.push({ san, uci, fen, isUser });
+  contLine.currentIdx = contLine.moves.length - 1;
+  contLineBrowsing = false;
+  renderContLine();
+}
+
+function renderContLine() {
+  if (!contLine) return;
+  const container = document.getElementById('contLineContainer');
+
+  const existing = document.getElementById('contLineBox');
+  if (existing) existing.remove();
+
+  const div = document.createElement('div');
+  div.className = 'engine-line';
+  div.id = 'contLineBox';
+
+  // Determine starting move number from the base FEN
+  const fenParts = contLine.baseFen.split(' ');
+  let moveNum = parseInt(fenParts[5]) || 1;
+  let isWhiteTurn = fenParts[1] === 'w';
+
+  let movesHtml = '';
+  for (let i = 0; i < contLine.moves.length; i++) {
+    const mv = contLine.moves[i];
+    const activeClass = i === contLine.currentIdx ? ' active' : '';
+    const userClass = mv.isUser ? ' user-move' : '';
+
+    if (isWhiteTurn) {
+      movesHtml += `<span class="move-num">${moveNum}.</span>`;
+    } else if (i === 0) {
+      movesHtml += `<span class="move-num">${moveNum}…</span>`;
+    }
+
+    movesHtml += `<span class="move${activeClass}${userClass}" onclick="goToContLineMove(${i})">${escHtml(mv.san)}</span> `;
+
+    if (!isWhiteTurn) moveNum++;
+    isWhiteTurn = !isWhiteTurn;
+  }
+
+  const browsingHint = contLineBrowsing
+    ? '<span class="hint">Make a move to branch</span>'
+    : '<span class="hint">← → to step</span>';
+
+  div.innerHTML = `
+    <h4>Continuation</h4>
+    <div class="engine-line-moves">${movesHtml}</div>
+    <div class="engine-line-nav">
+      <button class="btn btn-ghost btn-sm" onclick="contLineStep(-1)">‹</button>
+      <button class="btn btn-ghost btn-sm" onclick="contLineStep(1)">›</button>
+      ${contLineBrowsing ? '<button class="btn btn-ghost btn-sm" onclick="contLineGoToEnd()">Back to end</button>' : ''}
+      ${browsingHint}
+    </div>
+  `;
+
+  // Insert at end of container (after any feedback boxes)
+  container.appendChild(div);
+}
+
+function goToContLineMove(idx) {
+  if (!contLine || idx < -1 || idx >= contLine.moves.length) return;
+  contLine.currentIdx = idx;
+  const wasBrowsing = contLineBrowsing;
+  contLineBrowsing = idx < contLine.moves.length - 1;
+
+  const fen = idx === -1 ? contLine.baseFen : contLine.moves[idx].fen;
+  boardObj.position(fen, false);
+  gameEngine.load(fen);
+
+  // When returning to the live end, restore pre-analysis
+  if (wasBrowsing && !contLineBrowsing && continuationMode) {
+    currentSolveFen = fen;
+    startPreAnalysis(currentSolveFen);
+  }
+
+  renderContLine();
+  updateEvalBar();
+}
+
+function contLineStep(delta) {
+  if (!contLine) return;
+  const newIdx = contLine.currentIdx + delta;
+  if (newIdx >= -1 && newIdx < contLine.moves.length) {
+    goToContLineMove(newIdx);
+  }
+}
+
+function contLineGoToEnd() {
+  if (!contLine) return;
+  goToContLineMove(contLine.moves.length - 1);
+}
+
 // ─── Continuation Practice ───
 function showContinuationOptions(m, move, contUci) {
   continuationContUci = contUci;
@@ -3869,6 +4077,23 @@ function startContinuationMode() {
   showMaiaControls();
   const opts = document.getElementById('continuationOptions');
   if (opts) opts.remove();
+
+  // Initialize continuation line with the user's triggering good move
+  const data = window._deferredEngineLine;
+  if (data) {
+    contLine = {
+      baseFen: data.baseFen,
+      moves: [{
+        san: data.move.san,
+        uci: data.move.from + data.move.to + (data.move.promotion || ''),
+        fen: gameEngine.fen(),
+        isUser: true,
+      }],
+      currentIdx: 0,
+    };
+    contLineBrowsing = false;
+    renderContLine();
+  }
 
   // gameEngine already has the user's good move applied
   // Use the stored contUci to play opponent's response
@@ -3943,6 +4168,9 @@ async function advanceContinuation(contUci) {
 
   // Animate the opponent's move
   boardObj.position(gameEngine.fen(), true);
+
+  // Record opponent's move in continuation line
+  addContLineMove(result.san, opponentUci, gameEngine.fen(), false);
 
   // Check if game is over after opponent's move
   if (gameEngine.game_over()) {
@@ -4088,6 +4316,8 @@ function retryPosition() {
   hintBtn2.style.color = '';
   engineLine = null;
   browsingLine = false;
+  contLine = null;
+  contLineBrowsing = false;
   clearHighlights();
   clearHintHighlights();
   hideArrow();
@@ -4111,6 +4341,7 @@ function retryPosition() {
   startPreAnalysis(m.fenBefore);
 
   document.getElementById('feedbackContainer').innerHTML = '';
+  document.getElementById('contLineContainer').innerHTML = '';
 }
 
 // ─── UI Helpers ───
@@ -4143,6 +4374,7 @@ function clearBoard() {
   gameEngine = null;
   document.getElementById('posInfoCard').style.display = 'none';
   document.getElementById('feedbackContainer').innerHTML = '';
+  document.getElementById('contLineContainer').innerHTML = '';
   document.getElementById('posCounter').textContent = '—';
 }
 
@@ -4451,13 +4683,14 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     if (!document.getElementById('mobileFeedbackOverlay').classList.contains('hidden')) { closeMobileFeedback(); return; }
     if (document.body.classList.contains('drawer-open')) { closeDrawer(); return; }
+    if (contLineBrowsing) { contLineGoToEnd(); return; }
     if (browsingLine) { exitEngineLine(); return; }
     closeSettings();
   }
   if (e.target.tagName === 'INPUT') return;
   // Arrow keys: engine line stepping takes priority
-  if (e.key === 'ArrowLeft') { if (engineLine) lineStep(-1); else prevPosition(); return; }
-  if (e.key === 'ArrowRight') { if (engineLine) lineStep(1); else nextPosition(); return; }
+  if (e.key === 'ArrowLeft') { if (contLine) contLineStep(-1); else if (engineLine) lineStep(-1); else prevPosition(); return; }
+  if (e.key === 'ArrowRight') { if (contLine) contLineStep(1); else if (engineLine) lineStep(1); else nextPosition(); return; }
   if (e.key === 's' || e.key === 'S') skipPosition();
   if (e.key === 'r' || e.key === 'R') { if (!document.getElementById('btnRetry').classList.contains('hidden')) retryPosition(); }
   if (e.key === 'h' || e.key === 'H') { if (!document.getElementById('btnHint').classList.contains('hidden')) showHint(); }
