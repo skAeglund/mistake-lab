@@ -965,7 +965,7 @@
         <button class="btn btn-ghost btn-sm" onclick="nextPosition()">Next →</button>
       </span>
       <button class="btn btn-ghost btn-sm" onclick="skipPosition()" title="Skip this position">Skip</button>
-      <button class="btn btn-ghost btn-sm hidden" id="btnHint" onclick="showHint()" title="Show a hint for this position" style="border-color:var(--blue);color:var(--blue)">💡 Hint</button>
+      <button class="btn btn-ghost btn-sm hidden" id="btnHint" onclick="showHint()" title="Show a hint for this position (H)">💡 Hint</button>
       <button class="btn btn-ghost btn-sm hidden" id="btnRetry" onclick="retryPosition()" style="border-color:var(--accent);color:var(--accent)">↺ Retry</button>
       <button class="btn btn-ghost btn-sm hidden" id="btnLichess" onclick="openLichessAnalysis()" title="Open in Lichess analysis board">🔍 Analysis</button>
       <button class="btn btn-ghost btn-sm hidden" id="btnViewGame" onclick="openGameOnSite()" title="View the original game on Lichess or Chess.com">♟ View Game</button>
@@ -1086,6 +1086,7 @@ let srsRecorded = false;         // true after SRS grade is recorded; prevents r
 let hintLevel = 0;               // 0=no hint, 1=piece shown, 2=full move shown
 let hintUsed = false;            // true if hint was used this position (forces SRS Again)
 let hintMove = null;             // frozen UCI string of the best move when hint was first used
+let hintArrow = null;            // { from, to } for hint arrow drawn on second press
 let reviewMode = false;          // true = show only due SRS positions
 let reviewQueue = [];            // positions due for review
 
@@ -1943,6 +1944,10 @@ function clearHintHighlights() {
     el.classList.remove('square-hint');
     el.style.removeProperty('--hint-color');
   });
+  if (hintArrow) {
+    hintArrow = null;
+    renderArrows();
+  }
 }
 
 async function showHint() {
@@ -1989,20 +1994,27 @@ async function showHint() {
       fromEl.classList.add('square-hint');
     }
     hintLevel = 1;
-    if (btn) { btn.disabled = false; btn.textContent = '💡 Hint (2/2)'; }
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '💡 Hint (2/2)';
+      btn.style.borderColor = 'var(--blue)';
+      btn.style.color = 'var(--blue)';
+    }
 
   } else if (hintLevel === 1) {
-    // Second press: also highlight the target square
+    // Second press: draw arrow from piece to target square
     if (!hintMove) return;
     const fromSq = hintMove.substring(0, 2);
     const toSq = hintMove.substring(2, 4);
-    clearHintHighlights();
-    const fromEl = document.querySelector(`.square-${fromSq}`);
-    const toEl = document.querySelector(`.square-${toSq}`);
-    if (fromEl) fromEl.classList.add('square-hint');
-    if (toEl) toEl.classList.add('square-hint');
+    hintArrow = { from: fromSq, to: toSq };
+    renderArrows();
     hintLevel = 2;
-    if (btn) { btn.disabled = true; btn.textContent = '💡 Hint'; }
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '💡 Hint';
+      btn.style.borderColor = '';
+      btn.style.color = '';
+    }
   }
 }
 
@@ -2961,6 +2973,8 @@ function loadPosition(globalIdx) {
   hintBtn.classList.remove('hidden');
   hintBtn.disabled = false;
   hintBtn.textContent = '💡 Hint';
+  hintBtn.style.borderColor = '';
+  hintBtn.style.color = '';
   closeMobileFeedback();
   preAnalysisPaused = false;
   continuationMode = false;
@@ -3740,7 +3754,7 @@ async function advanceContinuation(contUci) {
   hintMove = null;
   clearHintHighlights();
   const hintBtnCont = document.getElementById('btnHint');
-  if (hintBtnCont) { hintBtnCont.classList.remove('hidden'); hintBtnCont.disabled = false; hintBtnCont.textContent = '💡 Hint'; }
+  if (hintBtnCont) { hintBtnCont.classList.remove('hidden'); hintBtnCont.disabled = false; hintBtnCont.textContent = '💡 Hint'; hintBtnCont.style.borderColor = ''; hintBtnCont.style.color = ''; }
   startPreAnalysis(currentSolveFen);
 
   // Update info panel for continuation
@@ -3843,6 +3857,8 @@ function retryPosition() {
   hintBtn2.classList.remove('hidden');
   hintBtn2.disabled = false;
   hintBtn2.textContent = '💡 Hint';
+  hintBtn2.style.borderColor = '';
+  hintBtn2.style.color = '';
   engineLine = null;
   browsingLine = false;
   clearHighlights();
@@ -4006,7 +4022,7 @@ function renderArrows() {
     const boardEl = document.querySelector('#board [class^="board-"]');
     if (!boardEl) return;
 
-    const hasSomething = activeArrows.size > 0 || ghostArrow || bestMoveArrow;
+    const hasSomething = activeArrows.size > 0 || ghostArrow || bestMoveArrow || hintArrow;
     svg.classList.toggle('hidden', !hasSomething);
     if (!hasSomething) { svg.innerHTML = ''; return; }
 
@@ -4063,6 +4079,8 @@ function renderArrows() {
 
     // Best move arrow first (behind user arrows)
     if (bestMoveArrow) drawOne(bestMoveArrow.from, bestMoveArrow.to, 'rgba(62, 207, 142, 0.7)', 1);
+    // Hint arrow
+    if (hintArrow) drawOne(hintArrow.from, hintArrow.to, 'rgba(66, 133, 244, 0.7)', 1);
     // User-drawn arrows
     activeArrows.forEach(key => drawOne(key.substring(0, 2), key.substring(2, 4), 'rgba(21, 120, 27, 0.6)', 1));
     // Ghost arrow while dragging
