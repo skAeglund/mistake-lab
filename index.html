@@ -2977,10 +2977,11 @@ async function evaluateMove(from, to, move) {
   try {
     let bestCp, bestMoveUci, bestMoveSan;
 
-    // Wait for pre-analysis to reach at least depth 16
+    // Wait for pre-analysis to reach at least depth 16 (gate only — then read live global)
     sfLog('evaluateMove', `awaiting preAnalysis depth≥16… currentDepth=${preAnalysisDepth} preAnalysisFen=${preAnalysisFen?.split(' ').slice(0,2).join(' ')}…`);
-    const pre = await waitForPreAnalysis(16);
-    sfLog('evaluateMove', `preAnalysis resolved: depth=${pre?.depth} bestMove=${pre?.bestMove} mistakeIdx snapshot=${mistakeIdx} current=${currentMistakeIdx}`);
+    await waitForPreAnalysis(16);
+    const pre = preAnalysis; // read live global — highest depth available right now
+    sfLog('evaluateMove', `preAnalysis live: depth=${pre?.depth} bestMove=${pre?.bestMove} mistakeIdx snapshot=${mistakeIdx} current=${currentMistakeIdx}`);
     if (currentMistakeIdx !== mistakeIdx) {
       sfLog('evaluateMove', `ABORT: user navigated away (was ${mistakeIdx}, now ${currentMistakeIdx})`);
       return;
