@@ -2035,7 +2035,7 @@ function updateEvalBar() {
   const bar = document.getElementById('evalBar');
   if (!bar) return;
 
-  const shouldShow = evalBarEnabled && evalBarRevealed && preAnalysis && currentMistakeIdx >= 0;
+  const shouldShow = evalBarEnabled && evalBarRevealed && !continuationMode && preAnalysis && currentMistakeIdx >= 0;
   const wasVisible = bar.classList.contains('visible');
   bar.classList.toggle('visible', !!shouldShow);
   if (wasVisible !== !!shouldShow && boardObj) {
@@ -3078,16 +3078,18 @@ function onBoardClick(e) {
                                 (mm.playerColor === 'black' && move.color === 'b');
 
         const uci = move.from + move.to + (move.promotion || '');
-        addContLineMove(move.san, uci, gameEngine.fen(), movedUserColor);
-        contLineBrowsing = false;
 
         if (movedUserColor) {
+          contLineBrowsing = false;
+          renderContLine();
           currentAttempts++;
           continuationMode = true;
           showMaiaControls();
-          currentSolveFen = contLine.moves[contLine.currentIdx - 1]?.fen || contLine.baseFen;
+          currentSolveFen = contLine.moves[contLine.currentIdx]?.fen || contLine.baseFen;
           evaluateMove(move.from, move.to, move);
         } else {
+          addContLineMove(move.san, uci, gameEngine.fen(), false);
+          contLineBrowsing = false;
           continuationMode = true;
           showMaiaControls();
           currentSolveFen = gameEngine.fen();
@@ -3345,17 +3347,20 @@ function onDrop(source, target) {
                             (m.playerColor === 'black' && move.color === 'b');
 
     const uci = source + target + (move.promotion || '');
-    addContLineMove(move.san, uci, gameEngine.fen(), movedUserColor);
-    contLineBrowsing = false;
 
     if (movedUserColor) {
-      // User played their own color — evaluate the move normally
+      // User played their own color — don't add to contLine yet;
+      // handleEvalResult will add it if accepted (≤10% drop)
+      contLineBrowsing = false;
+      renderContLine();
       currentAttempts++;
       continuationMode = true;
       showMaiaControls();
-      currentSolveFen = contLine.moves[contLine.currentIdx - 1]?.fen || contLine.baseFen;
+      currentSolveFen = contLine.moves[contLine.currentIdx]?.fen || contLine.baseFen;
       evaluateMove(source, target, move);
     } else {
+      addContLineMove(move.san, uci, gameEngine.fen(), false);
+      contLineBrowsing = false;
       // User changed opponent's move — now it's the user's turn
       continuationMode = true;
       showMaiaControls();
@@ -4073,6 +4078,7 @@ function showDeferredEngineLine() {
 function startContinuationMode() {
   continuationMode = true;
   showMaiaControls();
+  updateEvalBar();
   const opts = document.getElementById('continuationOptions');
   if (opts) opts.remove();
 
