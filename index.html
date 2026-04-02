@@ -284,21 +284,20 @@
   }
   .board-container {
     width: 100%; max-width: 520px; position: relative;
-    display: flex; gap: 0; align-items: stretch;
   }
-  .board-wrapper { flex: 1; min-width: 0; position: relative; }
   #board { width: 100%; touch-action: none; -webkit-touch-callout: none; user-select: none; }
 
   /* ─── Eval bar ─── */
   .eval-bar {
-    width: 26px; flex-shrink: 0;
+    position: absolute; right: calc(100% + 5px); top: 0; bottom: 0;
+    width: 26px;
     display: none; flex-direction: column;
     border-radius: 3px; overflow: hidden;
     border: 1px solid var(--border);
   }
   .eval-bar.visible { display: flex; }
   .eval-bar-section {
-    display: flex; align-items: center; justify-content: center;
+    display: flex; justify-content: center;
     overflow: hidden; position: relative;
     transition: flex 0.5s ease;
   }
@@ -314,6 +313,15 @@
   }
   .eval-bar-top .eval-bar-score { color: #ccc; }
   .eval-bar-bottom .eval-bar-score { color: #333; }
+  .eval-bar-toggle {
+    position: absolute; right: calc(100% + 5px); bottom: -22px;
+    width: 26px; height: 18px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; opacity: 0.33;
+    transition: opacity 0.15s ease;
+    background: none; border: none; padding: 0;
+  }
+  .eval-bar-toggle:hover { opacity: 1; }
   .board-label-row {
     display: flex; justify-content: space-between;
     font-family: 'JetBrains Mono', monospace;
@@ -661,8 +669,9 @@
       gap: 8px !important;
     }
     .board-container { max-width: 100%; }
-    .eval-bar { width: 20px; }
-    .eval-bar-score { font-size: 8px; }
+    .eval-bar { right: calc(100% + 2px); width: 18px; }
+    .eval-bar-score { font-size: 7px; }
+    .eval-bar-toggle { right: calc(100% + 2px); width: 18px; }
     .board-label-row { display: none; }
 
     /* Position nav: compact */
@@ -1004,10 +1013,14 @@
           <span class="eval-bar-score" id="evalBarBottomScore"></span>
         </div>
       </div>
-      <div class="board-wrapper">
-        <div id="board" style="width:100%"></div>
-        <svg class="hidden" id="arrowSvg"></svg>
-      </div>
+      <button class="eval-bar-toggle" id="btnEvalBar" onclick="toggleEvalBar()" title="Toggle evaluation bar (E)">
+        <svg id="evalBarIcon" width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="0" y="0" width="14" height="6" rx="1" fill="#e8e8e8"/>
+          <rect x="0" y="7" width="14" height="7" rx="1" fill="#555"/>
+        </svg>
+      </button>
+      <div id="board" style="width:100%"></div>
+      <svg class="hidden" id="arrowSvg"></svg>
     </div>
     <div class="position-nav" id="positionNav">
       <span class="position-nav-arrows">
@@ -1020,7 +1033,6 @@
       <button class="btn btn-ghost btn-sm hidden" id="btnRetry" onclick="retryPosition()" style="border-color:var(--accent);color:var(--accent)">↺ Retry</button>
       <button class="btn btn-ghost btn-sm hidden" id="btnLichess" onclick="openLichessAnalysis()" title="Open in Lichess analysis board">🔍 Analysis</button>
       <button class="btn btn-ghost btn-sm hidden" id="btnViewGame" onclick="openGameOnSite()" title="View the original game on Lichess or Chess.com">♟ View Game</button>
-      <button class="btn btn-ghost btn-sm" id="btnEvalBar" onclick="toggleEvalBar()" title="Toggle evaluation bar (E)" style="font-size:13px">📊</button>
     </div>
     <div class="empty-board-msg" id="emptyMsg">
       <svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
@@ -1970,9 +1982,24 @@ function updatePreAnalysisUI() {
 function toggleEvalBar() {
   evalBarEnabled = !evalBarEnabled;
   localStorage.setItem('evalBarEnabled', evalBarEnabled);
-  const btn = document.getElementById('btnEvalBar');
-  if (btn) btn.style.opacity = evalBarEnabled ? '1' : '0.4';
+  updateEvalBarIcon();
   updateEvalBar();
+}
+
+function updateEvalBarIcon() {
+  const icon = document.getElementById('evalBarIcon');
+  if (!icon) return;
+  const bar = document.getElementById('evalBar');
+  const isShowing = bar && bar.classList.contains('visible');
+  if (isShowing) {
+    // Cross icon
+    icon.innerHTML = '<line x1="2" y1="2" x2="12" y2="12" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round"/>'
+                   + '<line x1="12" y1="2" x2="2" y2="12" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round"/>';
+  } else {
+    // Mini eval bar icon
+    icon.innerHTML = '<rect x="0" y="0" width="14" height="6" rx="1" fill="#e8e8e8"/>'
+                   + '<rect x="0" y="7" width="14" height="7" rx="1" fill="#555"/>';
+  }
 }
 
 function updateEvalBar() {
@@ -1980,11 +2007,8 @@ function updateEvalBar() {
   if (!bar) return;
 
   const shouldShow = evalBarEnabled && evalBarRevealed && preAnalysis && currentMistakeIdx >= 0;
-  const wasVisible = bar.classList.contains('visible');
   bar.classList.toggle('visible', !!shouldShow);
-  if (wasVisible !== !!shouldShow && boardObj) {
-    requestAnimationFrame(() => { boardObj.resize(); renderArrows(); });
-  }
+  updateEvalBarIcon();
   if (!shouldShow) return;
 
   const m = filteredMistakes[currentMistakeIdx];
@@ -2707,9 +2731,6 @@ function showMainApp() {
   updateSessionProgress();
   initStockfish();
   initMaia(); // loads in background — non-blocking
-  // Set eval bar toggle button initial state
-  const evalBtn = document.getElementById('btnEvalBar');
-  if (evalBtn) evalBtn.style.opacity = evalBarEnabled ? '1' : '0.4';
 }
 
 function updateSessionProgress() {
