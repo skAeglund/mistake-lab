@@ -3086,7 +3086,6 @@ function onBoardClick(e) {
           continuationMode = true;
           showMaiaControls();
           currentSolveFen = contLine.moves[contLine.currentIdx - 1]?.fen || contLine.baseFen;
-          startPreAnalysis(currentSolveFen);
           evaluateMove(move.from, move.to, move);
         } else {
           continuationMode = true;
@@ -3355,7 +3354,6 @@ function onDrop(source, target) {
       continuationMode = true;
       showMaiaControls();
       currentSolveFen = contLine.moves[contLine.currentIdx - 1]?.fen || contLine.baseFen;
-      startPreAnalysis(currentSolveFen);
       evaluateMove(source, target, move);
     } else {
       // User changed opponent's move — now it's the user's turn
