@@ -951,7 +951,8 @@
       </span>
       <button class="btn btn-ghost btn-sm" onclick="skipPosition()" title="Skip this position">Skip</button>
       <button class="btn btn-ghost btn-sm hidden" id="btnRetry" onclick="retryPosition()" style="border-color:var(--accent);color:var(--accent)">↺ Retry</button>
-      <button class="btn btn-ghost btn-sm hidden" id="btnLichess" onclick="openLichessAnalysis()" title="Open in Lichess analysis">♟ Lichess</button>
+      <button class="btn btn-ghost btn-sm hidden" id="btnLichess" onclick="openLichessAnalysis()" title="Open in Lichess analysis board">🔍 Analysis</button>
+      <button class="btn btn-ghost btn-sm hidden" id="btnViewGame" onclick="openGameOnSite()" title="View the original game on Lichess or Chess.com">♟ View Game</button>
     </div>
     <div class="empty-board-msg" id="emptyMsg">
       <svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
@@ -1926,6 +1927,20 @@ function openLichessAnalysis() {
   window.open(`https://lichess.org/analysis/${fen}?color=${color}`, '_blank');
 }
 
+function openGameOnSite() {
+  if (currentMistakeIdx < 0) return;
+  const m = filteredMistakes[currentMistakeIdx];
+  if (!m || !m.game) return;
+  const game = m.game;
+  if (game.id.startsWith('chesscom_')) {
+    const numId = game.id.replace('chesscom_', '');
+    window.open(`https://www.chess.com/game/live/${numId}`, '_blank');
+  } else {
+    // Lichess: #ply jumps to the mistake move in the game viewer
+    window.open(`https://lichess.org/${game.id}#${m.movePly}`, '_blank');
+  }
+}
+
 // ─── Maia 3 Engine ───
 const MAIA_MODEL_PATH = 'maia/maia3_simplified.onnx';
 const MAIA_MOVES_FWD_PATH = 'maia/all_moves_maia3.json';
@@ -2850,6 +2865,7 @@ function loadPosition(globalIdx) {
   document.getElementById('emptyMsg').classList.add('hidden');
   document.getElementById('btnRetry').classList.add('hidden');
   document.getElementById('btnLichess').classList.remove('hidden');
+  document.getElementById('btnViewGame').classList.remove('hidden');
   closeMobileFeedback();
   preAnalysisPaused = false;
   continuationMode = false;
