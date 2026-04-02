@@ -446,6 +446,21 @@
     from { opacity: 1; }
     to { opacity: 0; }
   }
+  /* Hint highlight (persistent, no fade) */
+  .square-hint::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: var(--hint-color, rgba(66,133,244,0.55));
+    pointer-events: none;
+    z-index: -1;
+    animation: hint-pulse 1.8s ease-in-out infinite;
+  }
+  @keyframes hint-pulse {
+    0%, 100% { opacity: 0.7; }
+    50% { opacity: 1; }
+  }
+
   /* Click-to-move selection overlay */
   .square-selected::before {
     content: '';
@@ -950,6 +965,7 @@
         <button class="btn btn-ghost btn-sm" onclick="nextPosition()">Next →</button>
       </span>
       <button class="btn btn-ghost btn-sm" onclick="skipPosition()" title="Skip this position">Skip</button>
+      <button class="btn btn-ghost btn-sm hidden" id="btnHint" onclick="showHint()" title="Show a hint for this position" style="border-color:var(--blue);color:var(--blue)">💡 Hint</button>
       <button class="btn btn-ghost btn-sm hidden" id="btnRetry" onclick="retryPosition()" style="border-color:var(--accent);color:var(--accent)">↺ Retry</button>
       <button class="btn btn-ghost btn-sm hidden" id="btnLichess" onclick="openLichessAnalysis()" title="Open in Lichess analysis board">🔍 Analysis</button>
       <button class="btn btn-ghost btn-sm hidden" id="btnViewGame" onclick="openGameOnSite()" title="View the original game on Lichess or Chess.com">♟ View Game</button>
@@ -1067,6 +1083,9 @@ let continuationContUci = '';   // stored for deferred engine line display
 let currentSolveFen = null;     // FEN the user is solving (differs from m.fenBefore in continuation)
 let firstAttemptFailed = false;  // tracks if first try on current position was wrong
 let srsRecorded = false;         // true after SRS grade is recorded; prevents retry from re-grading
+let hintLevel = 0;               // 0=no hint, 1=piece shown, 2=full move shown
+let hintUsed = false;            // true if hint was used this position (forces SRS Again)
+let hintMove = null;             // frozen UCI string of the best move when hint was first used
 let reviewMode = false;          // true = show only due SRS positions
 let reviewQueue = [];            // positions due for review
 
@@ -1915,6 +1934,75 @@ function togglePauseAnalysis() {
       resolveWaiters();
       updatePreAnalysisUI();
     }
+  }
+}
+
+// ─── Show Hint ───
+function clearHintHighlights() {
+  document.querySelectorAll('.square-hint').forEach(el => {
+    el.classList.remove('square-hint');
+    el.style.removeProperty('--hint-color');
+  });
+}
+
+async function showHint() {
+  if (hintLevel >= 2) return;
+  const btn = document.getElementById('btnHint');
+
+  if (hintLevel === 0) {
+    // First press: wait for depth 20, freeze move, pause analysis, highlight piece
+    hintUsed = true;
+    if (btn) { btn.disabled = true; btn.textContent = '⟳ Waiting…'; }
+
+    const fenSnapshot = currentSolveFen;
+    const pre = await waitForPreAnalysis(20);
+    // Guard: user may have navigated away while waiting
+    if (!pre || !pre.bestMove || currentSolveFen !== fenSnapshot) {
+      if (btn) { btn.disabled = false; btn.textContent = '💡 Hint'; }
+      return;
+    }
+
+    hintMove = pre.bestMove;
+
+    // Pause analysis so the best move doesn't change
+    if (!preAnalysisPaused && !preAnalysisComplete) {
+      preAnalysisPaused = true;
+      stopPreAnalysis();
+      if (sfWorker) {
+        sfWorker.terminate();
+        sfWorker = null;
+        sfReady = false;
+        sfSearchActive = false;
+      }
+      preAnalysisComplete = true;
+      resolveWaiters();
+      updatePreAnalysisUI();
+      // Reinit worker so evaluateMove can use sfAnalyze for the user's move
+      await initStockfish();
+    }
+
+    // Highlight the origin square (piece involved)
+    const fromSq = hintMove.substring(0, 2);
+    clearHintHighlights();
+    const fromEl = document.querySelector(`.square-${fromSq}`);
+    if (fromEl) {
+      fromEl.classList.add('square-hint');
+    }
+    hintLevel = 1;
+    if (btn) { btn.disabled = false; btn.textContent = '💡 Hint (2/2)'; }
+
+  } else if (hintLevel === 1) {
+    // Second press: also highlight the target square
+    if (!hintMove) return;
+    const fromSq = hintMove.substring(0, 2);
+    const toSq = hintMove.substring(2, 4);
+    clearHintHighlights();
+    const fromEl = document.querySelector(`.square-${fromSq}`);
+    const toEl = document.querySelector(`.square-${toSq}`);
+    if (fromEl) fromEl.classList.add('square-hint');
+    if (toEl) toEl.classList.add('square-hint');
+    hintLevel = 2;
+    if (btn) { btn.disabled = true; btn.textContent = '💡 Hint'; }
   }
 }
 
@@ -2846,6 +2934,9 @@ function loadPosition(globalIdx) {
   currentAttempts = 0;
   firstAttemptFailed = false;
   srsRecorded = false;
+  hintLevel = 0;
+  hintUsed = false;
+  hintMove = null;
   const m = filteredMistakes[globalIdx];
 
   sfLog('loadPosition', `idx=${globalIdx} fen=${m.fenBefore.split(' ').slice(0,2).join(' ')}… gameId=${m.gameId} ply=${m.movePly} prevSession=${prevSession} prevFen=${prevFen?.split(' ').slice(0,2).join(' ')}…`);
@@ -2866,6 +2957,10 @@ function loadPosition(globalIdx) {
   document.getElementById('btnRetry').classList.add('hidden');
   document.getElementById('btnLichess').classList.remove('hidden');
   document.getElementById('btnViewGame').classList.remove('hidden');
+  const hintBtn = document.getElementById('btnHint');
+  hintBtn.classList.remove('hidden');
+  hintBtn.disabled = false;
+  hintBtn.textContent = '💡 Hint';
   closeMobileFeedback();
   preAnalysisPaused = false;
   continuationMode = false;
@@ -2873,6 +2968,7 @@ function loadPosition(globalIdx) {
   engineLine = null;
   browsingLine = false;
   clearHighlights();
+  clearHintHighlights();
   hideArrow();
 
   // Set up chess engine at the mistake position
@@ -2956,6 +3052,7 @@ async function evaluateMove(from, to, move) {
   const mistakeIdx = currentMistakeIdx; // snapshot — detect if user navigates away during async
   const m = filteredMistakes[mistakeIdx];
   const container = document.getElementById('feedbackContainer');
+  clearHintHighlights();
 
   sfLog('evaluateMove', `START move=${move.san} (${from}→${to}) mistakeIdx=${mistakeIdx} fen=${m.fenBefore.split(' ').slice(0,2).join(' ')}… session=${preAnalysisSession}`);
 
@@ -3158,6 +3255,7 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
       } else {
         grade = FSRS_GRADE.good; gradeLabel = 'Good';
       }
+      if (hintUsed) { grade = FSRS_GRADE.again; gradeLabel = 'Again (hint)'; }
 
       let title, body;
       if (isExactBest && !firstAttemptFailed) {
@@ -3198,6 +3296,7 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
       } else {
         grade = FSRS_GRADE.hard; gradeLabel = 'Hard';
       }
+      if (hintUsed) { grade = FSRS_GRADE.again; gradeLabel = 'Again (hint)'; }
 
       let srsInfo2 = '';
       if (!srsRecorded) {
@@ -3251,16 +3350,23 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
   } else if (wpDrop <= 5) {
     // Good move in normal mode — show buttons instead of auto engine line
     document.getElementById('btnRetry').classList.remove('hidden');
+    document.getElementById('btnHint').classList.add('hidden');
+    clearHintHighlights();
     showContinuationOptions(m, move, contUci || '');
   } else {
     // Inaccurate or wrong in normal mode — show engine line as before
     document.getElementById('btnRetry').classList.remove('hidden');
+    // Hide hint when puzzle is resolved (inaccuracy, or wrong with 3 attempts used)
+    if (wpDrop <= 10 || currentAttempts >= 3) {
+      document.getElementById('btnHint').classList.add('hidden');
+      clearHintHighlights();
+    }
     buildEngineLine(currentSolveFen, move, contUci || '');
   }
 }
 
 function srsTag(gradeLabel, card) {
-  const colors = { Easy: 'var(--green)', Good: 'var(--green)', Hard: 'var(--yellow)', Again: 'var(--red)' };
+  const colors = { Easy: 'var(--green)', Good: 'var(--green)', Hard: 'var(--yellow)', Again: 'var(--red)', 'Again (hint)': 'var(--red)' };
   return `<div style="margin-top:8px;font-size:11px;color:var(--text-muted);">` +
     `SRS: <span style="color:${colors[gradeLabel] || 'var(--text-secondary)'};font-weight:600;">${gradeLabel}</span>` +
     ` · next review: <span class="mono">${card.due || 'today'}</span>` +
@@ -3539,6 +3645,8 @@ async function advanceContinuation(contUci) {
       showFeedback('info', 'Draw', 'The position is drawn.');
     }
     document.getElementById('btnRetry').classList.remove('hidden');
+    document.getElementById('btnHint').classList.add('hidden');
+    clearHintHighlights();
     return;
   }
 
@@ -3568,6 +3676,8 @@ async function advanceContinuation(contUci) {
         hideMaiaControls();
         showFeedback('info', 'Continuation ended', 'Could not determine opponent\'s best response.');
         document.getElementById('btnRetry').classList.remove('hidden');
+        document.getElementById('btnHint').classList.add('hidden');
+        clearHintHighlights();
         return;
       }
       opponentUci = result.bestMove;
@@ -3585,6 +3695,8 @@ async function advanceContinuation(contUci) {
     hideMaiaControls();
     showFeedback('info', 'Continuation ended', 'Could not play opponent\'s move.');
     document.getElementById('btnRetry').classList.remove('hidden');
+    document.getElementById('btnHint').classList.add('hidden');
+    clearHintHighlights();
     return;
   }
 
@@ -3602,6 +3714,8 @@ async function advanceContinuation(contUci) {
       showFeedback('info', 'Draw', 'The position is drawn. Continuation over.');
     }
     document.getElementById('btnRetry').classList.remove('hidden');
+    document.getElementById('btnHint').classList.add('hidden');
+    clearHintHighlights();
     return;
   }
 
@@ -3614,12 +3728,19 @@ async function advanceContinuation(contUci) {
     hideMaiaControls();
     showFeedback('info', 'Continuation ended', 'Unexpected turn.');
     document.getElementById('btnRetry').classList.remove('hidden');
+    document.getElementById('btnHint').classList.add('hidden');
+    clearHintHighlights();
     return;
   }
 
   // Update solve FEN and start pre-analysis for the new position
   currentSolveFen = gameEngine.fen();
   currentAttempts = 0;
+  hintLevel = 0;
+  hintMove = null;
+  clearHintHighlights();
+  const hintBtnCont = document.getElementById('btnHint');
+  if (hintBtnCont) { hintBtnCont.classList.remove('hidden'); hintBtnCont.disabled = false; hintBtnCont.textContent = '💡 Hint'; }
   startPreAnalysis(currentSolveFen);
 
   // Update info panel for continuation
@@ -3712,13 +3833,20 @@ function retryPosition() {
 
   currentAttempts = 0;
   firstAttemptFailed = false;
+  hintLevel = 0;
+  hintMove = null;
   continuationMode = false;
   hideMaiaControls();
   closeMobileFeedback();
   document.getElementById('btnRetry').classList.add('hidden');
+  const hintBtn2 = document.getElementById('btnHint');
+  hintBtn2.classList.remove('hidden');
+  hintBtn2.disabled = false;
+  hintBtn2.textContent = '💡 Hint';
   engineLine = null;
   browsingLine = false;
   clearHighlights();
+  clearHintHighlights();
   hideArrow();
 
   // Reset chess engine and board to original position
@@ -4086,6 +4214,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowRight') { if (engineLine) lineStep(1); else nextPosition(); return; }
   if (e.key === 's' || e.key === 'S') skipPosition();
   if (e.key === 'r' || e.key === 'R') { if (!document.getElementById('btnRetry').classList.contains('hidden')) retryPosition(); }
+  if (e.key === 'h' || e.key === 'H') { if (!document.getElementById('btnHint').classList.contains('hidden')) showHint(); }
 });
 
 // Flush pending sync before page unload
