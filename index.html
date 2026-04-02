@@ -652,6 +652,17 @@
       max-height: none !important;
     }
 
+    /* Feedback & engine lines float above "Current Position" on mobile */
+    #feedbackContainer { order: -1; }
+
+    /* Engine line: nav buttons above the move list on mobile */
+    .engine-line {
+      display: flex; flex-direction: column;
+    }
+    .engine-line h4 { order: 0; }
+    .engine-line-nav { order: 1; margin-top: 0; margin-bottom: 8px; }
+    .engine-line-moves { order: 2; }
+
     /* Feedback: compact */
     .feedback-area { padding: 10px; gap: 10px; }
     .feedback-box { padding: 10px 12px; }
