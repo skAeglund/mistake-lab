@@ -4,6 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Chess Mistake Trainer</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0c0e13">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/chessboard-1.0.0.min.css">
 <style>
   @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=DM+Sans:wght@400;500;600;700&display=swap');
@@ -38,6 +43,7 @@
     background: var(--bg-deep);
     color: var(--text-primary);
     min-height: 100vh;
+    min-height: 100dvh;
     overflow-x: hidden;
   }
 
@@ -85,6 +91,7 @@
     display: flex; flex-direction: column;
     align-items: center; justify-content: center;
     min-height: calc(100vh - 57px); gap: 24px;
+    min-height: calc(100dvh - 57px);
   }
   .login-screen h2 {
     font-family: 'JetBrains Mono', monospace;
@@ -132,6 +139,7 @@
     display: grid;
     grid-template-columns: 280px 1fr 320px;
     min-height: calc(100vh - 57px);
+    min-height: calc(100dvh - 57px);
   }
 
   /* Left panel - game list */
@@ -647,6 +655,7 @@
       display: flex !important;
       flex-direction: column;
       min-height: 100vh;
+      min-height: 100dvh;
     }
 
     /* Left panel → slide-out drawer */
@@ -749,6 +758,7 @@
       display: flex !important;
       flex-direction: column;
       height: calc(100vh - 53px);
+      height: calc(100dvh - 53px);
     }
     body.mobile-browsing .panel-left {
       flex: 1 !important;
@@ -1333,6 +1343,10 @@ const GIST_GAMES_FILENAME = 'mistakelab_games.json';
 
 // Populate login fields from saved config + auto-load
 document.addEventListener('DOMContentLoaded', () => {
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
+
   if (gistToken) document.getElementById('gistTokenInput').value = gistToken;
   if (gistId) document.getElementById('gistIdInput').value = gistId;
 

@@ -1,0 +1,19 @@
+{
+  "name": "MistakeLab",
+  "short_name": "MistakeLab",
+  "description": "Chess mistake review trainer with spaced repetition",
+  "start_url": "/mistake-lab/",
+  "scope": "/mistake-lab/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0c0e13",
+  "theme_color": "#0c0e13",
+  "icons": [
+    {
+      "src": "https://lichess1.org/assets/piece/cburnett/bN.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
