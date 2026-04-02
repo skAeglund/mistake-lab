@@ -302,16 +302,15 @@
     overflow: hidden; position: relative;
     transition: flex 0.5s ease;
   }
-  .eval-bar-top { background: #333; }
-  .eval-bar-bottom { background: #e8e8e8; }
+  .eval-bar-top { background: #333; align-items: flex-start; }
+  .eval-bar-bottom { background: #e8e8e8; align-items: flex-end; }
   .eval-bar-score {
     font-family: 'JetBrains Mono', monospace;
     font-size: 9px; font-weight: 700;
-    writing-mode: vertical-rl; text-orientation: mixed;
-    transform: rotate(180deg);
-    line-height: 1; padding: 4px 0;
+    line-height: 1; padding: 3px 0;
     white-space: nowrap;
     user-select: none;
+    text-align: center; width: 100%;
   }
   .eval-bar-top .eval-bar-score { color: #ccc; }
   .eval-bar-bottom .eval-bar-score { color: #333; }
