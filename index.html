@@ -1142,6 +1142,7 @@ let sfSearchActive = false;     // true when a go command has been sent and best
 let selectedSquare = null;      // for click-to-move
 let engineLine = null;          // { baseFen, moves: [{uci,san,fen}], currentIdx: -1, userMove: {san,from,to} }
 let browsingLine = false;       // true when stepping through engine line
+let afterMoveCpWhite = null;    // cp from white's POV after user's move (for eval bar during line browsing)
 let continuationMode = false;   // true when in continuation practice
 let continuationContUci = '';   // stored for deferred engine line display
 let currentSolveFen = null;     // FEN the user is solving (differs from m.fenBefore in continuation)
@@ -2018,9 +2019,15 @@ function updateEvalBar() {
 
   // preAnalysis.bestCp is from side-to-move's perspective
   // Determine side to move from the FEN being analyzed
-  const fen = preAnalysisFen || currentSolveFen || m.fenBefore;
-  const sideToMove = fen.split(' ')[1]; // 'w' or 'b'
-  const cpWhite = sideToMove === 'w' ? preAnalysis.bestCp : -preAnalysis.bestCp;
+  let cpWhite;
+  if (browsingLine && engineLine && engineLine.currentIdx >= 0 && afterMoveCpWhite !== null) {
+    // Browsing engine line past user's move — use after-move eval
+    cpWhite = afterMoveCpWhite;
+  } else {
+    const fen = preAnalysisFen || currentSolveFen || m.fenBefore;
+    const sideToMove = fen.split(' ')[1]; // 'w' or 'b'
+    cpWhite = sideToMove === 'w' ? preAnalysis.bestCp : -preAnalysis.bestCp;
+  }
 
   // Win probability from white's perspective (0-100)
   const whitePct = Math.max(0.5, Math.min(99.5, cpToWinPct(cpWhite)));
@@ -3112,6 +3119,7 @@ function loadPosition(globalIdx) {
   firstAttemptFailed = false;
   srsRecorded = false;
   evalBarRevealed = false;
+  afterMoveCpWhite = null;
   updateEvalBar();
   hintLevel = 0;
   hintUsed = false;
@@ -3404,6 +3412,9 @@ function lerpStops(stops, val, dim) {
 
 function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUci) {
   evalBarRevealed = true;
+  // Store after-move cp from white's perspective for eval bar during line browsing
+  const afterCpPlayer = bestCp - cpLoss;
+  afterMoveCpWhite = m.playerColor === 'white' ? afterCpPlayer : -afterCpPlayer;
   updateEvalBar();
   const wpBefore = cpToWinPct(bestCp);
   const wpAfter = cpToWinPct(bestCp - cpLoss);
@@ -3746,6 +3757,7 @@ function goToLineMove(idx) {
   moveEls.forEach((el, i) => {
     el.classList.toggle('active', i === idx);
   });
+  updateEvalBar();
 }
 
 function lineStep(delta) {
@@ -3771,6 +3783,7 @@ function exitEngineLine() {
   const box = document.getElementById('engineLineBox');
   if (box) box.remove();
   clearHighlights();
+  updateEvalBar();
 }
 
 // ─── Continuation Practice ───
