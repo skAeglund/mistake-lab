@@ -3557,10 +3557,10 @@ function renderEngineLine() {
     </div>
   `;
 
-  // Insert after the first feedback box
+  // Insert before the first feedback box (engine line on top)
   const firstFeedback = container.querySelector('.feedback-box');
   if (firstFeedback) {
-    firstFeedback.insertAdjacentElement('afterend', div);
+    firstFeedback.insertAdjacentElement('beforebegin', div);
   } else {
     container.insertBefore(div, container.firstChild);
   }
