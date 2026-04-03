@@ -83,6 +83,7 @@ if (!CONFIG.username || !CONFIG.stockfishPath) {
 }
 
 // ─── Logging ───
+let gistUsernames = []; // Tracks usernames from Gist (preserved across platforms)
 const START_TIME = Date.now();
 function log(msg) {
   const elapsed = ((Date.now() - START_TIME) / 1000).toFixed(1);
@@ -593,15 +594,26 @@ async function writeGistGames(token, gistId, cacheObj) {
   }
 }
 
-function buildGameCacheObj(username, games) {
+function buildGameCacheObj(username, games, existingUsernames) {
   const sorted = games.slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const newest = sorted[0]?.createdAt || 0;
+  // Merge username into the usernames set (preserves names from other platforms)
+  const names = new Set((existingUsernames || []).map(u => u.toLowerCase()));
+  names.add(username.toLowerCase());
   return {
-    version: 1,
-    username: username.toLowerCase(),
+    version: 2,
+    usernames: [...names],
     games: sorted,
     lastGameCreatedAt: newest,
   };
+}
+
+// Extract usernames from a cache object (v1 compat: old single 'username' field)
+function cacheUsernames(cache) {
+  if (!cache) return [];
+  if (Array.isArray(cache.usernames)) return cache.usernames;
+  if (cache.username) return [cache.username];
+  return [];
 }
 
 
@@ -681,6 +693,7 @@ async function main() {
   if (CONFIG.gistToken && CONFIG.gistId) {
     const gistCache = await readGistGames(CONFIG.gistToken, CONFIG.gistId);
     if (gistCache && Array.isArray(gistCache.games)) {
+      gistUsernames = cacheUsernames(gistCache);
       // Merge: gist games + local games, dedup by ID
       const byId = new Map();
       for (const g of existingGames) byId.set(g.id, g);
@@ -822,7 +835,7 @@ async function main() {
 }
 
 async function saveAll(games, newlyAnalyzed) {
-  const cacheObj = buildGameCacheObj(CONFIG.username, games);
+  const cacheObj = buildGameCacheObj(CONFIG.username, games, gistUsernames);
 
   // Save locally (synchronous — always completes)
   saveLocalCache(CONFIG.outputFile, cacheObj);

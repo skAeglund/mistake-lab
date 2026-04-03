@@ -1509,15 +1509,31 @@ function saveGamesCache(username, cacheObj) {
   }
 }
 
-function buildGameCacheObj(username, games) {
+function buildGameCacheObj(username, games, existingUsernames) {
   const sorted = games.slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const newest = sorted[0]?.createdAt || 0;
+  // Merge username into the usernames set (preserves names from other platforms)
+  const names = new Set((existingUsernames || []).map(u => u.toLowerCase()));
+  names.add(username.toLowerCase());
   return {
-    version: 1,
-    username: username.toLowerCase(),
+    version: 2,
+    usernames: [...names],
     games: sorted,
     lastGameCreatedAt: newest,
   };
+}
+
+// Extract usernames from a cache object (v1 compat: old single 'username' field)
+function cacheUsernames(cache) {
+  if (!cache) return [];
+  if (Array.isArray(cache.usernames)) return cache.usernames;
+  if (cache.username) return [cache.username];
+  return [];
+}
+
+// Check if a username matches a cache object
+function cacheMatchesUser(cache, username) {
+  return cacheUsernames(cache).some(u => u.toLowerCase() === username.toLowerCase());
 }
 
 function mergeGames(cached, fetched) {
@@ -1573,9 +1589,21 @@ function debounceSyncGamesToGist() {
 async function syncGamesToGist() {
   if (!gistToken || !gistId || !currentUsername || allGames.length === 0) return;
   try {
-    const cacheObj = buildGameCacheObj(currentUsername, allGames);
+    // Read-merge-write: fetch current Gist first to avoid clobbering other-platform games
+    let existingUsernames = [];
+    let mergedGames = allGames;
+    try {
+      const gistCache = await gistReadGames();
+      if (gistCache && Array.isArray(gistCache.games)) {
+        existingUsernames = cacheUsernames(gistCache);
+        mergedGames = mergeGames(gistCache.games, allGames);
+      }
+    } catch (e) {
+      console.warn('[GameCache] Gist read before write failed (non-fatal):', e.message);
+    }
+    const cacheObj = buildGameCacheObj(currentUsername, mergedGames, existingUsernames);
     await gistWriteGames(cacheObj);
-    console.log('[GameCache] Synced', allGames.length, 'games to Gist');
+    console.log('[GameCache] Synced', mergedGames.length, 'games to Gist');
   } catch (e) {
     console.error('[GameCache] Gist write failed:', e);
   }
@@ -2529,7 +2557,7 @@ async function fetchGames(autoUsername) {
     if (isGistConfigured()) {
       try {
         const gistCache = await gistReadGames();
-        if (gistCache && gistCache.username === username.toLowerCase() && Array.isArray(gistCache.games)) {
+        if (gistCache && cacheMatchesUser(gistCache, username) && Array.isArray(gistCache.games)) {
           const gistGames = gistCache.games.filter(g => g.analysis && g.analysis.length > 0);
           if (cachedGames.length === 0) {
             // No local cache — use Gist as primary source
