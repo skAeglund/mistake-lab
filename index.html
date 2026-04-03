@@ -1399,9 +1399,8 @@ async function gistReadFileContent(file) {
   // GitHub API truncates large files — fall back to raw_url
   if (file.truncated || !file.content) {
     if (!file.raw_url) return null;
-    const raw = await fetch(file.raw_url, {
-      headers: { 'Authorization': `token ${gistToken}` }
-    });
+    // No auth header: raw_url is pre-authenticated; adding Authorization triggers CORS preflight
+    const raw = await fetch(file.raw_url);
     if (!raw.ok) throw new Error(`Gist raw fetch failed: ${raw.status}`);
     return await raw.text();
   }
@@ -1578,11 +1577,9 @@ async function gistReadGames() {
   const gist = await resp.json();
   const file = gist.files?.[GIST_GAMES_FILENAME];
   if (!file) return null;
-  try {
-    const content = await gistReadFileContent(file);
-    if (!content) return null;
-    return JSON.parse(content);
-  } catch { return null; }
+  const content = await gistReadFileContent(file);
+  if (!content) return null;
+  try { return JSON.parse(content); } catch { return null; }
 }
 
 async function gistWriteGames(cacheObj) {
