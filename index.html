@@ -3722,28 +3722,34 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
     if (currentAttempts === 1) firstAttemptFailed = true;
 
     if (continuationMode) {
-      // Continuation mode: simpler feedback, no attempt limit, no reveal
+      // Continuation mode: simpler feedback, undo immediately so user retries
       showColorFeedback(color, colorDim, 'Try again',
         `<code>${escHtml(move.san)}</code> loses ${wpStr}% winning chances (−${Math.round(cpLoss)}cp).`);
+      gameEngine.undo();
+      boardObj.position(gameEngine.fen());
     } else {
+      // Normal mode: keep bad move on board, engine line will show why it's bad
+      highlightSquaresWithColor(from, to, color);
+      const tryAgainBtn = currentAttempts < 3
+        ? `<button class="btn btn-ghost btn-sm" style="margin-top:6px;border-color:var(--accent);color:var(--accent);" onclick="tryAgainFromLine()">↺ Try again</button>`
+        : '';
       showColorFeedback(color, colorDim, 'Not quite',
-        `<code>${escHtml(move.san)}</code> loses ${wpStr}% winning chances (−${Math.round(cpLoss)}cp). Try again!` +
+        `<code>${escHtml(move.san)}</code> loses ${wpStr}% winning chances (−${Math.round(cpLoss)}cp).` +
         bestMoveButton(revealId, bestMoveSan, bestMoveUci, m) +
-        `<div class="attempts-indicator">${renderAttemptDots()}</div>`);
-    }
+        `<div class="attempts-indicator">${renderAttemptDots()}</div>` +
+        tryAgainBtn);
 
-    gameEngine.undo();
-    boardObj.position(gameEngine.fen());
-
-    if (!continuationMode && currentAttempts >= 3) {
-      revealBestMove(bestMoveUci, m);
-      if (!srsRecorded) {
-        const srsCard = recordReview(pid, FSRS_GRADE.again);
-        srsRecorded = true;
-        showFeedback('info', 'SRS: Again', `Next review: ${srsCard.due}`);
+      if (currentAttempts >= 3) {
+        // 3 attempts exhausted — reveal best move (resets gameEngine internally)
+        revealBestMove(bestMoveUci, m);
+        if (!srsRecorded) {
+          const srsCard = recordReview(pid, FSRS_GRADE.again);
+          srsRecorded = true;
+          showFeedback('info', 'SRS: Again', `Next review: ${srsCard.due}`);
+        }
+        updateSessionProgress();
+        renderQueue();
       }
-      updateSessionProgress();
-      renderQueue();
     }
   }
 
@@ -3761,7 +3767,7 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
     clearHintHighlights();
     showContinuationOptions(m, move, contUci || '');
   } else {
-    // Inaccurate or wrong in normal mode — show engine line as before
+    // Inaccurate or wrong in normal mode — show engine line
     document.getElementById('btnRetry').classList.remove('hidden');
     // Hide hint when puzzle is resolved (inaccuracy, or wrong with 3 attempts used)
     if (wpDrop <= 10 || currentAttempts >= 3) {
@@ -3769,6 +3775,20 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
       clearHintHighlights();
     }
     buildEngineLine(currentSolveFen, move, contUci || '');
+
+    // For wrong moves (< 3 attempts): board stays at post-move position (engineLine idx 0).
+    // Undo from gameEngine only so exitEngineLine restores the pre-move position correctly.
+    if (wpDrop > 10 && !continuationMode && currentAttempts < 3) {
+      if (engineLine) {
+        engineLine.wrongMove = true;
+        gameEngine.undo();
+        browsingLine = true;
+      } else {
+        // No continuation to show — fall back to undo + retry from starting position
+        gameEngine.undo();
+        boardObj.position(gameEngine.fen());
+      }
+    }
   }
 }
 
@@ -3971,9 +3991,13 @@ function goToLineMove(idx) {
 function lineStep(delta) {
   if (!engineLine) return;
   const newIdx = engineLine.currentIdx + delta;
-  if (newIdx >= -1 && newIdx < engineLine.moves.length) {
-    goToLineMove(newIdx);
+  if (newIdx < -1 || newIdx >= engineLine.moves.length) return;
+  // Navigating left past the bad move → exit and let user retry
+  if (newIdx === -1 && engineLine.wrongMove) {
+    tryAgainFromLine();
+    return;
   }
+  goToLineMove(newIdx);
 }
 
 function exitEngineLine() {
@@ -3992,6 +4016,27 @@ function exitEngineLine() {
   if (box) box.remove();
   clearHighlights();
   updateEvalBar();
+}
+
+function tryAgainFromLine() {
+  exitEngineLine();
+  // Clear feedback and engine line UI
+  document.getElementById('feedbackContainer').innerHTML = '';
+  document.getElementById('contLineContainer').innerHTML = '';
+  // Re-show hint button if attempts remain
+  if (currentAttempts < 3) {
+    const hintBtn = document.getElementById('btnHint');
+    hintBtn.classList.remove('hidden');
+    hintBtn.disabled = false;
+    hintBtn.textContent = '💡 Hint';
+    hintBtn.style.borderColor = '';
+    hintBtn.style.color = '';
+  }
+  hintLevel = 0;
+  hintMove = null;
+  clearHintHighlights();
+  // Restart pre-analysis for the next attempt
+  startPreAnalysis(currentSolveFen);
 }
 
 // ─── Continuation Line ───
