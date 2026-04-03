@@ -3680,9 +3680,20 @@ function evaluateTacticMove(from, to, move) {
     highlightSquaresWithColor(from, to, color);
 
     if (currentAttempts >= 3) {
-      // Too many wrong attempts on this step — reveal and grade Again
+      // 3rd wrong attempt — reveal the correct move
+      // Undo the wrong move first
+      gameEngine.undo();
+      boardObj.position(gameEngine.fen(), false);
+      clearHighlights();
+
+      // Play the correct move on the board with green highlight + arrow
+      const correctFrom = expectedMove.uci.substring(0, 2);
+      const correctTo = expectedMove.uci.substring(2, 4);
+      highlightSquaresWithColor(correctFrom, correctTo, 'rgb(62,207,142)');
+      drawArrow(correctFrom, correctTo);
+
       showColorFeedback(color, colorDim,
-        'The answer was:',
+        'The correct move was:',
         `<code>${escHtml(expectedMove.san)}</code>`);
 
       const pid = posId(m);
@@ -3695,12 +3706,10 @@ function evaluateTacticMove(from, to, move) {
       renderQueue();
       tacticMode = false;
     } else {
-      // Let them retry this step
+      // Leave wrong move on board, show "Try again" button
       showColorFeedback(color, colorDim,
         'Not the right move',
-        `Try again — ${3 - currentAttempts} attempt${3 - currentAttempts !== 1 ? 's' : ''} left on this move`);
-      gameEngine.undo();
-      boardObj.position(gameEngine.fen());
+        `<button class="btn btn-ghost btn-sm" style="margin-top:6px;border-color:var(--accent);color:var(--accent);" onclick="tacticTryAgain()">↺ Try again</button>`);
     }
   }
 }
@@ -3744,6 +3753,22 @@ function tacticAutoPlayOpponent() {
 function updateTacticProgress(current, total) {
   const el = document.getElementById('tacticProgress');
   if (el) el.textContent = `Move ${current} of ${total}`;
+}
+
+function tacticTryAgain() {
+  if (!tacticMode || !gameEngine) return;
+  // Undo the wrong move
+  gameEngine.undo();
+  boardObj.position(gameEngine.fen(), true);
+  clearHighlights();
+  // Clear feedback
+  document.getElementById('feedbackContainer').innerHTML = '';
+  // Reset hint for this step
+  hintLevel = 0;
+  hintArrow = null;
+  clearHintHighlights();
+  const hintBtn = document.getElementById('btnHint');
+  if (hintBtn) { hintBtn.disabled = false; hintBtn.textContent = '💡 Hint'; hintBtn.style.borderColor = ''; hintBtn.style.color = ''; }
 }
 
 // ─── Evaluate the user's move via Stockfish ───
