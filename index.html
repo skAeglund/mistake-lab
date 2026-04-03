@@ -3688,7 +3688,7 @@ async function evaluateTacticMove(from, to, move) {
     if (sfReady) {
       try {
         stopPreAnalysis();
-        const afterResult = await sfAnalyze(afterFen, 14, 1);
+        const afterResult = await sfAnalyze(afterFen, 18, 1);
         if (afterResult && afterResult.pvs && afterResult.pvs[0]) {
           contUci = afterResult.pvs[0].moves || '';
         }
@@ -3747,6 +3747,9 @@ function tacticAutoPlayOpponent() {
   boardObj.position(gameEngine.fen(), true);
   clearHighlights();
   highlightSquaresWithColor(oppMove.uci.substring(0, 2), oppMove.uci.substring(2, 4), 'var(--text-muted)');
+
+  // Update solve FEN to the current position (so engine line works for subsequent wrong moves)
+  currentSolveFen = gameEngine.fen();
 
   // Advance to next user move
   tacticStepIdx++;
