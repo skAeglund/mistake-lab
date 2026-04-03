@@ -3090,8 +3090,7 @@ function onBoardClick(e) {
 
   if (selectedSquare) {
     if (sq === selectedSquare) {
-      clearSelection();
-      return; // let chessboard.js handle the mousedown (drag start) normally
+      return; // let chessboard.js handle — onSnapEnd will clear selection if it was just a click
     }
 
     // Clicking another own piece — reselect
@@ -3367,6 +3366,9 @@ function onDragStart(source, piece) {
       (gameEngine.turn() === 'b' && piece.search(/^w/) !== -1)) {
     return false;
   }
+  // Ensure selection highlights are visible while dragging
+  if (selectedSquare !== source) clearSelection();
+  selectSquare(source);
   return true;
 }
 
@@ -3445,6 +3447,7 @@ function onDrop(source, target) {
 
 function onSnapEnd() {
   if (gameEngine) boardObj.position(gameEngine.fen());
+  clearSelection();
 }
 
 // ─── Evaluate the user's move via Stockfish ───
