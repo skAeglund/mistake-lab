@@ -1011,6 +1011,11 @@
         <button class="filter-chip" data-filter="severity" data-value="blunders" onclick="setFilter(this)">Blunders only</button>
       </div>
       <div class="filter-row" style="margin-top:6px;">
+        <button class="filter-chip active" data-filter="type" data-value="all" onclick="setFilter(this)">All types</button>
+        <button class="filter-chip" data-filter="type" data-value="mistake" onclick="setFilter(this)">Mistakes</button>
+        <button class="filter-chip" data-filter="type" data-value="tactic" onclick="setFilter(this)">⚡ Tactics</button>
+      </div>
+      <div class="filter-row" style="margin-top:6px;">
         <button class="filter-chip active" data-filter="platform" data-value="all" onclick="setFilter(this)">All</button>
         <button class="filter-chip" data-filter="platform" data-value="lichess" onclick="setFilter(this)">Lichess</button>
         <button class="filter-chip" data-filter="platform" data-value="chesscom" onclick="setFilter(this)">Chess.com</button>
@@ -1177,10 +1182,18 @@ let hintMove = null;             // frozen UCI string of the best move when hint
 let hintArrow = null;            // { from, to } for hint arrow drawn on second press
 let reviewMode = false;          // true = show only due SRS positions
 let reviewQueue = [];            // positions due for review
+
+// ─── Tactic solving state ───
+let tacticMode = false;          // true when solving a multi-move tactic
+let tacticStepIdx = 0;           // index into tacticMoves (includes opponent moves)
+let tacticMoves = [];            // copy of m.tacticMoves for the current tactic
+let tacticWrongAttempts = 0;     // wrong attempts across the entire tactic
+let tacticHintUsed = false;      // hint used during this tactic
+
 let gameListDisplayLimit = 50;
 let reviewListDisplayLimit = 50;
 
-const filters = { color: 'both', severity: 'all', platform: 'all' };
+const filters = { color: 'both', severity: 'all', platform: 'all', type: 'all' };
 
 // ─── Maia 3 state ───
 let maiaSession = null;       // ONNX InferenceSession
@@ -1392,7 +1405,10 @@ function markCompleted(pid) {
   debounceSyncToGist();
 }
 
-function posId(m) { return `${m.gameId}_${m.movePly}`; }
+function posId(m) {
+  const prefix = m.type === 'tactic' ? 't' : '';
+  return `${m.gameId}_${prefix}${m.movePly}`;
+}
 
 // ─── Gist API ───
 async function gistReadFileContent(file) {
@@ -2731,6 +2747,7 @@ function extractAllMistakes() {
 
       if (wpDrop > 10) { // >10% win probability drop
         allMistakes.push({
+          type: 'mistake',
           gameId: game.id,
           game: game,
           movePly: ply,
@@ -2746,12 +2763,36 @@ function extractAllMistakes() {
         });
       }
     }
+
+    // Extract tactics from analyzer output
+    if (Array.isArray(game.tactics)) {
+      for (const tactic of game.tactics) {
+        if (!tactic.moves || tactic.moves.length < 3) continue; // need at least 2 user moves
+        const userMoveCount = tactic.moves.filter(tm => tm.isUser).length;
+        if (userMoveCount < 2) continue;
+        allMistakes.push({
+          type: 'tactic',
+          gameId: game.id,
+          game: game,
+          movePly: tactic.startPly,
+          fenBefore: tactic.fenBefore,
+          playerColor: tactic.playerColor || playerColor,
+          moveNumber: Math.ceil(tactic.startPly / 2),
+          tacticMoves: tactic.moves,
+          wpSwing: tactic.wpSwing || 0,
+          wpDrop: Math.abs(tactic.wpSwing || 0), // reuse for sorting
+          found: tactic.found,
+          evalBefore: tactic.evalBefore,
+          evalAfter: tactic.evalAfter,
+        });
+      }
+    }
   }
-  // Sort by severity (biggest win% drop first)
+  // Sort by severity (biggest win% drop / tactic swing first)
   allMistakes.sort((a, b) => b.wpDrop - a.wpDrop);
-  // Discard games with zero mistakes — no value in UI or cache
-  const gamesWithMistakes = new Set(allMistakes.map(m => m.gameId));
-  allGames = allGames.filter(g => gamesWithMistakes.has(g.id));
+  // Discard games with zero positions (no mistakes and no tactics)
+  const gamesWithPositions = new Set(allMistakes.map(m => m.gameId));
+  allGames = allGames.filter(g => gamesWithPositions.has(g.id));
 }
 
 function evalToCp(evalObj, perspective) {
@@ -2786,7 +2827,8 @@ function setFilter(el) {
 function applyFilters() {
   filteredMistakes = allMistakes.filter(m => {
     if (filters.color !== 'both' && m.playerColor !== filters.color) return false;
-    if (filters.severity === 'blunders' && m.wpDrop < 15) return false;
+    if (filters.severity === 'blunders' && m.type !== 'tactic' && m.wpDrop < 15) return false;
+    if (filters.type !== 'all' && (m.type || 'mistake') !== filters.type) return false;
     if (filters.platform !== 'all') {
       const isChesscom = m.game?._source === 'chesscom' || m.gameId.startsWith('chesscom_');
       if (filters.platform === 'chesscom' && !isChesscom) return false;
