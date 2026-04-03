@@ -1394,6 +1394,20 @@ function markCompleted(pid) {
 function posId(m) { return `${m.gameId}_${m.movePly}`; }
 
 // ─── Gist API ───
+async function gistReadFileContent(file) {
+  if (!file) return null;
+  // GitHub API truncates large files — fall back to raw_url
+  if (file.truncated || !file.content) {
+    if (!file.raw_url) return null;
+    const raw = await fetch(file.raw_url, {
+      headers: { 'Authorization': `token ${gistToken}` }
+    });
+    if (!raw.ok) throw new Error(`Gist raw fetch failed: ${raw.status}`);
+    return await raw.text();
+  }
+  return file.content;
+}
+
 async function gistRead() {
   if (!gistToken || !gistId) return null;
   const resp = await fetch(`https://api.github.com/gists/${gistId}`, {
@@ -1403,7 +1417,9 @@ async function gistRead() {
   const gist = await resp.json();
   const file = gist.files?.[GIST_FILENAME];
   if (!file) return { positions: {}, version: 1 };
-  return JSON.parse(file.content);
+  const content = await gistReadFileContent(file);
+  if (!content) return { positions: {}, version: 1 };
+  return JSON.parse(content);
 }
 
 async function gistWrite(data) {
@@ -1562,7 +1578,11 @@ async function gistReadGames() {
   const gist = await resp.json();
   const file = gist.files?.[GIST_GAMES_FILENAME];
   if (!file) return null;
-  try { return JSON.parse(file.content); } catch { return null; }
+  try {
+    const content = await gistReadFileContent(file);
+    if (!content) return null;
+    return JSON.parse(content);
+  } catch { return null; }
 }
 
 async function gistWriteGames(cacheObj) {
@@ -1599,7 +1619,9 @@ async function syncGamesToGist() {
         mergedGames = mergeGames(gistCache.games, allGames);
       }
     } catch (e) {
-      console.warn('[GameCache] Gist read before write failed (non-fatal):', e.message);
+      // Abort write — writing without a successful read could clobber other-platform games
+      console.error('[GameCache] Gist read before write failed — aborting sync to prevent data loss:', e.message);
+      return;
     }
     const cacheObj = buildGameCacheObj(currentUsername, mergedGames, existingUsernames);
     await gistWriteGames(cacheObj);
