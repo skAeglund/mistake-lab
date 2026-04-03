@@ -965,7 +965,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix buildVersion to show current commit title</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Deduplicate: tactics take precedence over mistakes at same position</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2839,6 +2839,22 @@ function extractAllMistakes() {
     allGames.push(allMistakes[0].game);
   }
   // ── END TEST TACTIC ──
+
+  // Remove mistakes that overlap with tactics (tactic takes precedence)
+  const tacticPlies = new Set();
+  for (const m of allMistakes) {
+    if (m.type !== 'tactic') continue;
+    // A tactic covers its startPly and all user-move plies in the sequence
+    tacticPlies.add(`${m.gameId}_${m.movePly}`);
+    if (m.tacticMoves) {
+      let ply = m.movePly;
+      for (const tm of m.tacticMoves) {
+        if (tm.isUser) tacticPlies.add(`${m.gameId}_${ply}`);
+        ply++;
+      }
+    }
+  }
+  allMistakes = allMistakes.filter(m => m.type === 'tactic' || !tacticPlies.has(`${m.gameId}_${m.movePly}`));
 
   // Sort by severity (biggest win% drop / tactic swing first)
   allMistakes.sort((a, b) => b.wpDrop - a.wpDrop);
