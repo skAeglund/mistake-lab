@@ -258,13 +258,18 @@ class StockfishEngine {
   }
 
   /**
-   * Evaluate a position. Returns { eval: cp } or { mate: N } from WHITE's perspective.
+   * Signal a new game to Stockfish (clears hash). Call once per game, not per position.
    */
-  async evaluate(fen, depth) {
+  async newGame() {
     this._send('ucinewgame');
     this._send('isready');
     await this._waitFor(line => line === 'readyok');
+  }
 
+  /**
+   * Evaluate a position. Returns { eval: cp } or { mate: N } from WHITE's perspective.
+   */
+  async evaluate(fen, depth) {
     this._send(`position fen ${fen}`);
     this._send(`go depth ${depth}`);
 
@@ -487,6 +492,7 @@ async function analyzeGame(sf, game, depth) {
 
   const analysis = [];
   const chess = new Chess();
+  await sf.newGame();
 
   for (let i = 0; i < moves.length; i++) {
     const san = moves[i];
