@@ -572,7 +572,14 @@ async function readGistGames(token, gistId) {
     const gist = JSON.parse(text);
     const file = gist.files?.[GIST_GAMES_FILENAME];
     if (!file) return null;
-    return JSON.parse(file.content);
+    // GitHub API truncates large files — fall back to raw_url
+    let content = file.content;
+    if (file.truncated || !content) {
+      if (!file.raw_url) return null;
+      log('File truncated by API, fetching via raw_url…');
+      content = await httpGet(file.raw_url, { 'Authorization': `token ${token}` });
+    }
+    return JSON.parse(content);
   } catch (err) {
     logError(`Gist read failed: ${err.message}`);
     return null;
