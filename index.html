@@ -2656,7 +2656,7 @@ function extractAllMistakes() {
     }
 
     // Walk the moves, rebuild positions with chess.js
-    const chess = new Chess();
+    const chess = new Chess(game.initialFen || undefined);
     for (let i = 0; i < moves.length && i < analysis.length; i++) {
       const fenBefore = chess.fen();
       const san = moves[i];
