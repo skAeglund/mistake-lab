@@ -3611,7 +3611,7 @@ function onSnapEnd() {
 }
 
 // ─── Evaluate a move in tactic-solving mode ───
-function evaluateTacticMove(from, to, move) {
+async function evaluateTacticMove(from, to, move) {
   const m = filteredMistakes[currentMistakeIdx];
   if (!m || m.type !== 'tactic') return;
 
@@ -3661,6 +3661,8 @@ function evaluateTacticMove(from, to, move) {
       updateSessionProgress();
       renderQueue();
       tacticMode = false;
+      document.getElementById('btnRetry').classList.remove('hidden');
+      document.getElementById('btnHint').classList.add('hidden');
     } else {
       // ── More moves to go — show feedback then auto-play opponent ──
       showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
@@ -3673,28 +3675,44 @@ function evaluateTacticMove(from, to, move) {
       setTimeout(() => tacticAutoPlayOpponent(), 400);
     }
   } else {
-    // Wrong move
+    // Wrong move — show engine line (same as normal mistakes)
     tacticWrongAttempts++;
+    if (currentAttempts === 1) firstAttemptFailed = true;
     const color = '#e05757';
     const colorDim = 'rgba(224,87,87,0.08)';
     highlightSquaresWithColor(from, to, color);
 
-    if (currentAttempts >= 3) {
-      // 3rd wrong attempt — reveal the correct move
-      // Undo the wrong move first
+    // Run Stockfish to get a continuation showing why the move is bad
+    let contUci = '';
+    const afterFen = gameEngine.fen();
+    if (sfReady) {
+      try {
+        stopPreAnalysis();
+        const afterResult = await sfAnalyze(afterFen, 14, 1);
+        if (afterResult && afterResult.pvs && afterResult.pvs[0]) {
+          contUci = afterResult.pvs[0].moves || '';
+        }
+      } catch (e) { /* continue without engine line */ }
+    }
+
+    // Build engine line (user's wrong move + continuation)
+    buildEngineLine(currentSolveFen, move, contUci);
+    if (engineLine) {
+      engineLine.wrongMove = true;
       gameEngine.undo();
-      boardObj.position(gameEngine.fen(), false);
-      clearHighlights();
+      browsingLine = true;
+    }
 
-      // Play the correct move on the board with green highlight + arrow
-      const correctFrom = expectedMove.uci.substring(0, 2);
-      const correctTo = expectedMove.uci.substring(2, 4);
-      highlightSquaresWithColor(correctFrom, correctTo, 'rgb(62,207,142)');
-      drawArrow(correctFrom, correctTo);
-
+    if (currentAttempts >= 3) {
+      // 3rd wrong attempt — show engine line + reveal correct move + grade Again
       showColorFeedback(color, colorDim,
         'The correct move was:',
         `<code>${escHtml(expectedMove.san)}</code>`);
+
+      // Draw correct move arrow over the engine line
+      const correctFrom = expectedMove.uci.substring(0, 2);
+      const correctTo = expectedMove.uci.substring(2, 4);
+      drawArrow(correctFrom, correctTo);
 
       const pid = posId(m);
       if (!srsRecorded) {
@@ -3705,11 +3723,14 @@ function evaluateTacticMove(from, to, move) {
       updateSessionProgress();
       renderQueue();
       tacticMode = false;
+      document.getElementById('btnRetry').classList.remove('hidden');
+      document.getElementById('btnHint').classList.add('hidden');
     } else {
-      // Leave wrong move on board, show "Try again" button
+      // Show wrong feedback with "Try again" button
+      const tryAgainBtn = `<button class="btn btn-ghost btn-sm" style="margin-top:6px;border-color:var(--accent);color:var(--accent);" onclick="tacticTryAgain()">↺ Try again</button>`;
       showColorFeedback(color, colorDim,
         'Not the right move',
-        `<button class="btn btn-ghost btn-sm" style="margin-top:6px;border-color:var(--accent);color:var(--accent);" onclick="tacticTryAgain()">↺ Try again</button>`);
+        tryAgainBtn);
     }
   }
 }
@@ -3757,18 +3778,20 @@ function updateTacticProgress(current, total) {
 
 function tacticTryAgain() {
   if (!tacticMode || !gameEngine) return;
-  // Undo the wrong move
-  gameEngine.undo();
+  // Exit engine line if active
+  exitEngineLine();
+  // Clear feedback and engine line UI
+  document.getElementById('feedbackContainer').innerHTML = '';
+  document.getElementById('contLineContainer').innerHTML = '';
+  // Restore board to the tactic position before the wrong move
   boardObj.position(gameEngine.fen(), true);
   clearHighlights();
-  // Clear feedback
-  document.getElementById('feedbackContainer').innerHTML = '';
   // Reset hint for this step
   hintLevel = 0;
   hintArrow = null;
   clearHintHighlights();
   const hintBtn = document.getElementById('btnHint');
-  if (hintBtn) { hintBtn.disabled = false; hintBtn.textContent = '💡 Hint'; hintBtn.style.borderColor = ''; hintBtn.style.color = ''; }
+  if (hintBtn) { hintBtn.classList.remove('hidden'); hintBtn.disabled = false; hintBtn.textContent = '💡 Hint'; hintBtn.style.borderColor = ''; hintBtn.style.color = ''; }
 }
 
 // ─── Evaluate the user's move via Stockfish ───
