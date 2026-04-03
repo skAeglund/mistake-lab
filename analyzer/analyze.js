@@ -1196,7 +1196,6 @@ async function main() {
     let totalTactics = 0;
     let gamesWithTactics = 0;
     let gamesScanned = 0;
-    const sf = pool[0]; // use single worker for tactic scanning
 
     // Graceful shutdown for tactic scanning
     let shuttingDown = false;
@@ -1213,62 +1212,73 @@ async function main() {
       process.exit(0);
     });
 
+    // Filter to scannable games
+    const toScan = [];
     for (let i = 0; i < analyzed.length; i++) {
-      if (shuttingDown) break;
       const game = analyzed[i];
-
-      // Skip games that already have tactics scanned
-      if (game._tacticsScanned) {
-        continue;
-      }
-
-      // Skip games without player color (can't determine which moves are ours)
+      if (game._tacticsScanned) continue;
       if (!game._playerColor) {
-        log(`[${i + 1}/${analyzed.length}] Skipping (no player color): ${game.id}`);
+        log(`Skipping (no player color): ${game.id}`);
         continue;
       }
+      toScan.push({ game, originalIdx: i, totalCount: analyzed.length });
+    }
+    log(`${toScan.length} games to scan (${analyzed.length - toScan.length} already scanned)\n`);
 
-      const opening = game.opening?.name || 'Unknown';
-      const moveCount = game.moves ? game.moves.split(' ').length : 0;
-      const gameUrl = game.id.startsWith('chesscom_')
-        ? `https://www.chess.com/game/live/${game.id.replace('chesscom_', '')}`
-        : `https://lichess.org/${game.id}`;
-      log(`[${i + 1}/${analyzed.length}] Scanning: ${opening} (${moveCount} moves)`);
-      log(`  ${gameUrl}`);
+    // Shared queue index for parallel workers
+    let nextScanIdx = 0;
 
-      const gameStart = Date.now();
-      try {
-        await sf.newGame();
-        const tactics = await scanGameForTactics(sf, game, CONFIG.tacticDepth);
-        game.tactics = tactics;
-        game._tacticsScanned = true;
+    async function tacticWorkerLoop(sf, workerId) {
+      while (nextScanIdx < toScan.length && !shuttingDown) {
+        const idx = nextScanIdx++;
+        if (idx >= toScan.length) break;
+        const { game, originalIdx, totalCount } = toScan[idx];
 
-        const duration = ((Date.now() - gameStart) / 1000).toFixed(1);
-        gamesScanned++;
+        const opening = game.opening?.name || 'Unknown';
+        const moveCount = game.moves ? game.moves.split(' ').length : 0;
+        const gameUrl = game.id.startsWith('chesscom_')
+          ? `https://www.chess.com/game/live/${game.id.replace('chesscom_', '')}`
+          : `https://lichess.org/${game.id}`;
+        log(`[${idx + 1}/${toScan.length}] W${workerId}: ${opening} (${moveCount} moves)`);
+        log(`  ${gameUrl}`);
 
-        if (tactics.length > 0) {
-          gamesWithTactics++;
-          totalTactics += tactics.length;
-          for (const t of tactics) {
-            const userMoves = t.moves.filter(m => m.isUser).length;
-            const label = t.found ? '✓ found' : '✗ missed';
-            const moveNum = Math.ceil(t.startPly / 2);
-            const solution = t.moves.filter(m => m.isUser).map(m => m.san).join(' → ');
-            log(`  ⚡ ${userMoves}-move tactic at move ${moveNum} (${label}, wp swing ${t.wpSwing > 0 ? '+' : ''}${t.wpSwing}%): ${solution}`);
+        const gameStart = Date.now();
+        try {
+          await sf.newGame();
+          const tactics = await scanGameForTactics(sf, game, CONFIG.tacticDepth);
+          game.tactics = tactics;
+          game._tacticsScanned = true;
+
+          const duration = ((Date.now() - gameStart) / 1000).toFixed(1);
+          gamesScanned++;
+
+          if (tactics.length > 0) {
+            gamesWithTactics++;
+            totalTactics += tactics.length;
+            for (const t of tactics) {
+              const userMoves = t.moves.filter(m => m.isUser).length;
+              const label = t.found ? '✓ found' : '✗ missed';
+              const moveNum = Math.ceil(t.startPly / 2);
+              const solution = t.moves.filter(m => m.isUser).map(m => m.san).join(' → ');
+              log(`  ⚡ ${userMoves}-move tactic at move ${moveNum} (${label}, wp swing ${t.wpSwing > 0 ? '+' : ''}${t.wpSwing}%): ${solution}`);
+            }
           }
+          log(`  ${tactics.length} tactic(s) — ${duration}s`);
+        } catch (err) {
+          logError(`  Failed to scan game ${game.id}: ${err.message}`);
+          continue;
         }
-        log(`  ${tactics.length} tactic(s) — ${duration}s`);
-      } catch (err) {
-        logError(`  Failed to scan game ${game.id}: ${err.message}`);
-        continue;
-      }
 
-      // Periodic save
-      if (gamesScanned > 0 && gamesScanned % CONFIG.saveEvery === 0) {
-        log(`Saving progress (${gamesScanned} games scanned)…`);
-        await saveAll(existingGames);
+        // Periodic save
+        if (gamesScanned > 0 && gamesScanned % CONFIG.saveEvery === 0) {
+          log(`Saving progress (${gamesScanned} games scanned)…`);
+          await saveAll(existingGames);
+        }
       }
     }
+
+    // Launch parallel workers
+    await Promise.all(pool.map((sf, i) => tacticWorkerLoop(sf, i + 1)));
 
     // Final save and summary
     log('');
