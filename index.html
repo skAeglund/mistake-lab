@@ -3640,7 +3640,10 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
 
   if (wpDrop <= 5) {
     highlightSquaresWithColor(from, to, color);
-    const isExactBest = move.san === bestMoveSan;
+    const userUci = from + to + (move.promotion || '');
+    const isExactBest = move.san === bestMoveSan
+      || (bestMoveUci && userUci === bestMoveUci)
+      || wpDrop < 0.5;
 
     if (continuationMode) {
       // Continuation mode: simple feedback, no SRS
@@ -3668,7 +3671,7 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
         body = `<code>${escHtml(move.san)}</code> is the engine's top choice.`;
       } else if (wpDrop <= 2) {
         title = firstAttemptFailed ? 'Got it on retry' : 'Excellent!';
-        body = `<code>${escHtml(move.san)}</code> is nearly as good as the best move (−${wpStr}% win).` +
+        body = `<code>${escHtml(move.san)}</code> ` + (isExactBest ? `is the engine's top choice.` : `is nearly as good as the best move (−${wpStr}% win).`) +
           bestMoveButton(revealId, bestMoveSan, bestMoveUci, m);
       } else {
         title = firstAttemptFailed ? 'Got it on retry' : 'Good enough!';
