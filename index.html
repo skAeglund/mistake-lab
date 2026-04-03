@@ -965,7 +965,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Deduplicate: tactics take precedence over mistakes at same position</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix dedup: only suppress mistakes at tactic start ply</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2840,21 +2840,14 @@ function extractAllMistakes() {
   }
   // ── END TEST TACTIC ──
 
-  // Remove mistakes that overlap with tactics (tactic takes precedence)
-  const tacticPlies = new Set();
+  // Remove mistakes that overlap with tactics at the same starting position
+  // (only the start ply is the same board state — subsequent tactic moves are
+  // a hypothetical line that didn't happen in the game)
+  const tacticStartPlies = new Set();
   for (const m of allMistakes) {
-    if (m.type !== 'tactic') continue;
-    // A tactic covers its startPly and all user-move plies in the sequence
-    tacticPlies.add(`${m.gameId}_${m.movePly}`);
-    if (m.tacticMoves) {
-      let ply = m.movePly;
-      for (const tm of m.tacticMoves) {
-        if (tm.isUser) tacticPlies.add(`${m.gameId}_${ply}`);
-        ply++;
-      }
-    }
+    if (m.type === 'tactic') tacticStartPlies.add(`${m.gameId}_${m.movePly}`);
   }
-  allMistakes = allMistakes.filter(m => m.type === 'tactic' || !tacticPlies.has(`${m.gameId}_${m.movePly}`));
+  allMistakes = allMistakes.filter(m => m.type === 'tactic' || !tacticStartPlies.has(`${m.gameId}_${m.movePly}`));
 
   // Sort by severity (biggest win% drop / tactic swing first)
   allMistakes.sort((a, b) => b.wpDrop - a.wpDrop);
