@@ -510,12 +510,24 @@ async function analyzeGame(pool, game, depth) {
   // Evaluate positions in parallel using a shared queue
   const results = new Array(fens.length);
   let nextIdx = 0;
+  let cacheHitCount = 0;
 
   async function workerLoop(sf) {
     while (nextIdx < fens.length) {
       const idx = nextIdx++;
+
+      // Check position cache first
+      const cached = getCachedEval(fens[idx], depth);
+      if (cached) {
+        results[idx] = cached;
+        cacheHitCount++;
+        continue;
+      }
+
       const posStart = Date.now();
+      posCacheMisses++;
       results[idx] = await sf.evaluate(fens[idx], depth);
+      setCachedEval(fens[idx], results[idx], depth);
       const elapsed = ((Date.now() - posStart) / 1000).toFixed(1);
       const ev = results[idx];
       const evStr = ev.mate !== undefined ? `M${ev.mate}` : `${ev.eval}cp`;
@@ -524,6 +536,10 @@ async function analyzeGame(pool, game, depth) {
   }
 
   await Promise.all(pool.map(sf => workerLoop(sf)));
+
+  if (cacheHitCount > 0) {
+    log(`  ${cacheHitCount}/${fens.length} positions from cache`);
+  }
 
   return { ...game, analysis: results };
 }
@@ -671,6 +687,68 @@ function saveLocalCache(filepath, cacheObj) {
 
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Position Eval Cache
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Cache key: FEN without halfmove clock and fullmove number
+function fenCacheKey(fen) {
+  const parts = fen.split(' ');
+  return parts.slice(0, 4).join(' '); // placement + side + castling + en passant
+}
+
+let posCache = {};       // key → { eval/mate, depth }
+let posCacheHits = 0;
+let posCacheMisses = 0;
+const POS_CACHE_FILE = 'eval_cache.json';
+
+function loadPosCache() {
+  try {
+    const filepath = path.join(path.dirname(CONFIG.outputFile), POS_CACHE_FILE);
+    if (fs.existsSync(filepath)) {
+      posCache = JSON.parse(fs.readFileSync(filepath, 'utf8'));
+      const count = Object.keys(posCache).length;
+      log(`Position cache loaded: ${count} entries`);
+      return;
+    }
+  } catch {}
+  posCache = {};
+}
+
+function savePosCache() {
+  try {
+    const filepath = path.join(path.dirname(CONFIG.outputFile), POS_CACHE_FILE);
+    fs.writeFileSync(filepath, JSON.stringify(posCache), 'utf8');
+  } catch (err) {
+    logError(`Failed to save position cache: ${err.message}`);
+  }
+}
+
+function getCachedEval(fen, minDepth) {
+  const key = fenCacheKey(fen);
+  const entry = posCache[key];
+  if (entry && entry.depth >= minDepth) {
+    posCacheHits++;
+    if (entry.mate !== undefined) return { mate: entry.mate };
+    return { eval: entry.eval };
+  }
+  return null;
+}
+
+function setCachedEval(fen, evalResult, depth) {
+  const key = fenCacheKey(fen);
+  const existing = posCache[key];
+  // Only store if deeper or equal to existing
+  if (!existing || depth >= existing.depth) {
+    if (evalResult.mate !== undefined) {
+      posCache[key] = { mate: evalResult.mate, depth };
+    } else {
+      posCache[key] = { eval: evalResult.eval, depth };
+    }
+  }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Utilities
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -716,6 +794,9 @@ async function main() {
     pool.push(sf);
   }
   log(`${numWorkers} Stockfish worker(s) ready`);
+
+  // Load position eval cache
+  loadPosCache();
 
   function quitAll() { for (const sf of pool) sf.quit(); }
 
@@ -807,6 +888,7 @@ async function main() {
     log('\nInterrupted — saving progress…');
     try {
       await saveAll(analyzedGames, gamesAnalyzed);
+      savePosCache();
     } catch (err) {
       logError(`Save failed: ${err.message}`);
     }
@@ -856,6 +938,7 @@ async function main() {
     if (gamesAnalyzed > 0 && gamesAnalyzed % CONFIG.saveEvery === 0) {
       log(`Saving progress (${gamesAnalyzed} games analyzed so far)…`);
       await saveAll(analyzedGames, gamesAnalyzed);
+      savePosCache();
     }
   }
 
@@ -866,11 +949,14 @@ async function main() {
   log('═══════════════════════════════════════════════════');
   log(`Games analyzed:    ${gamesAnalyzed}`);
   log(`Total positions:   ${totalPositions}`);
+  log(`Cache hits:        ${posCacheHits} (${totalPositions > 0 ? Math.round(100 * posCacheHits / (posCacheHits + posCacheMisses)) : 0}%)`);
   log(`Positions/sec:     ${(pool.reduce((s, w) => s + w.positionsEvaluated, 0) / ((Date.now() - START_TIME) / 1000)).toFixed(1)}`);
   log(`Total time:        ${formatDuration((Date.now() - START_TIME) / 1000)}`);
   log(`Total games in DB: ${analyzedGames.length}`);
 
   await saveAll(analyzedGames, gamesAnalyzed);
+  savePosCache();
+  log(`Eval cache: ${Object.keys(posCache).length} entries saved`);
   quitAll();
   log('Done!');
 }
