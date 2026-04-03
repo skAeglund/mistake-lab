@@ -492,7 +492,9 @@ async function analyzeGame(sf, game, depth) {
 
   const analysis = [];
   const chess = new Chess();
+  const ngStart = Date.now();
   await sf.newGame();
+  log(`  newGame took ${((Date.now() - ngStart) / 1000).toFixed(1)}s`);
 
   for (let i = 0; i < moves.length; i++) {
     const san = moves[i];
@@ -504,7 +506,11 @@ async function analyzeGame(sf, game, depth) {
 
     // Evaluate the position after this move
     const fen = chess.fen();
+    const posStart = Date.now();
     const evalResult = await sf.evaluate(fen, depth);
+    const elapsed = ((Date.now() - posStart) / 1000).toFixed(1);
+    const evStr = evalResult.mate !== undefined ? `M${evalResult.mate}` : `${evalResult.eval}cp`;
+    log(`  ply ${i + 1}/${moves.length}: ${san} → ${evStr} (${elapsed}s)`);
     analysis.push(evalResult);
   }
 
