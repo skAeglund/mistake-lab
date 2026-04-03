@@ -17,8 +17,9 @@
 //   --stockfish   Path to native Stockfish binary (required)
 //   --platform    "lichess" (default) or "chesscom"
 //   --depth       Analysis depth per position (default: 18)
-//   --threads     Stockfish threads (default: half your CPUs)
-//   --hash        Stockfish hash table in MB (default: 256)
+//   --threads     Total Stockfish threads (default: half your CPUs)
+//   --hash        Total Stockfish hash table in MB (default: 256)
+//   --workers     Parallel Stockfish instances (default: 1, threads/hash split evenly)
 //   --max         Max games to fetch (default: 500)
 //   --gist-token  GitHub personal access token (gist scope)
 //   --gist-id     Existing Gist ID for MistakeLab sync
@@ -67,6 +68,7 @@ const CONFIG = {
   depth:         parseInt(args.depth) || 18,
   threads:       parseInt(args.threads) || Math.max(1, Math.floor(os.cpus().length / 2)),
   hash:          parseInt(args.hash) || 256,
+  workers:       parseInt(args.workers) || 1,
   maxGames:      parseInt(args.max) || 500,
   gistToken:     args['gist-token'] || process.env.MISTAKELAB_GIST_TOKEN || '',
   gistId:        args['gist-id'] || process.env.MISTAKELAB_GIST_ID || '',
@@ -486,35 +488,44 @@ function inferTimeClass(tc) {
  * Analyze a single game: replay all moves, evaluate each position.
  * Returns the game object with an `analysis` array added.
  */
-async function analyzeGame(sf, game, depth) {
+async function analyzeGame(pool, game, depth) {
   const moves = game.moves.split(' ').filter(Boolean);
   if (moves.length < 4) return null; // too short
 
-  const analysis = [];
+  // Pre-compute all FENs
   const chess = new Chess();
-  const ngStart = Date.now();
-  await sf.newGame();
-  log(`  newGame took ${((Date.now() - ngStart) / 1000).toFixed(1)}s`);
-
+  const fens = [];
   for (let i = 0; i < moves.length; i++) {
-    const san = moves[i];
-    const result = chess.move(san, { sloppy: true });
+    const result = chess.move(moves[i], { sloppy: true });
     if (!result) {
-      logError(`  Invalid move "${san}" at ply ${i + 1}, stopping analysis`);
+      logError(`  Invalid move "${moves[i]}" at ply ${i + 1}, stopping analysis`);
       break;
     }
-
-    // Evaluate the position after this move
-    const fen = chess.fen();
-    const posStart = Date.now();
-    const evalResult = await sf.evaluate(fen, depth);
-    const elapsed = ((Date.now() - posStart) / 1000).toFixed(1);
-    const evStr = evalResult.mate !== undefined ? `M${evalResult.mate}` : `${evalResult.eval}cp`;
-    log(`  ply ${i + 1}/${moves.length}: ${san} → ${evStr} (${elapsed}s)`);
-    analysis.push(evalResult);
+    fens.push(chess.fen());
   }
 
-  return { ...game, analysis };
+  // Signal new game to all workers
+  await Promise.all(pool.map(sf => sf.newGame()));
+
+  // Evaluate positions in parallel using a shared queue
+  const results = new Array(fens.length);
+  let nextIdx = 0;
+
+  async function workerLoop(sf) {
+    while (nextIdx < fens.length) {
+      const idx = nextIdx++;
+      const posStart = Date.now();
+      results[idx] = await sf.evaluate(fens[idx], depth);
+      const elapsed = ((Date.now() - posStart) / 1000).toFixed(1);
+      const ev = results[idx];
+      const evStr = ev.mate !== undefined ? `M${ev.mate}` : `${ev.eval}cp`;
+      log(`  ply ${idx + 1}/${fens.length}: ${moves[idx]} → ${evStr} (${elapsed}s)`);
+    }
+  }
+
+  await Promise.all(pool.map(sf => workerLoop(sf)));
+
+  return { ...game, analysis: results };
 }
 
 
@@ -679,6 +690,11 @@ function formatDuration(seconds) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function main() {
+  // Compute per-worker resources
+  const numWorkers = CONFIG.workers;
+  const threadsPerWorker = Math.max(1, Math.floor(CONFIG.threads / numWorkers));
+  const hashPerWorker = Math.max(16, Math.floor(CONFIG.hash / numWorkers));
+
   log('═══════════════════════════════════════════════════');
   log('  MistakeLab Analyzer');
   log('═══════════════════════════════════════════════════');
@@ -686,16 +702,22 @@ async function main() {
   log(`Platform:    ${CONFIG.platform}`);
   log(`Stockfish:   ${CONFIG.stockfishPath}`);
   log(`Depth:       ${CONFIG.depth}`);
-  log(`Threads:     ${CONFIG.threads}`);
-  log(`Hash:        ${CONFIG.hash}MB`);
+  log(`Workers:     ${numWorkers} × ${threadsPerWorker} threads, ${hashPerWorker}MB hash each`);
   log(`Max games:   ${CONFIG.maxGames}`);
   log(`Gist sync:   ${CONFIG.gistToken && CONFIG.gistId ? 'enabled' : 'disabled'}`);
   log(`Output file: ${CONFIG.outputFile}`);
   log('');
 
-  // ── Phase 1: Start Stockfish ──
-  const sf = new StockfishEngine(CONFIG.stockfishPath);
-  await sf.start(CONFIG.threads, CONFIG.hash);
+  // ── Phase 1: Start Stockfish worker pool ──
+  const pool = [];
+  for (let w = 0; w < numWorkers; w++) {
+    const sf = new StockfishEngine(CONFIG.stockfishPath);
+    await sf.start(threadsPerWorker, hashPerWorker);
+    pool.push(sf);
+  }
+  log(`${numWorkers} Stockfish worker(s) ready`);
+
+  function quitAll() { for (const sf of pool) sf.quit(); }
 
   // ── Phase 2: Load existing analyzed games ──
   let existingGames = [];
@@ -758,7 +780,7 @@ async function main() {
 
   if (toAnalyze.length === 0) {
     log('Nothing to do! All games are already analyzed.');
-    sf.quit();
+    quitAll();
     // Still save merged data (may have new _playerColor stamps)
     await saveAll(existingGames);
     return;
@@ -788,7 +810,7 @@ async function main() {
     } catch (err) {
       logError(`Save failed: ${err.message}`);
     }
-    sf.quit();
+    quitAll();
     process.exit(0);
   });
 
@@ -803,7 +825,7 @@ async function main() {
 
     const gameStart = Date.now();
     try {
-      const analyzed = await analyzeGame(sf, game, CONFIG.depth);
+      const analyzed = await analyzeGame(pool, game, CONFIG.depth);
       if (analyzed) {
         // Stamp player color so MistakeLab knows which side we played
         const isWhite = analyzed.players?.white?.user?.name?.toLowerCase() === CONFIG.username.toLowerCase()
@@ -844,12 +866,12 @@ async function main() {
   log('═══════════════════════════════════════════════════');
   log(`Games analyzed:    ${gamesAnalyzed}`);
   log(`Total positions:   ${totalPositions}`);
-  log(`Positions/sec:     ${(sf.positionsEvaluated / ((Date.now() - START_TIME) / 1000)).toFixed(1)}`);
+  log(`Positions/sec:     ${(pool.reduce((s, w) => s + w.positionsEvaluated, 0) / ((Date.now() - START_TIME) / 1000)).toFixed(1)}`);
   log(`Total time:        ${formatDuration((Date.now() - START_TIME) / 1000)}`);
   log(`Total games in DB: ${analyzedGames.length}`);
 
   await saveAll(analyzedGames, gamesAnalyzed);
-  sf.quit();
+  quitAll();
   log('Done!');
 }
 
