@@ -836,6 +836,29 @@ async function main() {
   }
   log(`${existingIds.size} games already have analysis — will be skipped`);
 
+  // Seed position cache from existing analyzed games
+  const preSeedCount = Object.keys(posCache).length;
+  let seededPositions = 0;
+  for (const g of existingGames) {
+    if (!g.analysis || !g.moves) continue;
+    const moves = g.moves.split(' ').filter(Boolean);
+    const analysis = g.analysis;
+    const chess = new Chess();
+    for (let i = 0; i < moves.length && i < analysis.length; i++) {
+      const result = chess.move(moves[i], { sloppy: true });
+      if (!result) break;
+      const ev = analysis[i];
+      if (ev && (ev.eval !== undefined || ev.mate !== undefined)) {
+        setCachedEval(chess.fen(), ev, CONFIG.depth);
+        seededPositions++;
+      }
+    }
+  }
+  const newEntries = Object.keys(posCache).length - preSeedCount;
+  if (newEntries > 0) {
+    log(`Seeded ${newEntries} new positions into eval cache from existing games (${seededPositions} total scanned)`);
+  }
+
   // ── Phase 3: Fetch games ──
   let fetchedGames;
   if (CONFIG.platform === 'chesscom') {
