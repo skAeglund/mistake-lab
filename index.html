@@ -3675,63 +3675,47 @@ async function evaluateTacticMove(from, to, move) {
       setTimeout(() => tacticAutoPlayOpponent(), 400);
     }
   } else {
-    // Wrong move — show engine line (same as normal mistakes)
+    // Wrong move — instant feedback, engine line loads in background
     tacticWrongAttempts++;
     if (currentAttempts === 1) firstAttemptFailed = true;
     const color = '#e05757';
     const colorDim = 'rgba(224,87,87,0.08)';
     highlightSquaresWithColor(from, to, color);
 
-    // Run Stockfish to get a continuation showing why the move is bad
-    let contUci = '';
+    // After 3 total wrong guesses, highlight the hint button
+    if (tacticWrongAttempts >= 3) {
+      const hintBtn = document.getElementById('btnHint');
+      if (hintBtn && !tacticHintUsed) {
+        hintBtn.style.borderColor = 'var(--yellow)';
+        hintBtn.style.color = 'var(--yellow)';
+        hintBtn.textContent = '💡 Use hint';
+      }
+    }
+
+    // Show feedback instantly
+    const tryAgainBtn = `<button class="btn btn-ghost btn-sm" style="margin-top:6px;border-color:var(--accent);color:var(--accent);" onclick="tacticTryAgain()">↺ Try again</button>`;
+    showColorFeedback(color, colorDim, 'Not the right move', tryAgainBtn);
+
+    // Load engine line in background (don't block feedback)
     const afterFen = gameEngine.fen();
-    if (sfReady) {
+    const snapshotSolveFen = currentSolveFen;
+    const snapshotAttempts = currentAttempts;
+    (async () => {
+      if (!sfReady) return;
       try {
         stopPreAnalysis();
         const afterResult = await sfAnalyze(afterFen, 18, 1);
-        if (afterResult && afterResult.pvs && afterResult.pvs[0]) {
-          contUci = afterResult.pvs[0].moves || '';
+        // Check if user already retried or navigated away
+        if (!tacticMode || currentSolveFen !== snapshotSolveFen || currentAttempts !== snapshotAttempts) return;
+        const contUci = afterResult?.pvs?.[0]?.moves || '';
+        buildEngineLine(snapshotSolveFen, move, contUci);
+        if (engineLine) {
+          engineLine.wrongMove = true;
+          gameEngine.undo();
+          browsingLine = true;
         }
-      } catch (e) { /* continue without engine line */ }
-    }
-
-    // Build engine line (user's wrong move + continuation)
-    buildEngineLine(currentSolveFen, move, contUci);
-    if (engineLine) {
-      engineLine.wrongMove = true;
-      gameEngine.undo();
-      browsingLine = true;
-    }
-
-    if (currentAttempts >= 3) {
-      // 3rd wrong attempt — show engine line + reveal correct move + grade Again
-      showColorFeedback(color, colorDim,
-        'The correct move was:',
-        `<code>${escHtml(expectedMove.san)}</code>`);
-
-      // Draw correct move arrow over the engine line
-      const correctFrom = expectedMove.uci.substring(0, 2);
-      const correctTo = expectedMove.uci.substring(2, 4);
-      drawArrow(correctFrom, correctTo);
-
-      const pid = posId(m);
-      if (!srsRecorded) {
-        const srsCard = recordReview(pid, FSRS_GRADE.again);
-        srsRecorded = true;
-        showFeedback('info', 'SRS: Again', `Next review: ${srsCard.due}`);
-      }
-      updateSessionProgress();
-      renderQueue();
-      tacticMode = false;
-      document.getElementById('btnRetry').classList.remove('hidden');
-      document.getElementById('btnHint').classList.add('hidden');
-    } else {
-      // Show wrong feedback with "Try again" button
-      const tryAgainBtn = `<button class="btn btn-ghost btn-sm" style="margin-top:6px;border-color:var(--accent);color:var(--accent);" onclick="tacticTryAgain()">↺ Try again</button>`;
-      showColorFeedback(color, colorDim,
-        'Not the right move',
-        tryAgainBtn);
-    }
+      } catch (e) { /* ignore — feedback already shown */ }
+    })();
   }
 }
 
@@ -3781,20 +3765,37 @@ function updateTacticProgress(current, total) {
 
 function tacticTryAgain() {
   if (!tacticMode || !gameEngine) return;
-  // Exit engine line if active
-  exitEngineLine();
+  if (engineLine) {
+    // Engine line loaded — exit it (restores gameEngine to pre-move state)
+    exitEngineLine();
+  } else {
+    // Engine line still loading — undo wrong move manually
+    gameEngine.undo();
+  }
+  // Restore board to current tactic position
+  boardObj.position(gameEngine.fen(), true);
   // Clear feedback and engine line UI
   document.getElementById('feedbackContainer').innerHTML = '';
   document.getElementById('contLineContainer').innerHTML = '';
-  // Restore board to the tactic position before the wrong move
-  boardObj.position(gameEngine.fen(), true);
   clearHighlights();
-  // Reset hint for this step
+  // Reset hint for this step (keep hint highlight if 3+ wrong)
   hintLevel = 0;
   hintArrow = null;
   clearHintHighlights();
   const hintBtn = document.getElementById('btnHint');
-  if (hintBtn) { hintBtn.classList.remove('hidden'); hintBtn.disabled = false; hintBtn.textContent = '💡 Hint'; hintBtn.style.borderColor = ''; hintBtn.style.color = ''; }
+  if (hintBtn) {
+    hintBtn.classList.remove('hidden');
+    hintBtn.disabled = false;
+    if (tacticWrongAttempts >= 3 && !tacticHintUsed) {
+      hintBtn.textContent = '💡 Use hint';
+      hintBtn.style.borderColor = 'var(--yellow)';
+      hintBtn.style.color = 'var(--yellow)';
+    } else {
+      hintBtn.textContent = '💡 Hint';
+      hintBtn.style.borderColor = '';
+      hintBtn.style.color = '';
+    }
+  }
 }
 
 // ─── Evaluate the user's move via Stockfish ───
