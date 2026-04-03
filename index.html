@@ -4308,10 +4308,10 @@ function renderEngineLine() {
     </div>
   `;
 
-  // Insert after feedback boxes (feedback stays on top)
-  const lastFeedback = container.querySelector('.feedback-box:last-of-type');
-  if (lastFeedback) {
-    lastFeedback.insertAdjacentElement('afterend', div);
+  // Insert right after the most recent feedback (first feedback-box = newest)
+  const firstFeedback = container.querySelector('.feedback-box');
+  if (firstFeedback) {
+    firstFeedback.insertAdjacentElement('afterend', div);
   } else {
     container.appendChild(div);
   }
