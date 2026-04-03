@@ -965,7 +965,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix dedup: only suppress mistakes at tactic start ply</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Dedup by FEN: suppress mistakes at any tactic solving position</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2840,14 +2840,22 @@ function extractAllMistakes() {
   }
   // ── END TEST TACTIC ──
 
-  // Remove mistakes that overlap with tactics at the same starting position
-  // (only the start ply is the same board state — subsequent tactic moves are
-  // a hypothetical line that didn't happen in the game)
-  const tacticStartPlies = new Set();
+  // Remove mistakes that overlap with tactic positions (tactic takes precedence).
+  // Match by FEN rather than ply — a tactic's 2nd move position only collides with
+  // a mistake if the game actually reached that position (user found the 1st move).
+  const tacticFens = new Set();
   for (const m of allMistakes) {
-    if (m.type === 'tactic') tacticStartPlies.add(`${m.gameId}_${m.movePly}`);
+    if (m.type !== 'tactic' || !m.tacticMoves) continue;
+    // Position before the first user move
+    tacticFens.add(`${m.gameId}_${m.fenBefore}`);
+    // Position before each subsequent user move (= FEN after the preceding opponent move)
+    for (let i = 0; i < m.tacticMoves.length; i++) {
+      if (m.tacticMoves[i].isUser && i > 0) {
+        tacticFens.add(`${m.gameId}_${m.tacticMoves[i - 1].fen}`);
+      }
+    }
   }
-  allMistakes = allMistakes.filter(m => m.type === 'tactic' || !tacticStartPlies.has(`${m.gameId}_${m.movePly}`));
+  allMistakes = allMistakes.filter(m => m.type === 'tactic' || !tacticFens.has(`${m.gameId}_${m.fenBefore}`));
 
   // Sort by severity (biggest win% drop / tactic swing first)
   allMistakes.sort((a, b) => b.wpDrop - a.wpDrop);
