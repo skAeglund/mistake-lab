@@ -2576,7 +2576,7 @@ async function fetchGames(autoUsername) {
     if (isGistConfigured()) {
       try {
         const gistCache = await gistReadGames();
-        if (gistCache && cacheMatchesUser(gistCache, username) && Array.isArray(gistCache.games)) {
+        if (gistCache && Array.isArray(gistCache.games)) {
           const gistGames = gistCache.games.filter(g => g.analysis && g.analysis.length > 0);
           if (cachedGames.length === 0) {
             // No local cache — use Gist as primary source
