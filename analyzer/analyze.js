@@ -1230,7 +1230,11 @@ async function main() {
 
       const opening = game.opening?.name || 'Unknown';
       const moveCount = game.moves ? game.moves.split(' ').length : 0;
-      log(`[${i + 1}/${analyzed.length}] Scanning: ${opening} (${moveCount} moves)…`);
+      const gameUrl = game.id.startsWith('chesscom_')
+        ? `https://www.chess.com/game/live/${game.id.replace('chesscom_', '')}`
+        : `https://lichess.org/${game.id}`;
+      log(`[${i + 1}/${analyzed.length}] Scanning: ${opening} (${moveCount} moves)`);
+      log(`  ${gameUrl}`);
 
       const gameStart = Date.now();
       try {
@@ -1248,7 +1252,9 @@ async function main() {
           for (const t of tactics) {
             const userMoves = t.moves.filter(m => m.isUser).length;
             const label = t.found ? '✓ found' : '✗ missed';
-            log(`  ⚡ ${userMoves}-move tactic at ply ${t.startPly} (${label}, wp swing ${t.wpSwing > 0 ? '+' : ''}${t.wpSwing}%)`);
+            const moveNum = Math.ceil(t.startPly / 2);
+            const solution = t.moves.filter(m => m.isUser).map(m => m.san).join(' → ');
+            log(`  ⚡ ${userMoves}-move tactic at move ${moveNum} (${label}, wp swing ${t.wpSwing > 0 ? '+' : ''}${t.wpSwing}%): ${solution}`);
           }
         }
         log(`  ${tactics.length} tactic(s) — ${duration}s`);
