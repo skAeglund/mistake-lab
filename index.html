@@ -3495,7 +3495,9 @@ function onDragStart(source, piece) {
 
 function onDrop(source, target) {
   if (!gameEngine) return 'snapback';
-  deselectionPending = false; // drag happened — suppress mouseup deselection
+  // If piece was dropped back on same square, it was a click — keep selection
+  if (source === target) return 'snapback';
+  deselectionPending = false; // real drag happened — suppress mouseup deselection
   clearArrows();
   const move = gameEngine.move({
     from: source,
