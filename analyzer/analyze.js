@@ -27,12 +27,15 @@
 //   --output      Local output file (default: analyzed_games.json)
 //   --rated-only  Only analyze rated games (default: true)
 //   --time-controls Comma-separated: bullet,blitz,rapid,classical (default: all)
+//   --scan-tactics Scan existing analyzed games for tactical puzzles (no fetch)
+//   --tactic-depth MultiPV analysis depth for tactic detection (default: 14)
 //
 // Examples:
 //   node analyze.js --username DrNykterstein --stockfish ./stockfish
 //   node analyze.js --username DrNykterstein --stockfish "C:\stockfish\stockfish.exe" --depth 20 --threads 8
 //   node analyze.js --username magnus --platform chesscom --stockfish ./stockfish
 //   node analyze.js --username user1 --stockfish ./stockfish --gist-token ghp_xxx --gist-id abc123
+//   node analyze.js --scan-tactics --stockfish ./stockfish --gist-token ghp_xxx --gist-id abc123
 //
 // Download Stockfish: https://stockfishchess.org/download/
 // ═══════════════════════════════════════════════════════════════════════════
@@ -76,10 +79,19 @@ const CONFIG = {
   outputFile:    args.output || 'analyzed_games.json',
   ratedOnly:     args['rated-only'] !== 'false',
   timeControls:  args['time-controls'] ? args['time-controls'].split(',') : null,
+  // Tactic scanning
+  scanTactics:   args['scan-tactics'] === 'true' || args['scan-tactics'] === true,
+  tacticDepth:   parseInt(args['tactic-depth']) || 14,
 };
 
-if (!CONFIG.username || !CONFIG.stockfishPath) {
-  console.error('Usage: node analyze.js --username <name> --stockfish <path> [options]');
+if (CONFIG.scanTactics) {
+  if (!CONFIG.stockfishPath) {
+    console.error('Usage: node analyze.js --scan-tactics --stockfish <path> [--gist-token X --gist-id Y]');
+    process.exit(1);
+  }
+} else if (!CONFIG.username || !CONFIG.stockfishPath) {
+  console.error('Usage: node analyze.js --username <n> --stockfish <path> [options]');
+  console.error('       node analyze.js --scan-tactics --stockfish <path> [options]');
   console.error('Run with --help for all options.');
   process.exit(1);
 }
@@ -312,6 +324,75 @@ class StockfishEngine {
           } else {
             resolve({ eval: bestCp * flip });
           }
+        }
+      };
+      this.lineHandlers.push(handler);
+    });
+  }
+
+  /**
+   * Evaluate a position with MultiPV. Returns array of { eval/mate, move (uci) }
+   * from WHITE's perspective, ordered best → worst.
+   */
+  async evaluateMultiPV(fen, depth, numPVs = 2) {
+    this._send(`setoption name MultiPV value ${numPVs}`);
+    this._send(`position fen ${fen}`);
+    this._send(`go depth ${depth}`);
+
+    // Track best result per PV line at the highest depth seen
+    const pvResults = {}; // pv# → { cp, mate, move, depth }
+
+    return new Promise((resolve) => {
+      const handler = (line) => {
+        if (line.startsWith('info') && line.includes(' pv ')) {
+          const mpvM = line.match(/multipv (\d+)/);
+          const pvNum = parseInt(mpvM?.[1] || '1');
+          if (pvNum > numPVs) return;
+
+          const dM = line.match(/\bdepth (\d+)/);
+          const d = parseInt(dM?.[1] || '0');
+
+          const cpM = line.match(/score cp (-?\d+)/);
+          const mateM = line.match(/score mate (-?\d+)/);
+
+          // Extract first move of PV line
+          const pvMovesM = line.match(/ pv (.+)/);
+          const firstMove = pvMovesM ? pvMovesM[1].split(' ')[0] : null;
+
+          const prev = pvResults[pvNum];
+          if (!prev || d >= prev.depth) {
+            pvResults[pvNum] = {
+              cp: cpM ? parseInt(cpM[1]) : 0,
+              mate: mateM ? parseInt(mateM[1]) : null,
+              move: firstMove,
+              depth: d,
+            };
+          }
+        }
+
+        if (line.startsWith('bestmove')) {
+          this.lineHandlers = this.lineHandlers.filter(h => h !== handler);
+          this.positionsEvaluated++;
+
+          // Reset MultiPV to 1 for normal operation
+          this._send('setoption name MultiPV value 1');
+
+          // Convert from side-to-move perspective to white's perspective
+          const sideToMove = fen.split(' ')[1];
+          const flip = sideToMove === 'b' ? -1 : 1;
+
+          const results = [];
+          for (let i = 1; i <= numPVs; i++) {
+            const r = pvResults[i];
+            if (!r) break; // fewer legal moves than numPVs
+            if (r.mate !== null) {
+              results.push({ mate: r.mate * flip, move: r.move });
+            } else {
+              results.push({ eval: r.cp * flip, move: r.move });
+            }
+          }
+
+          resolve(results);
         }
       };
       this.lineHandlers.push(handler);
@@ -596,6 +677,244 @@ function countMistakes(game, username) {
 
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Tactic Scanner
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Thresholds for tactic detection
+const TACTIC_UNIQUENESS_THRESHOLD = 0.60; // win% gap between best and 2nd best (0-1 scale)
+const TACTIC_MIN_USER_MOVES = 2;          // minimum solver moves for a tactic
+const TACTIC_MAX_EVAL_ABS = 500;          // skip positions already heavily won/lost (cp)
+const TACTIC_MIN_PLY = 6;                 // skip very early opening moves
+const TACTIC_MIN_REMAINING = 2;           // need at least 2 plies remaining in game
+
+/**
+ * Convert eval object to win probability (0-1 scale) from the given perspective.
+ */
+function evalToWinProb(evalObj, perspective) {
+  const cp = evalToCp(evalObj, perspective);
+  return cpToWinPct(cp) / 100; // 0-1 scale
+}
+
+/**
+ * Check if a position has a unique best move by comparing MultiPV results.
+ * Returns { unique: bool, gap: number, bestMove: uci, bestEval: obj, secondEval: obj }
+ */
+function checkUniqueness(mpvResults, perspective) {
+  if (!mpvResults || mpvResults.length < 1) {
+    return { unique: false, gap: 0 };
+  }
+  // Only one legal move — trivially unique (but not interesting as a puzzle move
+  // unless it's part of a longer chain)
+  if (mpvResults.length === 1) {
+    return {
+      unique: true,
+      gap: 1.0,
+      forcedOnly: true,
+      bestMove: mpvResults[0].move,
+      bestEval: mpvResults[0],
+      secondEval: null,
+    };
+  }
+
+  const bestWp = evalToWinProb(mpvResults[0], perspective);
+  const secondWp = evalToWinProb(mpvResults[1], perspective);
+  const gap = bestWp - secondWp;
+
+  return {
+    unique: gap >= TACTIC_UNIQUENESS_THRESHOLD,
+    gap: Math.round(gap * 1000) / 1000,
+    forcedOnly: false,
+    bestMove: mpvResults[0].move,
+    bestEval: mpvResults[0],
+    secondEval: mpvResults[1],
+  };
+}
+
+/**
+ * Scan a single game for tactics. Requires Stockfish engine for MultiPV analysis.
+ * Returns an array of tactic objects to store on the game.
+ */
+async function scanGameForTactics(sf, game, tacticDepth) {
+  const moves = game.moves ? game.moves.split(' ').filter(Boolean) : [];
+  const analysis = game.analysis || [];
+  if (moves.length < 10 || analysis.length < 10) return [];
+
+  const playerColor = game._playerColor || 'white';
+
+  // Rebuild all FENs
+  const chess = new Chess(game.initialFen || undefined);
+  const fens = [chess.fen()]; // fens[0] = starting position
+  const moveResults = [];     // moveResults[i] = chess.js move result for moves[i]
+  for (let i = 0; i < moves.length; i++) {
+    const result = chess.move(moves[i], { sloppy: true });
+    if (!result) break;
+    fens.push(chess.fen());
+    moveResults.push(result);
+  }
+
+  // Identify candidate positions (user's turn, passes pre-filter)
+  const candidates = [];
+  for (let i = 0; i < moves.length; i++) {
+    const ply = i + 1; // 1-indexed
+    const isOurMove = (playerColor === 'white' && ply % 2 === 1) ||
+                      (playerColor === 'black' && ply % 2 === 0);
+    if (!isOurMove) continue;
+
+    // Pre-filter checks
+    if (ply < TACTIC_MIN_PLY) continue;
+    if (moves.length - i < TACTIC_MIN_REMAINING) continue;
+
+    // Check eval isn't already extreme (use eval BEFORE this move = after opponent's move)
+    // Allow mate evaluations through — finding a forced mate IS a tactic
+    const evalBefore = i > 0 ? analysis[i - 1] : null;
+    if (evalBefore && evalBefore.eval !== undefined) {
+      const cpFromPlayer = evalToCp(evalBefore, playerColor);
+      if (Math.abs(cpFromPlayer) > TACTIC_MAX_EVAL_ABS) continue;
+    }
+
+    // fenBefore this move = fens[i] (the position after i moves have been played,
+    // i.e. position before moves[i])
+    candidates.push({
+      moveIdx: i,
+      ply: ply,
+      fen: fens[i],
+    });
+  }
+
+  if (candidates.length === 0) return [];
+
+  // Run MultiPV on all candidates
+  const tactics = [];
+  const alreadyCovered = new Set(); // plies already part of a found tactic
+
+  for (const cand of candidates) {
+    if (alreadyCovered.has(cand.ply)) continue;
+
+    // MultiPV check at candidate position
+    const mpv = await sf.evaluateMultiPV(cand.fen, tacticDepth, 2);
+    const uniq = checkUniqueness(mpv, playerColor);
+
+    if (!uniq.unique) continue;
+    // Skip if the only reason it's "unique" is there's literally one legal move
+    // (a single forced move isn't the start of an interesting tactic)
+    if (uniq.forcedOnly) continue;
+
+    // Chain walk: try to extend this into a multi-move tactic
+    const tacticMoves = [];
+    let currentFen = cand.fen;
+    const currentChess = new Chess(currentFen);
+    let moveIdx = cand.moveIdx;
+
+    while (true) {
+      // --- User's move (must be unique) ---
+      const userMpv = moveIdx === cand.moveIdx
+        ? mpv // reuse the initial analysis
+        : await sf.evaluateMultiPV(currentFen, tacticDepth, 2);
+
+      const userUniq = moveIdx === cand.moveIdx
+        ? uniq
+        : checkUniqueness(userMpv, playerColor);
+
+      if (!userUniq.unique) break;
+
+      // Apply user's best move
+      const userMoveUci = userUniq.bestMove;
+      const userMove = currentChess.move(userMoveUci, { sloppy: true });
+      if (!userMove) break;
+
+      tacticMoves.push({
+        uci: userMoveUci,
+        san: userMove.san,
+        fen: currentChess.fen(),
+        isUser: true,
+      });
+
+      // Check for game-ending position
+      if (currentChess.in_checkmate() || currentChess.in_stalemate() ||
+          currentChess.in_draw()) {
+        break; // tactic ends with checkmate/draw — that's fine
+      }
+
+      // --- Opponent's response (best move) ---
+      const oppMpv = await sf.evaluateMultiPV(currentChess.fen(), tacticDepth, 2);
+      if (!oppMpv || oppMpv.length === 0) break;
+
+      const oppMoveUci = oppMpv[0].move;
+      const oppMove = currentChess.move(oppMoveUci, { sloppy: true });
+      if (!oppMove) break;
+
+      tacticMoves.push({
+        uci: oppMoveUci,
+        san: oppMove.san,
+        fen: currentChess.fen(),
+        isUser: false,
+      });
+
+      // Check for game-ending after opponent's move
+      if (currentChess.in_checkmate() || currentChess.in_stalemate() ||
+          currentChess.in_draw()) {
+        break;
+      }
+
+      currentFen = currentChess.fen();
+      moveIdx += 2; // advance to next user move position
+
+      // Safety: limit tactic length to 14 moves (7 user moves)
+      if (tacticMoves.length >= 14) break;
+    }
+
+    // Count user moves in the chain
+    const userMoveCount = tacticMoves.filter(m => m.isUser).length;
+    if (userMoveCount < TACTIC_MIN_USER_MOVES) continue;
+
+    // Calculate eval swing
+    const evalBefore = cand.moveIdx > 0 ? analysis[cand.moveIdx - 1] : { eval: 0 };
+    // Get eval of final position
+    const finalFen = tacticMoves[tacticMoves.length - 1].fen;
+    const finalEval = await sf.evaluate(finalFen, tacticDepth);
+
+    const wpBefore = cpToWinPct(evalToCp(evalBefore, playerColor));
+    const wpAfter = cpToWinPct(evalToCp(finalEval, playerColor));
+    const wpSwing = wpAfter - wpBefore;
+
+    // Check if the user actually played this tactic in the game
+    let found = true;
+    let gameIdx = cand.moveIdx;
+    for (const tm of tacticMoves) {
+      if (gameIdx >= moves.length) { found = false; break; }
+      const gameMoveResult = moveResults[gameIdx];
+      if (!gameMoveResult) { found = false; break; }
+      // Compare UCI: build UCI from the game's move result
+      const gameUci = gameMoveResult.from + gameMoveResult.to + (gameMoveResult.promotion || '');
+      if (gameUci !== tm.uci) {
+        found = tm.isUser ? false : found; // only care if user deviated
+        if (!found) break;
+      }
+      gameIdx++;
+    }
+
+    tactics.push({
+      startPly: cand.ply,
+      fenBefore: cand.fen,
+      playerColor: playerColor,
+      moves: tacticMoves,
+      evalBefore: evalBefore,
+      evalAfter: finalEval,
+      wpSwing: Math.round(wpSwing * 10) / 10,
+      found: found,
+    });
+
+    // Mark covered plies so we don't start overlapping tactics
+    for (let p = cand.ply; p < cand.ply + tacticMoves.length; p++) {
+      alreadyCovered.add(p);
+    }
+  }
+
+  return tactics;
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Gist Sync
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -645,7 +964,7 @@ function buildGameCacheObj(username, games, existingUsernames) {
   const newest = sorted[0]?.createdAt || 0;
   // Merge username into the usernames set (preserves names from other platforms)
   const names = new Set((existingUsernames || []).map(u => u.toLowerCase()));
-  names.add(username.toLowerCase());
+  if (username) names.add(username.toLowerCase());
   return {
     version: 2,
     usernames: [...names],
@@ -774,14 +1093,16 @@ async function main() {
   const hashPerWorker = Math.max(16, Math.floor(CONFIG.hash / numWorkers));
 
   log('═══════════════════════════════════════════════════');
-  log('  MistakeLab Analyzer');
+  log(`  MistakeLab ${CONFIG.scanTactics ? 'Tactic Scanner' : 'Analyzer'}`);
   log('═══════════════════════════════════════════════════');
-  log(`Username:    ${CONFIG.username}`);
-  log(`Platform:    ${CONFIG.platform}`);
+  if (!CONFIG.scanTactics) {
+    log(`Username:    ${CONFIG.username}`);
+    log(`Platform:    ${CONFIG.platform}`);
+  }
   log(`Stockfish:   ${CONFIG.stockfishPath}`);
-  log(`Depth:       ${CONFIG.depth}`);
+  log(`Depth:       ${CONFIG.scanTactics ? CONFIG.tacticDepth + ' (tactic MultiPV)' : CONFIG.depth}`);
   log(`Workers:     ${numWorkers} × ${threadsPerWorker} threads, ${hashPerWorker}MB hash each`);
-  log(`Max games:   ${CONFIG.maxGames}`);
+  if (!CONFIG.scanTactics) log(`Max games:   ${CONFIG.maxGames}`);
   log(`Gist sync:   ${CONFIG.gistToken && CONFIG.gistId ? 'enabled' : 'disabled'}`);
   log(`Output file: ${CONFIG.outputFile}`);
   log('');
@@ -828,7 +1149,7 @@ async function main() {
   for (const g of existingGames) {
     if (g.analysis && g.analysis.length > 0) existingIds.add(g.id);
     // Stamp player color on older games that don't have it yet
-    if (g.analysis && g.analysis.length > 0 && !g._playerColor) {
+    if (g.analysis && g.analysis.length > 0 && !g._playerColor && CONFIG.username) {
       const isW = g.players?.white?.user?.name?.toLowerCase() === CONFIG.username.toLowerCase()
                || g.players?.white?.user?.id?.toLowerCase() === CONFIG.username.toLowerCase();
       g._playerColor = isW ? 'white' : 'black';
@@ -857,6 +1178,106 @@ async function main() {
   const newEntries = Object.keys(posCache).length - preSeedCount;
   if (newEntries > 0) {
     log(`Seeded ${newEntries} new positions into eval cache from existing games (${seededPositions} total scanned)`);
+  }
+
+  // ── Scan-tactics mode: scan existing games for tactics, then exit ──
+  if (CONFIG.scanTactics) {
+    const analyzed = existingGames.filter(g => g.analysis && g.analysis.length > 0);
+    log('');
+    log('═══════════════════════════════════════════════════');
+    log('  Tactic Scanner');
+    log('═══════════════════════════════════════════════════');
+    log(`Games to scan:   ${analyzed.length}`);
+    log(`Tactic depth:    ${CONFIG.tacticDepth} (MultiPV 2)`);
+    log(`Uniqueness:      ${TACTIC_UNIQUENESS_THRESHOLD * 100}% win chance gap`);
+    log(`Min user moves:  ${TACTIC_MIN_USER_MOVES}`);
+    log('');
+
+    let totalTactics = 0;
+    let gamesWithTactics = 0;
+    let gamesScanned = 0;
+    const sf = pool[0]; // use single worker for tactic scanning
+
+    // Graceful shutdown for tactic scanning
+    let shuttingDown = false;
+    process.on('SIGINT', async () => {
+      if (shuttingDown) { process.exit(1); }
+      shuttingDown = true;
+      log('\nInterrupted — saving progress…');
+      try {
+        await saveAll(existingGames);
+      } catch (err) {
+        logError(`Save failed: ${err.message}`);
+      }
+      quitAll();
+      process.exit(0);
+    });
+
+    for (let i = 0; i < analyzed.length; i++) {
+      if (shuttingDown) break;
+      const game = analyzed[i];
+
+      // Skip games that already have tactics scanned
+      if (game._tacticsScanned) {
+        continue;
+      }
+
+      // Skip games without player color (can't determine which moves are ours)
+      if (!game._playerColor) {
+        log(`[${i + 1}/${analyzed.length}] Skipping (no player color): ${game.id}`);
+        continue;
+      }
+
+      const opening = game.opening?.name || 'Unknown';
+      const moveCount = game.moves ? game.moves.split(' ').length : 0;
+      log(`[${i + 1}/${analyzed.length}] Scanning: ${opening} (${moveCount} moves)…`);
+
+      const gameStart = Date.now();
+      try {
+        await sf.newGame();
+        const tactics = await scanGameForTactics(sf, game, CONFIG.tacticDepth);
+        game.tactics = tactics;
+        game._tacticsScanned = true;
+
+        const duration = ((Date.now() - gameStart) / 1000).toFixed(1);
+        gamesScanned++;
+
+        if (tactics.length > 0) {
+          gamesWithTactics++;
+          totalTactics += tactics.length;
+          for (const t of tactics) {
+            const userMoves = t.moves.filter(m => m.isUser).length;
+            const label = t.found ? '✓ found' : '✗ missed';
+            log(`  ⚡ ${userMoves}-move tactic at ply ${t.startPly} (${label}, wp swing ${t.wpSwing > 0 ? '+' : ''}${t.wpSwing}%)`);
+          }
+        }
+        log(`  ${tactics.length} tactic(s) — ${duration}s`);
+      } catch (err) {
+        logError(`  Failed to scan game ${game.id}: ${err.message}`);
+        continue;
+      }
+
+      // Periodic save
+      if (gamesScanned > 0 && gamesScanned % CONFIG.saveEvery === 0) {
+        log(`Saving progress (${gamesScanned} games scanned)…`);
+        await saveAll(existingGames);
+      }
+    }
+
+    // Final save and summary
+    log('');
+    log('═══════════════════════════════════════════════════');
+    log('  Tactic Scan Complete');
+    log('═══════════════════════════════════════════════════');
+    log(`Games scanned:      ${gamesScanned}`);
+    log(`Games with tactics: ${gamesWithTactics}`);
+    log(`Total tactics found:${totalTactics}`);
+    log(`Total time:         ${formatDuration((Date.now() - START_TIME) / 1000)}`);
+
+    await saveAll(existingGames);
+    quitAll();
+    log('Done!');
+    return;
   }
 
   // ── Phase 3: Fetch games ──
