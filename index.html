@@ -2220,6 +2220,30 @@ async function showHint() {
   if (hintLevel >= 2) return;
   const btn = document.getElementById('btnHint');
 
+  // ── Tactic mode hint: use pre-computed move ──
+  if (tacticMode && tacticStepIdx < tacticMoves.length) {
+    const expected = tacticMoves[tacticStepIdx];
+    if (!expected || !expected.uci) return;
+    tacticHintUsed = true;
+    hintUsed = true;
+    const fromSq = expected.uci.substring(0, 2);
+    const toSq = expected.uci.substring(2, 4);
+
+    if (hintLevel === 0) {
+      clearHintHighlights();
+      const fromEl = document.querySelector(`.square-${fromSq}`);
+      if (fromEl) fromEl.classList.add('square-hint');
+      hintLevel = 1;
+      if (btn) { btn.disabled = false; btn.textContent = '💡 Hint (2/2)'; btn.style.borderColor = 'var(--blue)'; btn.style.color = 'var(--blue)'; }
+    } else if (hintLevel === 1) {
+      hintArrow = { from: fromSq, to: toSq };
+      renderArrows();
+      hintLevel = 2;
+      if (btn) { btn.disabled = true; btn.textContent = '💡 Hint'; }
+    }
+    return;
+  }
+
   if (hintLevel === 0) {
     // First press: wait for depth 20, freeze move, pause analysis, highlight piece
     hintUsed = true;
@@ -2926,8 +2950,9 @@ function renderGameList() {
 
     const opening = game.opening?.name || game.pgn?.match(/\[Opening "([^"]+)"\]/)?.[1] || 'Unknown opening';
     const date = game.createdAt ? new Date(game.createdAt).toLocaleDateString() : '';
-    const blunders = mistakes.filter(m => m.wpDrop >= 15).length;
-    const mistakeCount = mistakes.length;
+    const blunders = mistakes.filter(m => m.wpDrop >= 15 && m.type !== 'tactic').length;
+    const mistakeCount = mistakes.filter(m => m.type !== 'tactic').length;
+    const tacticCount = mistakes.filter(m => m.type === 'tactic').length;
 
     let badgeClass, badgeText;
     if (allDone) {
@@ -2939,10 +2964,17 @@ function renderGameList() {
     } else if (blunders > 0) {
       badgeClass = 'badge-blunder';
       badgeText = `${blunders} blunder${blunders>1?'s':''}`;
-    } else {
+    } else if (mistakeCount > 0) {
       badgeClass = 'badge-mistake';
       badgeText = `${mistakeCount} mistake${mistakeCount>1?'s':''}`;
+    } else {
+      badgeClass = 'badge-mistake';
+      badgeText = '';
     }
+
+    const tacticBadge = tacticCount > 0
+      ? `<span class="game-mistakes-badge" style="background:rgba(255,193,7,0.12);color:#ffc107;border-color:rgba(255,193,7,0.3);">⚡${tacticCount}</span>`
+      : '';
 
     // Always show progress on games with mistakes
     const progressText = mistakes.length > 0
@@ -2952,7 +2984,7 @@ function renderGameList() {
     card.innerHTML = `
       <div class="game-card-top">
         <div class="game-opening">${escHtml(opening)}</div>
-        <span class="game-mistakes-badge ${badgeClass}">${badgeText}</span>
+        <span class="game-mistakes-badge ${badgeClass}">${badgeText}</span>${tacticBadge}
       </div>
       <div class="game-meta">
         <span class="game-color-dot ${color}"></span>
@@ -3028,7 +3060,8 @@ function renderReviewList() {
     item.onclick = () => loadPosition(globalIdx);
 
     const opening = m.game?.opening?.name || 'Unknown';
-    const lossClass = m.wpDrop >= 15 ? 'loss-blunder' : 'loss-mistake';
+    const isTactic = m.type === 'tactic';
+    const lossClass = isTactic ? '' : (m.wpDrop >= 15 ? 'loss-blunder' : 'loss-mistake');
     const isNew = card.state === FSRS_STATE.new;
     const isOverdue = !isNew && card.due && card.due < today;
 
@@ -3041,9 +3074,13 @@ function renderReviewList() {
       statusText = '<span style="color:var(--yellow)">Due</span>';
     }
 
+    const moveLabel = isTactic
+      ? `⚡ Move ${m.moveNumber}${m.playerColor==='white'?'.':'…'} <span style="color:var(--yellow)">+${Math.abs(m.wpSwing)}%</span>`
+      : `Move ${m.moveNumber}${m.playerColor==='white'?'.':'…'} <span class="loss ${lossClass}">−${m.wpDrop}%</span>`;
+
     item.innerHTML = `
       <div class="review-item-top">
-        <span>Move ${m.moveNumber}${m.playerColor==='white'?'.':'…'} <span class="loss ${lossClass}">−${m.wpDrop}%</span></span>
+        <span>${moveLabel}</span>
         ${statusText}
       </div>
       <div class="review-item-opening">${escHtml(opening)}</div>
@@ -3358,6 +3395,11 @@ function loadPosition(globalIdx) {
   closeMobileFeedback();
   preAnalysisPaused = false;
   continuationMode = false;
+  tacticMode = false;
+  tacticStepIdx = 0;
+  tacticMoves = [];
+  tacticWrongAttempts = 0;
+  tacticHintUsed = false;
   hideMaiaControls();
   engineLine = null;
   browsingLine = false;
@@ -3387,25 +3429,50 @@ function loadPosition(globalIdx) {
   // Show position info
   const infoCard = document.getElementById('posInfoCard');
   infoCard.style.display = '';
-  document.getElementById('posInfoContent').innerHTML = `
-    <div style="font-size:13px;line-height:1.7">
-      <div>Move <code class="mono">${m.moveNumber}${m.playerColor==='white'?'.':'…'}</code> — win% dropped <span style="color:var(--red);font-weight:600">−${m.wpDrop}%</span> <span style="color:var(--text-muted)">(${m.cpLoss}cp)</span></div>
-      <div id="mistakeReveal">
-        <button class="btn btn-ghost btn-sm" style="margin-top:6px;font-size:11px;" onclick="this.parentElement.innerHTML='You played <code class=mono>${escHtml(m.sanPlayed)}</code>'">Show original mistake</button>
+
+  if (m.type === 'tactic') {
+    // ── Tactic mode setup ──
+    tacticMode = true;
+    tacticMoves = m.tacticMoves;
+    tacticStepIdx = 0;
+    tacticWrongAttempts = 0;
+    tacticHintUsed = false;
+    const userMoveCount = tacticMoves.filter(tm => tm.isUser).length;
+    document.getElementById('posInfoContent').innerHTML = `
+      <div style="font-size:13px;line-height:1.7">
+        <div>⚡ <strong>Tactic</strong> — ${userMoveCount} moves to find</div>
+        <div style="color:var(--green)">Win% swing: +${Math.abs(m.wpSwing)}%</div>
+        <div id="tacticProgress" style="font-size:12px;margin-top:2px;color:var(--text-muted)">Move 1 of ${userMoveCount}</div>
+        ${m.found === false ? '<div style="font-size:11px;margin-top:2px;color:var(--yellow)">You missed this in the game</div>' : ''}
       </div>
-      <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
-    </div>
-  `;
+    `;
+    // No pre-analysis needed — solution is pre-computed
+    document.getElementById('feedbackContainer').innerHTML = '';
+    document.getElementById('contLineContainer').innerHTML = '';
+    renderQueue();
+    updateSessionProgress();
+  } else {
+    // ── Mistake mode setup ──
+    document.getElementById('posInfoContent').innerHTML = `
+      <div style="font-size:13px;line-height:1.7">
+        <div>Move <code class="mono">${m.moveNumber}${m.playerColor==='white'?'.':'…'}</code> — win% dropped <span style="color:var(--red);font-weight:600">−${m.wpDrop}%</span> <span style="color:var(--text-muted)">(${m.cpLoss}cp)</span></div>
+        <div id="mistakeReveal">
+          <button class="btn btn-ghost btn-sm" style="margin-top:6px;font-size:11px;" onclick="this.parentElement.innerHTML='You played <code class=mono>${escHtml(m.sanPlayed)}</code>'">Show original mistake</button>
+        </div>
+        <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
+      </div>
+    `;
 
-  // Clear feedback
-  document.getElementById('feedbackContainer').innerHTML = '';
-  document.getElementById('contLineContainer').innerHTML = '';
-  renderQueue();
-  updateSessionProgress();
+    // Clear feedback
+    document.getElementById('feedbackContainer').innerHTML = '';
+    document.getElementById('contLineContainer').innerHTML = '';
+    renderQueue();
+    updateSessionProgress();
 
-  // Stream pre-analysis (runs up to depth 30 while user thinks)
-  startPreAnalysis(m.fenBefore);
-  sfLog('loadPosition', `idx=${globalIdx} startPreAnalysis called, newSession=${preAnalysisSession}`);
+    // Stream pre-analysis (runs up to depth 30 while user thinks)
+    startPreAnalysis(m.fenBefore);
+    sfLog('loadPosition', `idx=${globalIdx} startPreAnalysis called, newSession=${preAnalysisSession}`);
+  }
 }
 
 // ─── Board interaction ───
@@ -3496,12 +3563,152 @@ function onDrop(source, target) {
   }
 
   currentAttempts++;
-  evaluateMove(source, target, move);
+  if (tacticMode) {
+    evaluateTacticMove(source, target, move);
+  } else {
+    evaluateMove(source, target, move);
+  }
   return undefined; // allow the drop
 }
 
 function onSnapEnd() {
   if (gameEngine) boardObj.position(gameEngine.fen());
+}
+
+// ─── Evaluate a move in tactic-solving mode ───
+function evaluateTacticMove(from, to, move) {
+  const m = filteredMistakes[currentMistakeIdx];
+  if (!m || m.type !== 'tactic') return;
+
+  const expectedMove = tacticMoves[tacticStepIdx];
+  if (!expectedMove || !expectedMove.isUser) return;
+
+  const userUci = from + to + (move.promotion || '');
+  const isCorrect = userUci === expectedMove.uci;
+
+  clearHintHighlights();
+  const container = document.getElementById('feedbackContainer');
+
+  if (isCorrect) {
+    // Correct move
+    highlightSquaresWithColor(from, to, '#3ecc6f');
+    const userMovesSoFar = tacticMoves.slice(0, tacticStepIdx + 1).filter(tm => tm.isUser).length;
+    const totalUserMoves = tacticMoves.filter(tm => tm.isUser).length;
+
+    // Check if this is the last user move
+    const nextUserIdx = tacticMoves.findIndex((tm, i) => i > tacticStepIdx && tm.isUser);
+    const isLastMove = nextUserIdx === -1;
+
+    if (isLastMove) {
+      // ── Tactic complete ──
+      const pid = posId(m);
+      let grade, gradeLabel;
+      if (tacticWrongAttempts > 0) {
+        grade = FSRS_GRADE.again; gradeLabel = 'Again';
+      } else if (tacticHintUsed) {
+        grade = FSRS_GRADE.hard; gradeLabel = 'Hard (hint)';
+      } else {
+        grade = FSRS_GRADE.easy; gradeLabel = 'Easy';
+      }
+
+      let srsInfo = '';
+      if (!srsRecorded) {
+        const srsCard = recordReview(pid, grade);
+        srsRecorded = true;
+        srsInfo = srsTag(gradeLabel, srsCard);
+      }
+
+      showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
+        '⚡ Tactic complete!',
+        `<code>${escHtml(move.san)}</code> — solved in ${totalUserMoves} moves` +
+        (tacticWrongAttempts > 0 ? ` (${tacticWrongAttempts} wrong attempt${tacticWrongAttempts>1?'s':''})` : '') +
+        srsInfo);
+      updateSessionProgress();
+      renderQueue();
+      tacticMode = false;
+    } else {
+      // ── More moves to go — show feedback then auto-play opponent ──
+      showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
+        'Correct!',
+        `<code>${escHtml(move.san)}</code> — move ${userMovesSoFar} of ${totalUserMoves}`);
+      updateTacticProgress(userMovesSoFar, totalUserMoves);
+
+      // Auto-play opponent's response after a short delay
+      tacticStepIdx++;
+      setTimeout(() => tacticAutoPlayOpponent(), 400);
+    }
+  } else {
+    // Wrong move
+    tacticWrongAttempts++;
+    const color = '#e05757';
+    const colorDim = 'rgba(224,87,87,0.08)';
+    highlightSquaresWithColor(from, to, color);
+
+    if (currentAttempts >= 3) {
+      // Too many wrong attempts on this step — reveal and grade Again
+      showColorFeedback(color, colorDim,
+        'The answer was:',
+        `<code>${escHtml(expectedMove.san)}</code>`);
+
+      const pid = posId(m);
+      if (!srsRecorded) {
+        const srsCard = recordReview(pid, FSRS_GRADE.again);
+        srsRecorded = true;
+        showFeedback('info', 'SRS: Again', `Next review: ${srsCard.due}`);
+      }
+      updateSessionProgress();
+      renderQueue();
+      tacticMode = false;
+    } else {
+      // Let them retry this step
+      showColorFeedback(color, colorDim,
+        'Not the right move',
+        `Try again — ${3 - currentAttempts} attempt${3 - currentAttempts !== 1 ? 's' : ''} left on this move`);
+      gameEngine.undo();
+      boardObj.position(gameEngine.fen());
+    }
+  }
+}
+
+function tacticAutoPlayOpponent() {
+  if (!tacticMode || tacticStepIdx >= tacticMoves.length) return;
+
+  const oppMove = tacticMoves[tacticStepIdx];
+  if (!oppMove || oppMove.isUser) return; // shouldn't happen but guard
+
+  const result = gameEngine.move(oppMove.uci, { sloppy: true });
+  if (!result) return;
+
+  boardObj.position(gameEngine.fen(), true);
+  clearHighlights();
+  highlightSquaresWithColor(oppMove.uci.substring(0, 2), oppMove.uci.substring(2, 4), 'var(--text-muted)');
+
+  // Advance to next user move
+  tacticStepIdx++;
+  currentAttempts = 0; // reset per-step attempts
+  hintLevel = 0;       // reset hint for next move
+  hintArrow = null;
+  clearHintHighlights();
+  const hintBtn = document.getElementById('btnHint');
+  if (hintBtn) { hintBtn.disabled = false; hintBtn.textContent = '💡 Hint'; hintBtn.style.borderColor = ''; hintBtn.style.color = ''; }
+
+  // Update progress
+  const userMovesSoFar = tacticMoves.slice(0, tacticStepIdx).filter(tm => tm.isUser).length;
+  const totalUserMoves = tacticMoves.filter(tm => tm.isUser).length;
+  updateTacticProgress(userMovesSoFar + 1, totalUserMoves);
+
+  // Update feedback to prompt next move
+  setTimeout(() => {
+    if (!tacticMode) return;
+    showColorFeedback('var(--accent)', 'rgba(93,138,255,0.08)',
+      'Your turn',
+      `Find move ${userMovesSoFar + 1} of ${totalUserMoves}`);
+  }, 300);
+}
+
+function updateTacticProgress(current, total) {
+  const el = document.getElementById('tacticProgress');
+  if (el) el.textContent = `Move ${current} of ${total}`;
 }
 
 // ─── Evaluate the user's move via Stockfish ───
@@ -4455,6 +4662,12 @@ function advanceReviewQueue() {
 function retryPosition() {
   if (currentMistakeIdx < 0) return;
   const m = filteredMistakes[currentMistakeIdx];
+
+  // For tactics, just reload from scratch (resets all tactic state properly)
+  if (m.type === 'tactic') {
+    loadPosition(currentMistakeIdx);
+    return;
+  }
 
   currentAttempts = 0;
   firstAttemptFailed = false;
