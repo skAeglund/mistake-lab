@@ -965,7 +965,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add tactic invalidation: remove or convert to mistake</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hide games with no matches when type filter active</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2998,6 +2998,8 @@ function renderGameList() {
     if (filters.color !== 'both' && color !== filters.color) continue;
 
     const mistakes = filteredMistakes.filter(m => m.gameId === g.id);
+    // Skip games with no matching positions when filtering by type
+    if (filters.type !== 'all' && mistakes.length === 0) continue;
     gameMap.set(g.id, { game: g, mistakes, color });
   }
 
