@@ -965,7 +965,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Tactic alternative lines UI</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Alt lines skip common prefix with solved lines</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1191,6 +1191,8 @@ let tacticHintUsed = false;      // hint used during this tactic
 let tacticLine = null;           // { baseFen, moves: [{san,uci,fen,isUser}], currentIdx }
 let tacticAltLines = [];         // alternative opponent-response lines to solve after main line
 let tacticAltIdx = -1;           // -1 = main line, 0+ = which alternative we're solving
+let tacticSolvedLines = [];      // completed lines (for skipping common prefixes in alt lines)
+let tacticPrefixUserMoves = 0;   // user moves auto-played in common prefix (for progress display)
 
 let gameListDisplayLimit = 50;
 let reviewListDisplayLimit = 50;
@@ -3475,6 +3477,8 @@ function loadPosition(globalIdx) {
   tacticLine = null;
   tacticAltLines = [];
   tacticAltIdx = -1;
+  tacticSolvedLines = [];
+  tacticPrefixUserMoves = 0;
   hideMaiaControls();
   engineLine = null;
   browsingLine = false;
@@ -3514,6 +3518,8 @@ function loadPosition(globalIdx) {
     tacticHintUsed = false;
     tacticAltLines = m.tacticAltLines || [];
     tacticAltIdx = -1;
+    tacticSolvedLines = [];
+    tacticPrefixUserMoves = 0;
     const userMoveCount = tacticMoves.filter(tm => tm.isUser).length;
     const altCount = tacticAltLines.length;
     document.getElementById('posInfoContent').innerHTML = `
@@ -3696,6 +3702,9 @@ async function evaluateTacticMove(from, to, move) {
     const isLastMove = nextUserIdx === -1;
 
     if (isLastMove) {
+      // Record this completed line for common-prefix detection
+      tacticSolvedLines.push([...tacticMoves]);
+
       // Check if there are unsolved alternative lines remaining
       const nextAltIdx = tacticAltIdx + 1;
       const hasMoreAlts = nextAltIdx < tacticAltLines.length;
@@ -3747,8 +3756,8 @@ async function evaluateTacticMove(from, to, move) {
       // ── More moves to go — show feedback then auto-play opponent ──
       showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
         'Correct!',
-        `<code>${escHtml(move.san)}</code> — move ${userMovesSoFar} of ${totalUserMoves}`);
-      updateTacticProgress(userMovesSoFar, totalUserMoves);
+        `<code>${escHtml(move.san)}</code> — move ${userMovesSoFar - tacticPrefixUserMoves} of ${totalUserMoves - tacticPrefixUserMoves}`);
+      updateTacticProgress(userMovesSoFar - tacticPrefixUserMoves, totalUserMoves - tacticPrefixUserMoves);
 
       // Auto-play opponent's response after a short delay
       tacticStepIdx++;
@@ -3834,14 +3843,16 @@ function tacticAutoPlayOpponent() {
   // Update progress
   const userMovesSoFar = tacticMoves.slice(0, tacticStepIdx).filter(tm => tm.isUser).length;
   const totalUserMoves = tacticMoves.filter(tm => tm.isUser).length;
-  updateTacticProgress(userMovesSoFar + 1, totalUserMoves);
+  const adjSoFar = userMovesSoFar - tacticPrefixUserMoves;
+  const adjTotal = totalUserMoves - tacticPrefixUserMoves;
+  updateTacticProgress(adjSoFar + 1, adjTotal);
 
   // Update feedback to prompt next move
   setTimeout(() => {
     if (!tacticMode) return;
     showColorFeedback('var(--accent)', 'rgba(93,138,255,0.08)',
       'Your turn',
-      `Find move ${userMovesSoFar + 1} of ${totalUserMoves}`);
+      `Find move ${adjSoFar + 1} of ${adjTotal}`);
   }, 300);
 }
 
@@ -3851,15 +3862,26 @@ function loadNextTacticAlt() {
 
   tacticAltIdx++;
   const altLine = tacticAltLines[tacticAltIdx];
-  if (!altLine || altLine.length < 3) return; // need at least user move + opp response + user move
+  if (!altLine || altLine.length < 3) return;
 
-  // Reset board to starting position
+  // Find the longest common prefix with any previously solved line.
+  // This tells us how many moves the user has already proven they know.
+  let commonLen = 0;
+  for (const solved of tacticSolvedLines) {
+    let len = 0;
+    for (let i = 0; i < Math.min(altLine.length, solved.length); i++) {
+      if (altLine[i].uci === solved[i].uci) len++;
+      else break;
+    }
+    if (len > commonLen) commonLen = len;
+  }
+
+  // Reset board and replay the common prefix
   gameEngine = new Chess(m.fenBefore);
   boardObj.position(m.fenBefore, false);
   clearHighlights();
   clearArrows();
 
-  // Set up tactic mode with the alternative line
   tacticMode = true;
   tacticMoves = altLine;
   tacticStepIdx = 0;
@@ -3867,26 +3889,47 @@ function loadNextTacticAlt() {
   hintLevel = 0;
   hintArrow = null;
   clearHintHighlights();
-
-  // Reset tactic line for the move list display
   tacticLine = { baseFen: m.fenBefore, moves: [], currentIdx: -1 };
 
-  const userMoveCount = altLine.filter(tm => tm.isUser).length;
+  // Auto-play all common prefix moves instantly
+  for (let i = 0; i < commonLen && i < altLine.length; i++) {
+    const mv = altLine[i];
+    const result = gameEngine.move(mv.uci, { sloppy: true });
+    if (!result) break;
+    tacticLine.moves.push({ san: result.san, uci: mv.uci, fen: gameEngine.fen(), isUser: mv.isUser });
+    tacticLine.currentIdx = tacticLine.moves.length - 1;
+    tacticStepIdx = i + 1;
+  }
+
+  boardObj.position(gameEngine.fen(), false);
+  currentSolveFen = gameEngine.fen();
+
+  // Highlight the last common move
+  if (commonLen > 0) {
+    const lastCommon = altLine[commonLen - 1];
+    const color = lastCommon.isUser ? '#3ecc6f' : 'var(--text-muted)';
+    highlightSquaresWithColor(lastCommon.uci.substring(0, 2), lastCommon.uci.substring(2, 4), color);
+  }
+  renderTacticLine();
+
+  // Count remaining user moves (the ones they haven't proven yet)
+  const totalUserMoves = altLine.filter(tm => tm.isUser).length;
+  const solvedUserMoves = altLine.slice(0, commonLen).filter(tm => tm.isUser).length;
+  const remainingUserMoves = totalUserMoves - solvedUserMoves;
+  tacticPrefixUserMoves = solvedUserMoves;
   const altLabel = `Alt line ${tacticAltIdx + 1}/${tacticAltLines.length}`;
 
-  // Update info panel
   const infoCard = document.getElementById('posInfoCard');
   infoCard.style.display = '';
   document.getElementById('posInfoContent').innerHTML = `
     <div style="font-size:13px;line-height:1.7">
-      <div>⚡ <strong>${altLabel}</strong> — ${userMoveCount} moves to find</div>
+      <div>⚡ <strong>${altLabel}</strong> — ${remainingUserMoves} move${remainingUserMoves !== 1 ? 's' : ''} to find</div>
       <div style="font-size:11px;color:var(--text-muted)">Opponent plays differently</div>
-      <div id="tacticProgress" style="font-size:12px;margin-top:2px;color:var(--text-muted)">Move 1 of ${userMoveCount}</div>
+      <div id="tacticProgress" style="font-size:12px;margin-top:2px;color:var(--text-muted)">Move 1 of ${remainingUserMoves}</div>
     </div>
   `;
   document.getElementById('feedbackContainer').innerHTML = '';
 
-  // Show hint button
   const hintBtn = document.getElementById('btnHint');
   if (hintBtn) {
     hintBtn.classList.remove('hidden');
@@ -3896,24 +3939,13 @@ function loadNextTacticAlt() {
     hintBtn.style.color = '';
   }
 
-  // Auto-play the common first user move
-  const firstUserMove = altLine[0];
-  if (firstUserMove && firstUserMove.isUser) {
-    const result = gameEngine.move(firstUserMove.uci, { sloppy: true });
-    if (result) {
-      boardObj.position(gameEngine.fen(), true);
-      highlightSquaresWithColor(firstUserMove.uci.substring(0, 2), firstUserMove.uci.substring(2, 4), '#3ecc6f');
-      tacticLine.moves.push({ san: result.san, uci: firstUserMove.uci, fen: gameEngine.fen(), isUser: true });
-      tacticLine.currentIdx = 0;
-      renderTacticLine();
-      tacticStepIdx = 1;
-
-      // After short delay, auto-play opponent's alternative response
-      setTimeout(() => {
-        if (!tacticMode || tacticStepIdx >= tacticMoves.length) return;
-        tacticAutoPlayOpponent();
-      }, 500);
-    }
+  // If the next move after the prefix is an opponent move, auto-play it after a delay
+  // (this is the divergence point — the "opponent plays differently" moment)
+  if (tacticStepIdx < altLine.length && !altLine[tacticStepIdx].isUser) {
+    setTimeout(() => {
+      if (!tacticMode || tacticStepIdx >= tacticMoves.length) return;
+      tacticAutoPlayOpponent();
+    }, 500);
   }
 }
 
