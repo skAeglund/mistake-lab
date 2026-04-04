@@ -965,7 +965,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix arrow keys: engine line takes priority over tactic line</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix tactic engine line: clean up stale SF search + preventDefault</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3500,7 +3500,17 @@ function loadPosition(globalIdx) {
         ${m.found === false ? '<div style="font-size:11px;margin-top:2px;color:var(--yellow)">You missed this in the game</div>' : ''}
       </div>
     `;
-    // No pre-analysis needed — solution is pre-computed
+    // No pre-analysis needed — solution is pre-computed.
+    // But clean up any running search from the previous position so
+    // sfAnalyze works cleanly if the user makes a wrong move.
+    stopPreAnalysis();
+    if (sfSearchActive && sfWorker) {
+      sfWorker.terminate();
+      sfWorker = null;
+      sfReady = false;
+      sfSearchActive = false;
+      initStockfish(); // reinit in background — sfAnalyze will wait for sfReady
+    }
     tacticLine = { baseFen: m.fenBefore, moves: [], currentIdx: -1 };
     document.getElementById('feedbackContainer').innerHTML = '';
     document.getElementById('contLineContainer').innerHTML = '';
@@ -5319,9 +5329,19 @@ document.addEventListener('keydown', (e) => {
     closeSettings();
   }
   if (e.target.tagName === 'INPUT') return;
-  // Arrow keys: tactic line > cont line > engine line
-  if (e.key === 'ArrowLeft') { if (engineLine) lineStep(-1); else if (tacticLine) tacticLineStep(-1); else if (contLine) contLineStep(-1); return; }
-  if (e.key === 'ArrowRight') { if (engineLine) lineStep(1); else if (tacticLine) tacticLineStep(1); else if (contLine) contLineStep(1); return; }
+  // Arrow keys: engine line takes priority (for wrong-move browsing during tactics)
+  if (e.key === 'ArrowLeft') {
+    if (engineLine) { lineStep(-1); e.preventDefault(); }
+    else if (tacticLine) { tacticLineStep(-1); e.preventDefault(); }
+    else if (contLine) { contLineStep(-1); e.preventDefault(); }
+    return;
+  }
+  if (e.key === 'ArrowRight') {
+    if (engineLine) { lineStep(1); e.preventDefault(); }
+    else if (tacticLine) { tacticLineStep(1); e.preventDefault(); }
+    else if (contLine) { contLineStep(1); e.preventDefault(); }
+    return;
+  }
   if (e.key === 's' || e.key === 'S') skipPosition();
   if (e.key === 'r' || e.key === 'R') { if (!document.getElementById('btnRetry').classList.contains('hidden')) retryPosition(); }
   if (e.key === 'h' || e.key === 'H') { if (!document.getElementById('btnHint').classList.contains('hidden')) showHint(); }
