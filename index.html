@@ -965,7 +965,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hide games with no matches when type filter active</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix Gist overwrite: preserve tactics during merge + commit messages</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1457,6 +1457,7 @@ async function gistWrite(data) {
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
+      description: `MistakeLab progress sync (browser) — ${Object.keys(data.positions || {}).length} positions`,
       files: { [GIST_FILENAME]: { content: JSON.stringify(data, null, 2) } }
     })
   });
@@ -1587,6 +1588,9 @@ function mergeGames(cached, fetched) {
       // Preserve analyzer metadata that Lichess API doesn't provide
       if (existing._playerColor && !g._playerColor) g._playerColor = existing._playerColor;
       if (existing._source && !g._source) g._source = existing._source;
+      // Preserve tactic data from analyzer (not present in browser-fetched games)
+      if (existing.tactics && !g.tactics) g.tactics = existing.tactics;
+      if (existing._tacticsScanned && !g._tacticsScanned) g._tacticsScanned = existing._tacticsScanned;
     }
     byId.set(g.id, g); // fetched wins on collision (with metadata preserved)
   }
@@ -1618,6 +1622,7 @@ async function gistWriteGames(cacheObj) {
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
+      description: `MistakeLab sync (browser) — ${cacheObj.games?.length || 0} games`,
       files: { [GIST_GAMES_FILENAME]: { content: JSON.stringify(cacheObj) } }
     })
   });
@@ -2634,13 +2639,20 @@ async function fetchGames(autoUsername) {
             cachedGames = gistGames;
             cache = gistCache;
           } else {
-            // Merge: add any Gist-only games (e.g. from the batch analyzer) into local cache
-            const localIds = new Set(cachedGames.map(g => g.id));
+            // Merge: add Gist-only games and preserve analyzer data on existing games
+            const localById = new Map(cachedGames.map(g => [g.id, g]));
             let added = 0;
             for (const g of gistGames) {
-              if (!localIds.has(g.id)) {
+              const local = localById.get(g.id);
+              if (!local) {
                 cachedGames.push(g);
                 added++;
+              } else {
+                // Preserve analyzer-only fields from Gist onto local copy
+                if (g.tactics && !local.tactics) local.tactics = g.tactics;
+                if (g._tacticsScanned && !local._tacticsScanned) local._tacticsScanned = g._tacticsScanned;
+                if (g._playerColor && !local._playerColor) local._playerColor = g._playerColor;
+                if (g._source && !local._source) local._source = g._source;
               }
             }
             if (added > 0) {

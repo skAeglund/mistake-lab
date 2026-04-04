@@ -944,11 +944,12 @@ async function readGistGames(token, gistId) {
   }
 }
 
-async function writeGistGames(token, gistId, cacheObj) {
+async function writeGistGames(token, gistId, cacheObj, description) {
   if (!token || !gistId) return;
   log('Writing games to Gist…');
   try {
     await httpPatch(`https://api.github.com/gists/${gistId}`, {
+      description: description || `MistakeLab analyzer — ${cacheObj.games?.length || 0} games`,
       files: { [GIST_GAMES_FILENAME]: { content: JSON.stringify(cacheObj) } }
     }, {
       'Authorization': `token ${token}`,
@@ -1204,7 +1205,7 @@ async function main() {
       shuttingDown = true;
       log('\nInterrupted — saving progress…');
       try {
-        await saveAll(existingGames);
+        await saveAll(existingGames, undefined, `MistakeLab tactic scan — ${gamesScanned} games scanned, ${totalTactics} tactics found`);
       } catch (err) {
         logError(`Save failed: ${err.message}`);
       }
@@ -1272,7 +1273,7 @@ async function main() {
         // Periodic save
         if (gamesScanned > 0 && gamesScanned % CONFIG.saveEvery === 0) {
           log(`Saving progress (${gamesScanned} games scanned)…`);
-          await saveAll(existingGames);
+          await saveAll(existingGames, undefined, `MistakeLab tactic scan — ${gamesScanned} games scanned, ${totalTactics} tactics found`);
         }
       }
     }
@@ -1290,7 +1291,7 @@ async function main() {
     log(`Total tactics found:${totalTactics}`);
     log(`Total time:         ${formatDuration((Date.now() - START_TIME) / 1000)}`);
 
-    await saveAll(existingGames);
+    await saveAll(existingGames, undefined, `MistakeLab tactic scan — ${gamesScanned} games scanned, ${totalTactics} tactics found`);
     quitAll();
     log('Done!');
     return;
@@ -1323,7 +1324,7 @@ async function main() {
     log('Nothing to do! All games are already analyzed.');
     quitAll();
     // Still save merged data (may have new _playerColor stamps)
-    await saveAll(existingGames);
+    await saveAll(existingGames, undefined, `MistakeLab analyzer — no new games, merged data save`);
     return;
   }
 
@@ -1347,7 +1348,7 @@ async function main() {
     shuttingDown = true;
     log('\nInterrupted — saving progress…');
     try {
-      await saveAll(analyzedGames, gamesAnalyzed);
+      await saveAll(analyzedGames, gamesAnalyzed, `MistakeLab analyzer — ${gamesAnalyzed} games analyzed`);
       savePosCache();
     } catch (err) {
       logError(`Save failed: ${err.message}`);
@@ -1397,7 +1398,7 @@ async function main() {
     // Periodic save
     if (gamesAnalyzed > 0 && gamesAnalyzed % CONFIG.saveEvery === 0) {
       log(`Saving progress (${gamesAnalyzed} games analyzed so far)…`);
-      await saveAll(analyzedGames, gamesAnalyzed);
+      await saveAll(analyzedGames, gamesAnalyzed, `MistakeLab analyzer — ${gamesAnalyzed} games analyzed`);
       savePosCache();
     }
   }
@@ -1414,14 +1415,14 @@ async function main() {
   log(`Total time:        ${formatDuration((Date.now() - START_TIME) / 1000)}`);
   log(`Total games in DB: ${analyzedGames.length}`);
 
-  await saveAll(analyzedGames, gamesAnalyzed);
+  await saveAll(analyzedGames, gamesAnalyzed, `MistakeLab analyzer — ${gamesAnalyzed} games analyzed`);
   savePosCache();
   log(`Eval cache: ${Object.keys(posCache).length} entries saved`);
   quitAll();
   log('Done!');
 }
 
-async function saveAll(games, newlyAnalyzed) {
+async function saveAll(games, newlyAnalyzed, description) {
   const cacheObj = buildGameCacheObj(CONFIG.username, games, gistUsernames);
 
   // Save locally (synchronous — always completes)
@@ -1431,7 +1432,7 @@ async function saveAll(games, newlyAnalyzed) {
 
   // Save to Gist (await so it completes before process exits)
   if (CONFIG.gistToken && CONFIG.gistId) {
-    await writeGistGames(CONFIG.gistToken, CONFIG.gistId, cacheObj);
+    await writeGistGames(CONFIG.gistToken, CONFIG.gistId, cacheObj, description);
   }
 }
 
