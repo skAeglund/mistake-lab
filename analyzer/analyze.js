@@ -781,6 +781,11 @@ async function scanGameForTactics(sf, game, tacticDepth) {
       const oppCpLoss = cpAfterOppMove - cpBeforeOppMove; // positive = opponent lost cp (good for us)
       // Also allow positions where a mate appeared (opponent blundered into mate)
       const mateAppeared = analysis[i - 1].mate !== undefined && analysis[i - 2].mate === undefined;
+      // DEBUG: log first big swing for diagnostics
+      if (oppCpLoss >= 50 && !candidates._debugLogged) {
+        console.log(`  DEBUG prefilter: i=${i} ply=${ply} cpBefore=${cpBeforeOppMove} cpAfter=${cpAfterOppMove} loss=${oppCpLoss} mate=${mateAppeared} pass=${oppCpLoss >= TACTIC_MIN_OPP_CP_LOSS || mateAppeared}`);
+        candidates._debugLogged = true;
+      }
       if (oppCpLoss < TACTIC_MIN_OPP_CP_LOSS && !mateAppeared) continue;
     }
 
@@ -793,7 +798,20 @@ async function scanGameForTactics(sf, game, tacticDepth) {
     });
   }
 
-  if (candidates.length === 0) return [];
+  if (candidates.length === 0) {
+    // DEBUG: log why no candidates were found
+    const ourMoveCount = (() => {
+      let c = 0;
+      for (let i = 0; i < moves.length; i++) {
+        const ply = i + 1;
+        const isOurs = (playerColor === 'white' && ply % 2 === 1) || (playerColor === 'black' && ply % 2 === 0);
+        if (isOurs && ply >= TACTIC_MIN_PLY) c++;
+      }
+      return c;
+    })();
+    console.log(`  DEBUG: 0 candidates | ${moves.length} moves, ${analysis.length} analysis, ${fens.length} fens, ${ourMoveCount} eligible user moves, color=${playerColor}`);
+    return [];
+  }
 
   // Run MultiPV on all candidates
   const tactics = [];
