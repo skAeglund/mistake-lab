@@ -965,7 +965,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add tactic line navigation: browse played moves with arrows</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix arrow keys: engine line takes priority over tactic line</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -4517,7 +4517,11 @@ function lineStep(delta) {
   if (newIdx < -1 || newIdx >= engineLine.moves.length) return;
   // Navigating left past the bad move → exit and let user retry
   if (newIdx === -1 && engineLine.wrongMove) {
-    tryAgainFromLine();
+    if (tacticMode) {
+      tacticTryAgain();
+    } else {
+      tryAgainFromLine();
+    }
     return;
   }
   goToLineMove(newIdx);
@@ -5309,14 +5313,15 @@ document.addEventListener('keydown', (e) => {
     if (!document.getElementById('mobileFeedbackOverlay').classList.contains('hidden')) { closeMobileFeedback(); return; }
     if (document.body.classList.contains('drawer-open')) { closeDrawer(); return; }
     if (contLineBrowsing) { contLineGoToEnd(); return; }
+    if (browsingLine && engineLine) { exitEngineLine(); return; }
     if (browsingLine && tacticLine) { goToTacticLineMove(tacticLine.moves.length - 1); return; }
     if (browsingLine) { exitEngineLine(); return; }
     closeSettings();
   }
   if (e.target.tagName === 'INPUT') return;
   // Arrow keys: tactic line > cont line > engine line
-  if (e.key === 'ArrowLeft') { if (tacticLine) tacticLineStep(-1); else if (contLine) contLineStep(-1); else if (engineLine) lineStep(-1); return; }
-  if (e.key === 'ArrowRight') { if (tacticLine) tacticLineStep(1); else if (contLine) contLineStep(1); else if (engineLine) lineStep(1); return; }
+  if (e.key === 'ArrowLeft') { if (engineLine) lineStep(-1); else if (tacticLine) tacticLineStep(-1); else if (contLine) contLineStep(-1); return; }
+  if (e.key === 'ArrowRight') { if (engineLine) lineStep(1); else if (tacticLine) tacticLineStep(1); else if (contLine) contLineStep(1); return; }
   if (e.key === 's' || e.key === 'S') skipPosition();
   if (e.key === 'r' || e.key === 'R') { if (!document.getElementById('btnRetry').classList.contains('hidden')) retryPosition(); }
   if (e.key === 'h' || e.key === 'H') { if (!document.getElementById('btnHint').classList.contains('hidden')) showHint(); }
