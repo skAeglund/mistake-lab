@@ -942,7 +942,7 @@
 <!-- Login screen -->
 <div id="loginScreen" class="login-screen">
   <h2>MistakeLab</h2>
-  <p>Fetch your analyzed Lichess games, find mistakes and blunders, and practice finding better moves with local Stockfish evaluation.</p>
+  <p id="loginDesc">Fetch your analyzed Lichess games, find mistakes and blunders, and practice finding better moves with local Stockfish evaluation.</p>
   <div class="login-form">
     <input type="text" id="usernameInput" placeholder="lichess username" autocomplete="off"
            onkeydown="if(event.key==='Enter')fetchGames()">
@@ -1353,7 +1353,6 @@ let gistToken = localStorage.getItem('mistakelab_gist_token') || '';
 let gistId = localStorage.getItem('mistakelab_gist_id') || '';
 let gistData = null; // { positions: { posId: { completed, ... } }, version: 1 }
 let syncDebounceTimer = null;
-let gameSyncDebounceTimer = null;
 let appShown = false; // guard to prevent double showMainApp()
 const GIST_FILENAME = 'mistakelab_progress.json';
 const GIST_GAMES_FILENAME = 'mistakelab_games.json';
@@ -1366,6 +1365,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   if (gistToken) document.getElementById('gistTokenInput').value = gistToken;
   if (gistId) document.getElementById('gistIdInput').value = gistId;
+  updateLoginUX();
 
   const savedUser = localStorage.getItem('mistakelab_username');
   if (savedUser) {
@@ -1613,52 +1613,7 @@ async function gistReadGames() {
   try { return JSON.parse(content); } catch { return null; }
 }
 
-async function gistWriteGames(cacheObj) {
-  if (!gistToken || !gistId) return;
-  const resp = await fetch(`https://api.github.com/gists/${gistId}`, {
-    method: 'PATCH',
-    headers: {
-      'Authorization': `token ${gistToken}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      description: `MistakeLab sync (browser) — ${cacheObj.games?.length || 0} games`,
-      files: { [GIST_GAMES_FILENAME]: { content: JSON.stringify(cacheObj) } }
-    })
-  });
-  if (!resp.ok) throw new Error(`Gist write games failed: ${resp.status}`);
-}
 
-function debounceSyncGamesToGist() {
-  if (!gistToken || !gistId) return;
-  clearTimeout(gameSyncDebounceTimer);
-  gameSyncDebounceTimer = setTimeout(() => syncGamesToGist(), 3000);
-}
-
-async function syncGamesToGist() {
-  if (!gistToken || !gistId || !currentUsername || allGames.length === 0) return;
-  try {
-    // Read-merge-write: fetch current Gist first to avoid clobbering other-platform games
-    let existingUsernames = [];
-    let mergedGames = allGames;
-    try {
-      const gistCache = await gistReadGames();
-      if (gistCache && Array.isArray(gistCache.games)) {
-        existingUsernames = cacheUsernames(gistCache);
-        mergedGames = mergeGames(gistCache.games, allGames);
-      }
-    } catch (e) {
-      // Abort write — writing without a successful read could clobber other-platform games
-      console.error('[GameCache] Gist read before write failed — aborting sync to prevent data loss:', e.message);
-      return;
-    }
-    const cacheObj = buildGameCacheObj(currentUsername, mergedGames, existingUsernames);
-    await gistWriteGames(cacheObj);
-    console.log('[GameCache] Synced', mergedGames.length, 'games to Gist');
-  } catch (e) {
-    console.error('[GameCache] Gist write failed:', e);
-  }
-}
 
 // ─── Settings UI ───
 function saveGistConfig() {
@@ -1672,6 +1627,7 @@ function saveGistConfig() {
     gistId = id;
     localStorage.setItem('mistakelab_gist_id', id);
     msg.style.color = 'var(--green)'; msg.textContent = '✓ Saved! Sync will start when you load games.';
+    updateLoginUX();
   } else {
     msg.style.color = 'var(--text-muted)'; msg.textContent = 'Creating gist…';
     gistCreate().then(newId => {
@@ -1680,6 +1636,7 @@ function saveGistConfig() {
       document.getElementById('gistIdInput').value = newId;
       msg.style.color = 'var(--green)';
       msg.textContent = `✓ Created gist ${newId.substring(0,8)}…`;
+      updateLoginUX();
     }).catch(e => {
       msg.style.color = 'var(--red)'; msg.textContent = 'Failed: ' + e.message;
     });
@@ -2589,13 +2546,28 @@ async function maiaPredict(fen) {
   }
 }
 
+// ─── Login UX ───
+function updateLoginUX() {
+  const desc = document.getElementById('loginDesc');
+  const btn = document.getElementById('btnFetch');
+  const input = document.getElementById('usernameInput');
+  if (!desc || !btn) return;
+  if (isGistConfigured()) {
+    desc.textContent = 'Load your analyzed games from cloud storage. Run the batch analyzer to add new games.';
+    btn.textContent = 'Refresh from cloud';
+    input.placeholder = 'username';
+  } else {
+    desc.textContent = 'Fetch your analyzed Lichess games, find mistakes and blunders, and practice finding better moves with local Stockfish evaluation.';
+    btn.textContent = 'Load games';
+    input.placeholder = 'lichess username';
+  }
+}
+
 // ─── Login / Logout ───
 function logout() {
-  // Flush any pending sync
+  // Flush any pending progress sync
   clearTimeout(syncDebounceTimer);
-  clearTimeout(gameSyncDebounceTimer);
   if (gistData && isGistConfigured()) syncToGist();
-  if (allGames.length > 0 && isGistConfigured()) syncGamesToGist();
 
   appShown = false;
   currentUsername = '';
@@ -2609,9 +2581,10 @@ function logout() {
   document.getElementById('btnLogout').classList.add('hidden');
   document.body.classList.remove('mobile-training', 'mobile-browsing', 'drawer-open');
   if (boardObj) { boardObj.clear(); boardObj = null; }
+  updateLoginUX();
 }
 
-// ─── Fetch games from Lichess ───
+// ─── Load games (Gist-authoritative or Lichess standalone) ───
 async function fetchGames(autoUsername) {
   const input = document.getElementById('usernameInput');
   const username = autoUsername || input.value.trim();
@@ -2624,125 +2597,121 @@ async function fetchGames(autoUsername) {
   btn.disabled = true; btn.textContent = 'Loading…'; err.textContent = '';
 
   try {
-    // ── Phase 1: Load from cache for instant startup ──
-    let cache = loadGamesCache(username);
-    let cachedGames = cache ? cache.games.filter(g => g.analysis && g.analysis.length > 0) : [];
-
-    // Try Gist L2 cache — always merge if configured (picks up analyzer's locally-analyzed games)
     if (isGistConfigured()) {
+      // ══ Gist-authoritative path ══
+      // Game data flows: Analyzer → Gist → Browser → localStorage (offline cache)
+      // Browser never fetches from Lichess, never writes games back to Gist.
+      let games = [];
+      let gistOk = false;
+
       try {
         const gistCache = await gistReadGames();
         if (gistCache && Array.isArray(gistCache.games)) {
-          const gistGames = gistCache.games.filter(g => g.analysis && g.analysis.length > 0);
-          if (cachedGames.length === 0) {
-            // No local cache — use Gist as primary source
-            cachedGames = gistGames;
-            cache = gistCache;
-          } else {
-            // Merge: add Gist-only games and preserve analyzer data on existing games
-            const localById = new Map(cachedGames.map(g => [g.id, g]));
-            let added = 0;
-            for (const g of gistGames) {
-              const local = localById.get(g.id);
-              if (!local) {
-                cachedGames.push(g);
-                added++;
-              } else {
-                // Preserve analyzer-only fields from Gist onto local copy
-                if (g.tactics && !local.tactics) local.tactics = g.tactics;
-                if (g._tacticsScanned && !local._tacticsScanned) local._tacticsScanned = g._tacticsScanned;
-                if (g._playerColor && !local._playerColor) local._playerColor = g._playerColor;
-                if (g._source && !local._source) local._source = g._source;
-              }
-            }
-            if (added > 0) {
-              cachedGames.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-              console.log(`[GameCache] Merged ${added} new game(s) from Gist`);
-            }
-          }
-          // Update localStorage L1 with merged data
-          saveGamesCache(username, buildGameCacheObj(username, cachedGames));
+          games = gistCache.games.filter(g => g.analysis && g.analysis.length > 0);
+          gistOk = true;
         }
       } catch (e) {
-        console.warn('[GameCache] Gist read failed (non-fatal):', e.message);
+        console.warn('[GameCache] Gist read failed, falling back to localStorage:', e.message);
+        setSyncStatus('error', 'Cloud read failed');
       }
-    }
 
-    if (cachedGames.length > 0) {
-      // Render immediately from cache
-      allGames = cachedGames;
+      // Fall back to localStorage only if Gist read failed (not if Gist is just empty)
+      if (!gistOk) {
+        const cache = loadGamesCache(username);
+        if (cache && Array.isArray(cache.games)) {
+          const localGames = cache.games.filter(g => g.analysis && g.analysis.length > 0);
+          if (localGames.length > 0) {
+            games = localGames;
+            console.log('[GameCache] Using localStorage fallback');
+          }
+        }
+      }
+
+      if (games.length === 0) {
+        throw new Error('No analyzed games found in cloud storage.\nRun the batch analyzer to add games:\n  node analyzer/analyze.js --username ' + username);
+      }
+
+      // Save Gist data to localStorage as offline cache
+      allGames = games;
       localStorage.setItem('mistakelab_username', username);
+      saveGamesCache(username, buildGameCacheObj(username, allGames));
+
       extractAllMistakes();
       applyFilters();
-      if (isGistConfigured()) await loadFromGist();
+      await loadFromGist(); // Load SRS progress
       showMainApp();
-      btn.disabled = false; btn.textContent = 'Load games';
-    }
+    } else {
+      // ══ Standalone path (no Gist) — fetch from Lichess ══
+      let cache = loadGamesCache(username);
+      let cachedGames = cache ? cache.games.filter(g => g.analysis && g.analysis.length > 0) : [];
 
-    // ── Phase 2: Incremental fetch from Lichess ──
-    const sinceTs = cache?.lastGameCreatedAt || 0;
-    const sinceParam = sinceTs > 0 ? `&since=${sinceTs + 1}` : '';
-    const maxGames = sinceTs > 0 ? 100 : 100; // always fetch up to 100
-
-    if (cachedGames.length > 0) {
-      btn.textContent = 'Checking for new games…';
-    }
-
-    const url = `https://lichess.org/api/games/user/${encodeURIComponent(username)}?max=${maxGames}&analysed=true&evals=true&moves=true&pgnInJson=true&opening=true${sinceParam}`;
-    const resp = await fetch(url, {
-      headers: { 'Accept': 'application/x-ndjson' }
-    });
-    if (!resp.ok) {
-      if (resp.status === 404) throw new Error('User not found');
-      throw new Error(`Lichess API error: ${resp.status}`);
-    }
-    const text = await resp.text();
-    const lines = text.trim().split('\n').filter(l => l.trim());
-    const fetchedGames = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
-    const fetchedAnalyzed = fetchedGames.filter(g => g.analysis && g.analysis.length > 0);
-
-    // Merge fetched with cached
-    const merged = mergeGames(cachedGames, fetchedAnalyzed);
-
-    if (merged.length === 0) {
-      if (cachedGames.length === 0) {
-        throw new Error('No analyzed games found. Make sure you have computer-analyzed games on Lichess.');
+      if (cachedGames.length > 0) {
+        // Render immediately from cache
+        allGames = cachedGames;
+        localStorage.setItem('mistakelab_username', username);
+        extractAllMistakes();
+        applyFilters();
+        showMainApp();
+        btn.disabled = false; btn.textContent = 'Checking for new games…';
       }
-      // Cache had games, Lichess returned nothing new — keep what we have
-    } else {
-      allGames = merged;
-    }
 
-    // Save merged cache
-    localStorage.setItem('mistakelab_username', username);
-    const newCache = buildGameCacheObj(username, allGames);
-    saveGamesCache(username, newCache);
-    if (isGistConfigured()) debounceSyncGamesToGist();
+      // Incremental fetch from Lichess
+      const sinceTs = cache?.lastGameCreatedAt || 0;
+      const sinceParam = sinceTs > 0 ? `&since=${sinceTs + 1}` : '';
 
-    // Re-extract mistakes and re-render
-    extractAllMistakes();
-    applyFilters();
+      const url = `https://lichess.org/api/games/user/${encodeURIComponent(username)}?max=100&analysed=true&evals=true&moves=true&pgnInJson=true&opening=true${sinceParam}`;
+      const resp = await fetch(url, {
+        headers: { 'Accept': 'application/x-ndjson' }
+      });
+      if (!resp.ok) {
+        if (resp.status === 404) throw new Error('User not found');
+        throw new Error(`Lichess API error: ${resp.status}`);
+      }
+      const text = await resp.text();
+      const lines = text.trim().split('\n').filter(l => l.trim());
+      const fetchedGames = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+      const fetchedAnalyzed = fetchedGames.filter(g => g.analysis && g.analysis.length > 0);
 
-    if (!appShown) {
-      if (isGistConfigured()) await loadFromGist();
-      showMainApp();
-    } else {
-      updateSessionProgress();
-    }
+      // Merge fetched with cached
+      const merged = mergeGames(cachedGames, fetchedAnalyzed);
 
-    const newCount = fetchedAnalyzed.length;
-    if (cachedGames.length > 0 && newCount > 0) {
-      console.log(`[GameCache] Fetched ${newCount} new game(s), total: ${allGames.length}`);
+      if (merged.length === 0) {
+        if (cachedGames.length === 0) {
+          throw new Error('No analyzed games found. Make sure you have computer-analyzed games on Lichess.');
+        }
+      } else {
+        allGames = merged;
+      }
+
+      // Save merged cache
+      localStorage.setItem('mistakelab_username', username);
+      saveGamesCache(username, buildGameCacheObj(username, allGames));
+
+      // Re-extract and re-render
+      extractAllMistakes();
+      applyFilters();
+
+      if (!appShown) {
+        showMainApp();
+      } else {
+        updateSessionProgress();
+      }
+
+      const newCount = fetchedAnalyzed.length;
+      if (cachedGames.length > 0 && newCount > 0) {
+        console.log(`[GameCache] Fetched ${newCount} new game(s), total: ${allGames.length}`);
+      }
     }
   } catch (e) {
-    // If we already showed the app from cache, just log the error
     if (appShown) {
-      console.warn('[GameCache] Incremental fetch failed (non-fatal):', e.message);
+      console.warn('[GameCache] Load failed (non-fatal):', e.message);
     } else {
       err.textContent = e.message;
+      err.style.whiteSpace = 'pre-line';
     }
   } finally {
-    btn.disabled = false; btn.textContent = 'Load games';
+    btn.disabled = false;
+    btn.textContent = isGistConfigured() ? 'Refresh from cloud' : 'Load games';
   }
 }
 
@@ -5259,10 +5228,6 @@ window.addEventListener('beforeunload', () => {
     clearTimeout(syncDebounceTimer);
     // Best-effort sync (may be cancelled by browser)
     syncToGist();
-  }
-  if (gameSyncDebounceTimer && isGistConfigured()) {
-    clearTimeout(gameSyncDebounceTimer);
-    syncGamesToGist();
   }
 });
 </script>
