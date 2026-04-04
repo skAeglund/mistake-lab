@@ -965,7 +965,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Refactor: Gist-authoritative game loading</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add tactic line navigation: browse played moves with arrows</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1188,6 +1188,7 @@ let tacticStepIdx = 0;           // index into tacticMoves (includes opponent mo
 let tacticMoves = [];            // copy of m.tacticMoves for the current tactic
 let tacticWrongAttempts = 0;     // wrong attempts across the entire tactic
 let tacticHintUsed = false;      // hint used during this tactic
+let tacticLine = null;           // { baseFen, moves: [{san,uci,fen,isUser}], currentIdx }
 
 let gameListDisplayLimit = 50;
 let reviewListDisplayLimit = 50;
@@ -3452,6 +3453,7 @@ function loadPosition(globalIdx) {
   tacticMoves = [];
   tacticWrongAttempts = 0;
   tacticHintUsed = false;
+  tacticLine = null;
   hideMaiaControls();
   engineLine = null;
   browsingLine = false;
@@ -3499,6 +3501,7 @@ function loadPosition(globalIdx) {
       </div>
     `;
     // No pre-analysis needed — solution is pre-computed
+    tacticLine = { baseFen: m.fenBefore, moves: [], currentIdx: -1 };
     document.getElementById('feedbackContainer').innerHTML = '';
     document.getElementById('contLineContainer').innerHTML = '';
     renderQueue();
@@ -3644,8 +3647,13 @@ async function evaluateTacticMove(from, to, move) {
   const container = document.getElementById('feedbackContainer');
 
   if (isCorrect) {
-    // Correct move
+    // Correct move — add to tactic line
     highlightSquaresWithColor(from, to, '#3ecc6f');
+    if (tacticLine) {
+      tacticLine.moves.push({ san: move.san, uci: userUci, fen: gameEngine.fen(), isUser: true });
+      tacticLine.currentIdx = tacticLine.moves.length - 1;
+      renderTacticLine();
+    }
     const userMovesSoFar = tacticMoves.slice(0, tacticStepIdx + 1).filter(tm => tm.isUser).length;
     const totalUserMoves = tacticMoves.filter(tm => tm.isUser).length;
 
@@ -3753,6 +3761,13 @@ function tacticAutoPlayOpponent() {
   clearHighlights();
   highlightSquaresWithColor(oppMove.uci.substring(0, 2), oppMove.uci.substring(2, 4), 'var(--text-muted)');
 
+  // Add opponent move to tactic line
+  if (tacticLine) {
+    tacticLine.moves.push({ san: result.san, uci: oppMove.uci, fen: gameEngine.fen(), isUser: false });
+    tacticLine.currentIdx = tacticLine.moves.length - 1;
+    renderTacticLine();
+  }
+
   // Update solve FEN to the current position (so engine line works for subsequent wrong moves)
   currentSolveFen = gameEngine.fen();
 
@@ -3784,6 +3799,90 @@ function updateTacticProgress(current, total) {
   if (el) el.textContent = `Move ${current} of ${total}`;
 }
 
+function renderTacticLine() {
+  if (!tacticLine || tacticLine.moves.length === 0) return;
+  const container = document.getElementById('contLineContainer');
+
+  const existing = document.getElementById('tacticLineBox');
+  if (existing) existing.remove();
+
+  const div = document.createElement('div');
+  div.className = 'engine-line';
+  div.id = 'tacticLineBox';
+
+  // Determine starting move number from the base FEN
+  const fenParts = tacticLine.baseFen.split(' ');
+  let moveNum = parseInt(fenParts[5]) || 1;
+  let isWhiteTurn = fenParts[1] === 'w';
+
+  let movesHtml = '';
+  for (let i = 0; i < tacticLine.moves.length; i++) {
+    const mv = tacticLine.moves[i];
+    const activeClass = i === tacticLine.currentIdx ? ' active' : '';
+    const userClass = mv.isUser ? ' user-move' : '';
+
+    if (isWhiteTurn) {
+      movesHtml += `<span class="move-num">${moveNum}.</span>`;
+    } else if (i === 0) {
+      movesHtml += `<span class="move-num">${moveNum}…</span>`;
+    }
+
+    movesHtml += `<span class="move${activeClass}${userClass}" onclick="goToTacticLineMove(${i})">${escHtml(mv.san)}</span> `;
+
+    if (!isWhiteTurn) moveNum++;
+    isWhiteTurn = !isWhiteTurn;
+  }
+
+  div.innerHTML = `
+    <div class="engine-line-moves">${movesHtml}</div>
+    <div class="engine-line-nav">
+      <button class="btn btn-ghost btn-sm" onclick="tacticLineStep(-1)">‹</button>
+      <button class="btn btn-ghost btn-sm" onclick="tacticLineStep(1)">›</button>
+      <span class="hint">← → to step</span>
+    </div>
+  `;
+
+  container.insertBefore(div, container.firstChild);
+}
+
+function goToTacticLineMove(idx) {
+  if (!tacticLine) return;
+  if (idx < -1 || idx >= tacticLine.moves.length) return;
+  tacticLine.currentIdx = idx;
+
+  const atEnd = idx === tacticLine.moves.length - 1;
+  browsingLine = !atEnd;
+
+  if (idx === -1) {
+    boardObj.position(tacticLine.baseFen, false);
+  } else {
+    boardObj.position(tacticLine.moves[idx].fen, false);
+  }
+  clearHighlights();
+
+  // Highlight the move's squares
+  if (idx >= 0) {
+    const uci = tacticLine.moves[idx].uci;
+    const from = uci.substring(0, 2);
+    const to = uci.substring(2, 4);
+    const color = tacticLine.moves[idx].isUser ? '#3ecc6f' : 'var(--text-muted)';
+    highlightSquaresWithColor(from, to, color);
+  }
+
+  // Update active class in the move list
+  const moveEls = document.querySelectorAll('#tacticLineBox .move');
+  moveEls.forEach((el, i) => {
+    el.classList.toggle('active', i === idx);
+  });
+}
+
+function tacticLineStep(delta) {
+  if (!tacticLine) return;
+  const newIdx = tacticLine.currentIdx + delta;
+  if (newIdx < -1 || newIdx >= tacticLine.moves.length) return;
+  goToTacticLineMove(newIdx);
+}
+
 function tacticTryAgain() {
   if (!tacticMode || !gameEngine) return;
   if (engineLine) {
@@ -3795,9 +3894,10 @@ function tacticTryAgain() {
   }
   // Restore board to current tactic position
   boardObj.position(gameEngine.fen(), true);
-  // Clear feedback and engine line UI
+  browsingLine = false;
+  // Clear feedback and engine line UI (but preserve tactic line)
   document.getElementById('feedbackContainer').innerHTML = '';
-  document.getElementById('contLineContainer').innerHTML = '';
+  renderTacticLine(); // re-render to restore tactic line state
   clearHighlights();
   // Reset hint for this step (keep hint highlight if 3+ wrong)
   hintLevel = 0;
@@ -5209,13 +5309,14 @@ document.addEventListener('keydown', (e) => {
     if (!document.getElementById('mobileFeedbackOverlay').classList.contains('hidden')) { closeMobileFeedback(); return; }
     if (document.body.classList.contains('drawer-open')) { closeDrawer(); return; }
     if (contLineBrowsing) { contLineGoToEnd(); return; }
+    if (browsingLine && tacticLine) { goToTacticLineMove(tacticLine.moves.length - 1); return; }
     if (browsingLine) { exitEngineLine(); return; }
     closeSettings();
   }
   if (e.target.tagName === 'INPUT') return;
-  // Arrow keys: engine line stepping takes priority
-  if (e.key === 'ArrowLeft') { if (contLine) contLineStep(-1); else if (engineLine) lineStep(-1); return; }
-  if (e.key === 'ArrowRight') { if (contLine) contLineStep(1); else if (engineLine) lineStep(1); return; }
+  // Arrow keys: tactic line > cont line > engine line
+  if (e.key === 'ArrowLeft') { if (tacticLine) tacticLineStep(-1); else if (contLine) contLineStep(-1); else if (engineLine) lineStep(-1); return; }
+  if (e.key === 'ArrowRight') { if (tacticLine) tacticLineStep(1); else if (contLine) contLineStep(1); else if (engineLine) lineStep(1); return; }
   if (e.key === 's' || e.key === 'S') skipPosition();
   if (e.key === 'r' || e.key === 'R') { if (!document.getElementById('btnRetry').classList.contains('hidden')) retryPosition(); }
   if (e.key === 'h' || e.key === 'H') { if (!document.getElementById('btnHint').classList.contains('hidden')) showHint(); }
