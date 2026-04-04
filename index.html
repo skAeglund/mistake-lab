@@ -965,7 +965,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fast tactic invalidation: skip re-extraction on remove</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Tactic alternative lines UI</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1189,6 +1189,8 @@ let tacticMoves = [];            // copy of m.tacticMoves for the current tactic
 let tacticWrongAttempts = 0;     // wrong attempts across the entire tactic
 let tacticHintUsed = false;      // hint used during this tactic
 let tacticLine = null;           // { baseFen, moves: [{san,uci,fen,isUser}], currentIdx }
+let tacticAltLines = [];         // alternative opponent-response lines to solve after main line
+let tacticAltIdx = -1;           // -1 = main line, 0+ = which alternative we're solving
 
 let gameListDisplayLimit = 50;
 let reviewListDisplayLimit = 50;
@@ -2795,6 +2797,7 @@ function extractAllMistakes() {
           playerColor: tactic.playerColor || playerColor,
           moveNumber: Math.ceil(tactic.startPly / 2),
           tacticMoves: tactic.moves,
+          tacticAltLines: tactic.alternativeLines || [],
           wpSwing: tactic.wpSwing || 0,
           wpDrop: Math.abs(tactic.wpSwing || 0), // reuse for sorting
           found: tactic.found,
@@ -2822,6 +2825,7 @@ function extractAllMistakes() {
       { uci: 'f8g8', san: 'Rxg8', fen: '6rk/6pp/6PN/8/8/8/8/7K w - - 0 3', isUser: false },
       { uci: 'h6f7', san: 'Nf7#', fen: '6rk/5Npp/6P1/8/8/8/8/7K b - - 1 3', isUser: true },
     ],
+    tacticAltLines: [],
     wpSwing: 45.0,
     wpDrop: 45.0,
     found: false,
@@ -3454,6 +3458,8 @@ function loadPosition(globalIdx) {
   tacticWrongAttempts = 0;
   tacticHintUsed = false;
   tacticLine = null;
+  tacticAltLines = [];
+  tacticAltIdx = -1;
   hideMaiaControls();
   engineLine = null;
   browsingLine = false;
@@ -3491,10 +3497,13 @@ function loadPosition(globalIdx) {
     tacticStepIdx = 0;
     tacticWrongAttempts = 0;
     tacticHintUsed = false;
+    tacticAltLines = m.tacticAltLines || [];
+    tacticAltIdx = -1;
     const userMoveCount = tacticMoves.filter(tm => tm.isUser).length;
+    const altCount = tacticAltLines.length;
     document.getElementById('posInfoContent').innerHTML = `
       <div style="font-size:13px;line-height:1.7">
-        <div>⚡ <strong>Tactic</strong> — ${userMoveCount} moves to find</div>
+        <div>⚡ <strong>Tactic</strong> — ${userMoveCount} moves to find${altCount > 0 ? ` <span style="font-size:11px;color:var(--text-muted)">(+${altCount} alt line${altCount>1?'s':''})</span>` : ''}</div>
         <div style="color:var(--green)">Win% swing: +${Math.abs(m.wpSwing)}%</div>
         <div id="tacticProgress" style="font-size:12px;margin-top:2px;color:var(--text-muted)">Move 1 of ${userMoveCount}</div>
         ${m.found === false ? '<div style="font-size:11px;margin-top:2px;color:var(--yellow)">You missed this in the game</div>' : ''}
@@ -3672,36 +3681,53 @@ async function evaluateTacticMove(from, to, move) {
     const isLastMove = nextUserIdx === -1;
 
     if (isLastMove) {
-      // ── Tactic complete ──
-      const pid = posId(m);
-      let grade, gradeLabel;
-      if (tacticWrongAttempts > 0) {
-        grade = FSRS_GRADE.again; gradeLabel = 'Again';
-      } else if (tacticHintUsed) {
-        grade = FSRS_GRADE.hard; gradeLabel = 'Hard (hint)';
+      // Check if there are unsolved alternative lines remaining
+      const nextAltIdx = tacticAltIdx + 1;
+      const hasMoreAlts = nextAltIdx < tacticAltLines.length;
+
+      if (hasMoreAlts) {
+        // ── Line complete, but alternatives remain ──
+        const lineLabel = tacticAltIdx === -1 ? 'Main line' : `Alt line ${tacticAltIdx + 1}`;
+        const remaining = tacticAltLines.length - nextAltIdx;
+        showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
+          `${lineLabel} solved!`,
+          `<code>${escHtml(move.san)}</code> — opponent has ${remaining > 1 ? remaining + ' other responses' : 'another response'}` +
+          `<div style="margin-top:8px"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="loadNextTacticAlt()">▶ Next line</button></div>`);
+        tacticMode = false; // pause until user clicks
       } else {
-        grade = FSRS_GRADE.easy; gradeLabel = 'Easy';
+        // ── Tactic fully complete (all lines solved) ──
+        const pid = posId(m);
+        let grade, gradeLabel;
+        if (tacticWrongAttempts > 0) {
+          grade = FSRS_GRADE.again; gradeLabel = 'Again';
+        } else if (tacticHintUsed) {
+          grade = FSRS_GRADE.hard; gradeLabel = 'Hard (hint)';
+        } else {
+          grade = FSRS_GRADE.easy; gradeLabel = 'Easy';
+        }
+
+        let srsInfo = '';
+        if (!srsRecorded) {
+          const srsCard = recordReview(pid, grade);
+          srsRecorded = true;
+          srsInfo = srsTag(gradeLabel, srsCard);
+        }
+
+        const linesLabel = tacticAltLines.length > 0
+          ? ` (${tacticAltLines.length + 1} lines)` : '';
+        const invalidateBtn = `<div style="margin-top:8px;"><button class="btn btn-ghost btn-sm" style="font-size:10px;color:var(--text-muted);border-color:var(--border);" onclick="handleInvalidateTactic()">✕ Bad tactic</button></div>`;
+
+        showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
+          '⚡ Tactic complete!',
+          `<code>${escHtml(move.san)}</code> — solved${linesLabel}` +
+          (tacticWrongAttempts > 0 ? ` (${tacticWrongAttempts} wrong attempt${tacticWrongAttempts>1?'s':''})` : '') +
+          srsInfo + invalidateBtn);
+        updateSessionProgress();
+        renderQueue();
+        tacticMode = false;
+        document.getElementById('btnRetry').classList.remove('hidden');
+        document.getElementById('btnHint').classList.add('hidden');
       }
-
-      let srsInfo = '';
-      if (!srsRecorded) {
-        const srsCard = recordReview(pid, grade);
-        srsRecorded = true;
-        srsInfo = srsTag(gradeLabel, srsCard);
-      }
-
-      const invalidateBtn = `<div style="margin-top:8px;"><button class="btn btn-ghost btn-sm" style="font-size:10px;color:var(--text-muted);border-color:var(--border);" onclick="handleInvalidateTactic()">✕ Bad tactic</button></div>`;
-
-      showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
-        '⚡ Tactic complete!',
-        `<code>${escHtml(move.san)}</code> — solved in ${totalUserMoves} moves` +
-        (tacticWrongAttempts > 0 ? ` (${tacticWrongAttempts} wrong attempt${tacticWrongAttempts>1?'s':''})` : '') +
-        srsInfo + invalidateBtn);
-      updateSessionProgress();
-      renderQueue();
-      tacticMode = false;
-      document.getElementById('btnRetry').classList.remove('hidden');
-      document.getElementById('btnHint').classList.add('hidden');
     } else {
       // ── More moves to go — show feedback then auto-play opponent ──
       showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
@@ -3802,6 +3828,78 @@ function tacticAutoPlayOpponent() {
       'Your turn',
       `Find move ${userMovesSoFar + 1} of ${totalUserMoves}`);
   }, 300);
+}
+
+function loadNextTacticAlt() {
+  const m = filteredMistakes[currentMistakeIdx];
+  if (!m || m.type !== 'tactic') return;
+
+  tacticAltIdx++;
+  const altLine = tacticAltLines[tacticAltIdx];
+  if (!altLine || altLine.length < 3) return; // need at least user move + opp response + user move
+
+  // Reset board to starting position
+  gameEngine = new Chess(m.fenBefore);
+  boardObj.position(m.fenBefore, false);
+  clearHighlights();
+  clearArrows();
+
+  // Set up tactic mode with the alternative line
+  tacticMode = true;
+  tacticMoves = altLine;
+  tacticStepIdx = 0;
+  currentAttempts = 0;
+  hintLevel = 0;
+  hintArrow = null;
+  clearHintHighlights();
+
+  // Reset tactic line for the move list display
+  tacticLine = { baseFen: m.fenBefore, moves: [], currentIdx: -1 };
+
+  const userMoveCount = altLine.filter(tm => tm.isUser).length;
+  const altLabel = `Alt line ${tacticAltIdx + 1}/${tacticAltLines.length}`;
+
+  // Update info panel
+  const infoCard = document.getElementById('posInfoCard');
+  infoCard.style.display = '';
+  document.getElementById('posInfoContent').innerHTML = `
+    <div style="font-size:13px;line-height:1.7">
+      <div>⚡ <strong>${altLabel}</strong> — ${userMoveCount} moves to find</div>
+      <div style="font-size:11px;color:var(--text-muted)">Opponent plays differently</div>
+      <div id="tacticProgress" style="font-size:12px;margin-top:2px;color:var(--text-muted)">Move 1 of ${userMoveCount}</div>
+    </div>
+  `;
+  document.getElementById('feedbackContainer').innerHTML = '';
+
+  // Show hint button
+  const hintBtn = document.getElementById('btnHint');
+  if (hintBtn) {
+    hintBtn.classList.remove('hidden');
+    hintBtn.disabled = false;
+    hintBtn.textContent = '💡 Hint';
+    hintBtn.style.borderColor = '';
+    hintBtn.style.color = '';
+  }
+
+  // Auto-play the common first user move
+  const firstUserMove = altLine[0];
+  if (firstUserMove && firstUserMove.isUser) {
+    const result = gameEngine.move(firstUserMove.uci, { sloppy: true });
+    if (result) {
+      boardObj.position(gameEngine.fen(), true);
+      highlightSquaresWithColor(firstUserMove.uci.substring(0, 2), firstUserMove.uci.substring(2, 4), '#3ecc6f');
+      tacticLine.moves.push({ san: result.san, uci: firstUserMove.uci, fen: gameEngine.fen(), isUser: true });
+      tacticLine.currentIdx = 0;
+      renderTacticLine();
+      tacticStepIdx = 1;
+
+      // After short delay, auto-play opponent's alternative response
+      setTimeout(() => {
+        if (!tacticMode || tacticStepIdx >= tacticMoves.length) return;
+        tacticAutoPlayOpponent();
+      }, 500);
+    }
+  }
 }
 
 function updateTacticProgress(current, total) {
