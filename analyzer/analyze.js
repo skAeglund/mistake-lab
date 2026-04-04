@@ -694,6 +694,7 @@ const TACTIC_MIN_OPP_CP_LOSS = 100;        // opponent must have lost ≥100cp t
 const TACTIC_MIN_PLY = 6;                  // skip very early opening moves
 const TACTIC_MIN_REMAINING = 2;            // need at least 2 plies remaining in game
 const TACTIC_OPP_CANDIDATES = 3;           // number of opponent responses to try when building chains
+const TACTIC_OPP_WP_CAP = 0.15;            // max win% gap (from opponent's view) an alternative response can be worse than best
 
 /**
  * Convert eval object to win probability (0-1 scale) from the given perspective.
@@ -932,9 +933,20 @@ async function walkChain(sf, startFen, startMoveIdx, initialMpv, initialUniq, pl
     const oppMpv = await sf.evaluateMultiPV(currentChess.fen(), tacticDepth, TACTIC_OPP_CANDIDATES);
     if (!oppMpv || oppMpv.length === 0) break;
 
+    // Compute win probability cap: opponent responses can't be more than TACTIC_OPP_WP_CAP
+    // worse (from the opponent's perspective) than the best response
+    const opponentColor = playerColor === 'white' ? 'black' : 'white';
+    const bestOppWp = evalToWinProb(oppMpv[0], opponentColor);
+
     let bestOppResult = null; // { oppMove, oppSan, oppFen, continuation }
 
     for (let oi = 0; oi < Math.min(oppMpv.length, TACTIC_OPP_CANDIDATES); oi++) {
+      // Skip opponent responses that are unrealistically bad (no human would play this)
+      if (oi > 0) {
+        const thisOppWp = evalToWinProb(oppMpv[oi], opponentColor);
+        if (bestOppWp - thisOppWp > TACTIC_OPP_WP_CAP) continue;
+      }
+
       const oppMoveUci = oppMpv[oi].move;
 
       // Test this opponent move in a scratch chess instance
@@ -1404,6 +1416,7 @@ async function main() {
     log(`Games to scan:   ${analyzed.length}`);
     log(`Tactic depth:    ${CONFIG.tacticDepth} (MultiPV up to ${TACTIC_OPP_CANDIDATES})`);
     log(`Uniqueness:      ${TACTIC_FIRST_MOVE_THRESHOLD * 100}% first move / ${TACTIC_CONTINUATION_THRESHOLD * 100}% continuation`);
+    log(`Opponent cap:    ${TACTIC_OPP_WP_CAP * 100}% max win% gap from best response`);
     log(`Pre-filter:      opponent must lose ≥${TACTIC_MIN_OPP_CP_LOSS}cp`);
     log(`Min user moves:  ${TACTIC_MIN_USER_MOVES}`);
     log('');
