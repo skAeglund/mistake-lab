@@ -1468,7 +1468,12 @@ async function main() {
               const label = t.found ? '✓ found' : '✗ missed';
               const moveNum = Math.ceil(t.startPly / 2);
               const solution = t.moves.filter(m => m.isUser).map(m => m.san).join(' → ');
-              log(`  ⚡ ${userMoves}-move tactic at move ${moveNum} (${label}, wp swing ${t.wpSwing > 0 ? '+' : ''}${t.wpSwing}%): ${solution}`);
+              const altCount = t.alternativeLines ? t.alternativeLines.length : 0;
+              const altInfo = altCount > 0 ? `, ${altCount} alt line${altCount > 1 ? 's' : ''}` : '';
+              const maiaInfo = t.maiaOpponentMoves
+                ? (t.alternativeLines?.some(l => l.some(m => m.source === 'maia')) ? ', maia=unique' : ', maia=matches')
+                : '';
+              log(`  ⚡ ${userMoves}-move tactic at move ${moveNum} (${label}, wp swing ${t.wpSwing > 0 ? '+' : ''}${t.wpSwing}%${altInfo}${maiaInfo}): ${solution}`);
             }
           }
           log(`  ${tactics.length} tactic(s) — ${duration}s`);
