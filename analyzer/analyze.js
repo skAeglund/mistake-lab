@@ -28,7 +28,7 @@
 //   --rated-only  Only analyze rated games (default: true)
 //   --time-controls Comma-separated: bullet,blitz,rapid,classical (default: all)
 //   --scan-tactics Scan existing analyzed games for tactical puzzles (no fetch)
-//   --tactic-depth MultiPV analysis depth for tactic detection (default: 14)
+//   --tactic-depth MultiPV analysis depth for tactic detection (default: 20)
 //   --rescan       Re-evaluate 'found' flags on existing tactics (no Stockfish needed)
 //
 // Examples:
@@ -83,7 +83,7 @@ const CONFIG = {
   timeControls:  args['time-controls'] ? args['time-controls'].split(',') : null,
   // Tactic scanning
   scanTactics:   args['scan-tactics'] === 'true' || args['scan-tactics'] === true,
-  tacticDepth:   parseInt(args['tactic-depth']) || 14,
+  tacticDepth:   parseInt(args['tactic-depth']) || 20,
   rescan:        args['rescan'] === 'true' || args['rescan'] === true,
 };
 
@@ -687,11 +687,13 @@ function countMistakes(game, username) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Thresholds for tactic detection
-const TACTIC_UNIQUENESS_THRESHOLD = 0.60; // win% gap between best and 2nd best (0-1 scale)
-const TACTIC_MIN_USER_MOVES = 2;          // minimum solver moves for a tactic
-const TACTIC_MAX_EVAL_ABS = 500;          // skip positions already heavily won/lost (cp)
-const TACTIC_MIN_PLY = 6;                 // skip very early opening moves
-const TACTIC_MIN_REMAINING = 2;           // need at least 2 plies remaining in game
+const TACTIC_FIRST_MOVE_THRESHOLD = 0.30;  // win% gap for the first move of a tactic (0-1 scale)
+const TACTIC_CONTINUATION_THRESHOLD = 0.20; // relaxed win% gap for subsequent moves in the chain
+const TACTIC_MIN_USER_MOVES = 2;           // minimum solver moves for a tactic
+const TACTIC_MIN_OPP_CP_LOSS = 100;        // opponent must have lost ≥100cp to create a tactic opportunity
+const TACTIC_MIN_PLY = 6;                  // skip very early opening moves
+const TACTIC_MIN_REMAINING = 2;            // need at least 2 plies remaining in game
+const TACTIC_OPP_CANDIDATES = 3;           // number of opponent responses to try when building chains
 
 /**
  * Convert eval object to win probability (0-1 scale) from the given perspective.
@@ -705,7 +707,7 @@ function evalToWinProb(evalObj, perspective) {
  * Check if a position has a unique best move by comparing MultiPV results.
  * Returns { unique: bool, gap: number, bestMove: uci, bestEval: obj, secondEval: obj }
  */
-function checkUniqueness(mpvResults, perspective) {
+function checkUniqueness(mpvResults, perspective, threshold) {
   if (!mpvResults || mpvResults.length < 1) {
     return { unique: false, gap: 0 };
   }
@@ -727,7 +729,7 @@ function checkUniqueness(mpvResults, perspective) {
   const gap = bestWp - secondWp;
 
   return {
-    unique: gap >= TACTIC_UNIQUENESS_THRESHOLD,
+    unique: gap >= threshold,
     gap: Math.round(gap * 1000) / 1000,
     forcedOnly: false,
     bestMove: mpvResults[0].move,
@@ -770,12 +772,18 @@ async function scanGameForTactics(sf, game, tacticDepth) {
     if (ply < TACTIC_MIN_PLY) continue;
     if (moves.length - i < TACTIC_MIN_REMAINING) continue;
 
-    // Check eval isn't already extreme (use eval BEFORE this move = after opponent's move)
-    // Allow mate evaluations through — finding a forced mate IS a tactic
-    const evalBefore = i > 0 ? analysis[i - 1] : null;
-    if (evalBefore && evalBefore.eval !== undefined) {
-      const cpFromPlayer = evalToCp(evalBefore, playerColor);
-      if (Math.abs(cpFromPlayer) > TACTIC_MAX_EVAL_ABS) continue;
+    // Pre-filter: the opponent's preceding move must have lost ≥100cp.
+    // This means a tactic opportunity was created. We compare the eval
+    // BEFORE the opponent's move (= after OUR previous move) to the eval
+    // AFTER the opponent's move (= before OUR current move).
+    // For the very first candidate (i <= 1), skip — no opponent move to evaluate.
+    if (i >= 2 && analysis[i - 2] && analysis[i - 1]) {
+      const cpBeforeOppMove = evalToCp(analysis[i - 2], playerColor);
+      const cpAfterOppMove = evalToCp(analysis[i - 1], playerColor);
+      const oppCpLoss = cpAfterOppMove - cpBeforeOppMove; // positive = opponent lost cp (good for us)
+      // Also allow positions where a mate appeared (opponent blundered into mate)
+      const mateAppeared = analysis[i - 1].mate !== undefined && analysis[i - 2].mate === undefined;
+      if (oppCpLoss < TACTIC_MIN_OPP_CP_LOSS && !mateAppeared) continue;
     }
 
     // fenBefore this move = fens[i] (the position after i moves have been played,
@@ -796,87 +804,32 @@ async function scanGameForTactics(sf, game, tacticDepth) {
   for (const cand of candidates) {
     if (alreadyCovered.has(cand.ply)) continue;
 
-    // MultiPV check at candidate position
+    // MultiPV check at candidate position (first move uses stricter threshold)
     const mpv = await sf.evaluateMultiPV(cand.fen, tacticDepth, 2);
-    const uniq = checkUniqueness(mpv, playerColor);
+    const uniq = checkUniqueness(mpv, playerColor, TACTIC_FIRST_MOVE_THRESHOLD);
 
     if (!uniq.unique) continue;
     // Skip if the only reason it's "unique" is there's literally one legal move
     // (a single forced move isn't the start of an interesting tactic)
     if (uniq.forcedOnly) continue;
 
-    // Chain walk: try to extend this into a multi-move tactic
-    const tacticMoves = [];
-    let currentFen = cand.fen;
-    const currentChess = new Chess(currentFen);
-    let moveIdx = cand.moveIdx;
+    // Chain walk: try to extend this into a multi-move tactic.
+    // For opponent responses, we try the top N moves and pick the one
+    // that produces the longest chain (best puzzle).
+    const bestChain = await buildBestTacticChain(
+      sf, cand, mpv, uniq, playerColor, tacticDepth
+    );
 
-    while (true) {
-      // --- User's move (must be unique) ---
-      const userMpv = moveIdx === cand.moveIdx
-        ? mpv // reuse the initial analysis
-        : await sf.evaluateMultiPV(currentFen, tacticDepth, 2);
-
-      const userUniq = moveIdx === cand.moveIdx
-        ? uniq
-        : checkUniqueness(userMpv, playerColor);
-
-      if (!userUniq.unique) break;
-
-      // Apply user's best move
-      const userMoveUci = userUniq.bestMove;
-      const userMove = currentChess.move(userMoveUci, { sloppy: true });
-      if (!userMove) break;
-
-      tacticMoves.push({
-        uci: userMoveUci,
-        san: userMove.san,
-        fen: currentChess.fen(),
-        isUser: true,
-      });
-
-      // Check for game-ending position
-      if (currentChess.in_checkmate() || currentChess.in_stalemate() ||
-          currentChess.in_draw()) {
-        break; // tactic ends with checkmate/draw — that's fine
-      }
-
-      // --- Opponent's response (best move) ---
-      const oppMpv = await sf.evaluateMultiPV(currentChess.fen(), tacticDepth, 2);
-      if (!oppMpv || oppMpv.length === 0) break;
-
-      const oppMoveUci = oppMpv[0].move;
-      const oppMove = currentChess.move(oppMoveUci, { sloppy: true });
-      if (!oppMove) break;
-
-      tacticMoves.push({
-        uci: oppMoveUci,
-        san: oppMove.san,
-        fen: currentChess.fen(),
-        isUser: false,
-      });
-
-      // Check for game-ending after opponent's move
-      if (currentChess.in_checkmate() || currentChess.in_stalemate() ||
-          currentChess.in_draw()) {
-        break;
-      }
-
-      currentFen = currentChess.fen();
-      moveIdx += 2; // advance to next user move position
-
-      // Safety: limit tactic length to 14 moves (7 user moves)
-      if (tacticMoves.length >= 14) break;
-    }
+    if (!bestChain || bestChain.length === 0) continue;
 
     // Count user moves in the chain
-    const userMoveCount = tacticMoves.filter(m => m.isUser).length;
+    const userMoveCount = bestChain.filter(m => m.isUser).length;
     if (userMoveCount < TACTIC_MIN_USER_MOVES) continue;
 
     // Calculate eval swing
     const evalBefore = cand.moveIdx > 0 ? analysis[cand.moveIdx - 1] : { eval: 0 };
     // Get eval of final position
-    const finalFen = tacticMoves[tacticMoves.length - 1].fen;
+    const finalFen = bestChain[bestChain.length - 1].fen;
     const finalEval = await sf.evaluate(finalFen, tacticDepth);
 
     const wpBefore = cpToWinPct(evalToCp(evalBefore, playerColor));
@@ -889,7 +842,7 @@ async function scanGameForTactics(sf, game, tacticDepth) {
     // to that point). Only mark found=false if a USER move differs.
     let found = true;
     let gameIdx = cand.moveIdx;
-    for (const tm of tacticMoves) {
+    for (const tm of bestChain) {
       if (gameIdx >= moves.length) { found = false; break; }
       const gameMoveResult = moveResults[gameIdx];
       if (!gameMoveResult) { found = false; break; }
@@ -906,7 +859,7 @@ async function scanGameForTactics(sf, game, tacticDepth) {
       startPly: cand.ply,
       fenBefore: cand.fen,
       playerColor: playerColor,
-      moves: tacticMoves,
+      moves: bestChain,
       evalBefore: evalBefore,
       evalAfter: finalEval,
       wpSwing: Math.round(wpSwing * 10) / 10,
@@ -914,12 +867,160 @@ async function scanGameForTactics(sf, game, tacticDepth) {
     });
 
     // Mark covered plies so we don't start overlapping tactics
-    for (let p = cand.ply; p < cand.ply + tacticMoves.length; p++) {
+    for (let p = cand.ply; p < cand.ply + bestChain.length; p++) {
       alreadyCovered.add(p);
     }
   }
 
   return tactics;
+}
+
+/**
+ * Build the best tactic chain from a candidate position by trying multiple
+ * opponent responses at each step and picking the one that yields the longest chain.
+ */
+async function buildBestTacticChain(sf, cand, initialMpv, initialUniq, playerColor, tacticDepth) {
+  return await walkChain(sf, cand.fen, cand.moveIdx, initialMpv, initialUniq, playerColor, tacticDepth, true);
+}
+
+/**
+ * Recursively walk a tactic chain. Returns an array of tactic moves.
+ * isFirstMove: true for the initial candidate position (uses stricter threshold).
+ */
+async function walkChain(sf, startFen, startMoveIdx, initialMpv, initialUniq, playerColor, tacticDepth, isFirstMove) {
+  const tacticMoves = [];
+  let currentFen = startFen;
+  const currentChess = new Chess(currentFen);
+  let moveIdx = startMoveIdx;
+  let isFirst = isFirstMove;
+  let reuseInitial = !!(initialMpv && initialUniq); // reuse initialMpv/initialUniq for the first iteration
+
+  while (true) {
+    // --- User's move (must be unique) ---
+    const threshold = isFirst ? TACTIC_FIRST_MOVE_THRESHOLD : TACTIC_CONTINUATION_THRESHOLD;
+    const userMpv = reuseInitial
+      ? initialMpv
+      : await sf.evaluateMultiPV(currentFen, tacticDepth, 2);
+    const userUniq = reuseInitial
+      ? initialUniq
+      : checkUniqueness(userMpv, playerColor, threshold);
+
+    reuseInitial = false;
+    isFirst = false;
+
+    if (!userUniq.unique) break;
+
+    // Apply user's best move
+    const userMoveUci = userUniq.bestMove;
+    const userMove = currentChess.move(userMoveUci, { sloppy: true });
+    if (!userMove) break;
+
+    tacticMoves.push({
+      uci: userMoveUci,
+      san: userMove.san,
+      fen: currentChess.fen(),
+      isUser: true,
+    });
+
+    // Check for game-ending position
+    if (currentChess.in_checkmate() || currentChess.in_stalemate() ||
+        currentChess.in_draw()) {
+      break; // tactic ends with checkmate/draw — that's fine
+    }
+
+    // --- Opponent's response: try top N moves, pick the one yielding the longest chain ---
+    const oppMpv = await sf.evaluateMultiPV(currentChess.fen(), tacticDepth, TACTIC_OPP_CANDIDATES);
+    if (!oppMpv || oppMpv.length === 0) break;
+
+    let bestOppResult = null; // { oppMove, oppSan, oppFen, continuation }
+
+    for (let oi = 0; oi < Math.min(oppMpv.length, TACTIC_OPP_CANDIDATES); oi++) {
+      const oppMoveUci = oppMpv[oi].move;
+
+      // Test this opponent move in a scratch chess instance
+      const scratchChess = new Chess(currentChess.fen());
+      const oppMove = scratchChess.move(oppMoveUci, { sloppy: true });
+      if (!oppMove) continue;
+
+      // Check if game ends after opponent's move
+      if (scratchChess.in_checkmate() || scratchChess.in_stalemate() ||
+          scratchChess.in_draw()) {
+        // Opponent's move ends the game — this is a valid (short) continuation
+        if (!bestOppResult || 0 > bestOppResult.continuation.length) {
+          bestOppResult = {
+            oppMoveUci, oppSan: oppMove.san, oppFen: scratchChess.fen(),
+            continuation: [], gameOver: true,
+          };
+        }
+        continue;
+      }
+
+      // Check if there's a unique user response after this opponent move
+      const nextUserMpv = await sf.evaluateMultiPV(scratchChess.fen(), tacticDepth, 2);
+      const nextUserUniq = checkUniqueness(nextUserMpv, playerColor, TACTIC_CONTINUATION_THRESHOLD);
+
+      if (!nextUserUniq.unique) {
+        // This opponent response kills the tactic — try next opponent move
+        // But if no better result found yet, record it as a dead end with 0 continuation
+        if (!bestOppResult) {
+          bestOppResult = {
+            oppMoveUci, oppSan: oppMove.san, oppFen: scratchChess.fen(),
+            continuation: [], gameOver: false, deadEnd: true,
+          };
+        }
+        continue;
+      }
+
+      // This opponent response leads to a unique continuation — extend the chain
+      // Recursively walk from here (no initial reuse, not first move)
+      const subChain = await walkChain(
+        sf, scratchChess.fen(), moveIdx + 2, null, null, playerColor, tacticDepth, false
+      );
+
+      if (!bestOppResult || subChain.length > bestOppResult.continuation.length) {
+        bestOppResult = {
+          oppMoveUci, oppSan: oppMove.san, oppFen: scratchChess.fen(),
+          continuation: subChain, gameOver: false,
+        };
+      }
+    }
+
+    // No valid opponent response found at all
+    if (!bestOppResult) break;
+
+    // If all opponent responses killed the tactic, stop here (user's move is the last)
+    if (bestOppResult.deadEnd && bestOppResult.continuation.length === 0) break;
+
+    // Apply the best opponent response
+    // (need to apply it on our actual currentChess instance)
+    const appliedOpp = currentChess.move(bestOppResult.oppMoveUci, { sloppy: true });
+    if (!appliedOpp) break;
+
+    tacticMoves.push({
+      uci: bestOppResult.oppMoveUci,
+      san: bestOppResult.oppSan,
+      fen: currentChess.fen(),
+      isUser: false,
+    });
+
+    if (bestOppResult.gameOver) break;
+
+    // Append the sub-chain continuation
+    if (bestOppResult.continuation.length > 0) {
+      tacticMoves.push(...bestOppResult.continuation);
+      break; // sub-chain already walked to completion
+    }
+
+    // If continuation is empty but not a dead end, the sub-chain found no further moves
+    break;
+  }
+
+  // Safety: limit tactic length to 14 moves (7 user moves)
+  if (tacticMoves.length > 14) {
+    return tacticMoves.slice(0, 14);
+  }
+
+  return tacticMoves;
 }
 
 /**
@@ -1301,8 +1402,9 @@ async function main() {
     log('  Tactic Scanner');
     log('═══════════════════════════════════════════════════');
     log(`Games to scan:   ${analyzed.length}`);
-    log(`Tactic depth:    ${CONFIG.tacticDepth} (MultiPV 2)`);
-    log(`Uniqueness:      ${TACTIC_UNIQUENESS_THRESHOLD * 100}% win chance gap`);
+    log(`Tactic depth:    ${CONFIG.tacticDepth} (MultiPV up to ${TACTIC_OPP_CANDIDATES})`);
+    log(`Uniqueness:      ${TACTIC_FIRST_MOVE_THRESHOLD * 100}% first move / ${TACTIC_CONTINUATION_THRESHOLD * 100}% continuation`);
+    log(`Pre-filter:      opponent must lose ≥${TACTIC_MIN_OPP_CP_LOSS}cp`);
     log(`Min user moves:  ${TACTIC_MIN_USER_MOVES}`);
     log('');
 
