@@ -29,6 +29,7 @@
 //   --time-controls Comma-separated: bullet,blitz,rapid,classical (default: all)
 //   --scan-tactics Scan existing analyzed games for tactical puzzles (no fetch)
 //   --tactic-depth MultiPV analysis depth for tactic detection (default: 14)
+//   --rescan       Re-scan all games (clears _tacticsScanned flags)
 //
 // Examples:
 //   node analyze.js --username DrNykterstein --stockfish ./stockfish
@@ -82,6 +83,7 @@ const CONFIG = {
   // Tactic scanning
   scanTactics:   args['scan-tactics'] === 'true' || args['scan-tactics'] === true,
   tacticDepth:   parseInt(args['tactic-depth']) || 14,
+  rescan:        args['rescan'] === 'true' || args['rescan'] === true,
 };
 
 if (CONFIG.scanTactics) {
@@ -877,7 +879,10 @@ async function scanGameForTactics(sf, game, tacticDepth) {
     const wpAfter = cpToWinPct(evalToCp(finalEval, playerColor));
     const wpSwing = wpAfter - wpBefore;
 
-    // Check if the user actually played this tactic in the game
+    // Check if the user actually played this tactic in the game.
+    // Compare each move in sequence — if the opponent deviates, the game
+    // diverged but the user still "found" the tactic (played correctly up
+    // to that point). Only mark found=false if a USER move differs.
     let found = true;
     let gameIdx = cand.moveIdx;
     for (const tm of tacticMoves) {
@@ -887,8 +892,8 @@ async function scanGameForTactics(sf, game, tacticDepth) {
       // Compare UCI: build UCI from the game's move result
       const gameUci = gameMoveResult.from + gameMoveResult.to + (gameMoveResult.promotion || '');
       if (gameUci !== tm.uci) {
-        found = tm.isUser ? false : found; // only care if user deviated
-        if (!found) break;
+        if (tm.isUser) { found = false; }
+        break; // game diverged from tactic line — stop comparing
       }
       gameIdx++;
     }
@@ -1214,6 +1219,10 @@ async function main() {
     });
 
     // Filter to scannable games
+    if (CONFIG.rescan) {
+      log('Rescan mode: clearing _tacticsScanned flags on all games');
+      for (const g of analyzed) { delete g._tacticsScanned; delete g.tactics; }
+    }
     const toScan = [];
     for (let i = 0; i < analyzed.length; i++) {
       const game = analyzed[i];
