@@ -781,11 +781,6 @@ async function scanGameForTactics(sf, game, tacticDepth) {
       const oppCpLoss = cpAfterOppMove - cpBeforeOppMove; // positive = opponent lost cp (good for us)
       // Also allow positions where a mate appeared (opponent blundered into mate)
       const mateAppeared = analysis[i - 1].mate !== undefined && analysis[i - 2].mate === undefined;
-      // DEBUG: log first big swing for diagnostics
-      if (oppCpLoss >= 50 && !candidates._debugLogged) {
-        console.log(`  DEBUG prefilter: i=${i} ply=${ply} cpBefore=${cpBeforeOppMove} cpAfter=${cpAfterOppMove} loss=${oppCpLoss} mate=${mateAppeared} pass=${oppCpLoss >= TACTIC_MIN_OPP_CP_LOSS || mateAppeared}`);
-        candidates._debugLogged = true;
-      }
       if (oppCpLoss < TACTIC_MIN_OPP_CP_LOSS && !mateAppeared) continue;
     }
 
@@ -798,20 +793,7 @@ async function scanGameForTactics(sf, game, tacticDepth) {
     });
   }
 
-  if (candidates.length === 0) {
-    // DEBUG: log why no candidates were found
-    const ourMoveCount = (() => {
-      let c = 0;
-      for (let i = 0; i < moves.length; i++) {
-        const ply = i + 1;
-        const isOurs = (playerColor === 'white' && ply % 2 === 1) || (playerColor === 'black' && ply % 2 === 0);
-        if (isOurs && ply >= TACTIC_MIN_PLY) c++;
-      }
-      return c;
-    })();
-    console.log(`  DEBUG: 0 candidates | ${moves.length} moves, ${analysis.length} analysis, ${fens.length} fens, ${ourMoveCount} eligible user moves, color=${playerColor}`);
-    return [];
-  }
+  if (candidates.length === 0) return [];
 
   // Run MultiPV on all candidates
   const tactics = [];
@@ -830,11 +812,13 @@ async function scanGameForTactics(sf, game, tacticDepth) {
     if (uniq.forcedOnly) continue;
 
     // Chain walk: try to extend this into a multi-move tactic.
-    // For opponent responses, we try the top N moves and pick the one
-    // that produces the longest chain (best puzzle).
-    const bestChain = await buildBestTacticChain(
+    // Prefers best defense at each step; collects alternative lines at first branch.
+    const chainResult = await buildBestTacticChain(
       sf, cand, mpv, uniq, playerColor, tacticDepth
     );
+
+    const bestChain = chainResult.moves;
+    const alternativeLines = chainResult.alternativeLines;
 
     if (!bestChain || bestChain.length === 0) continue;
 
@@ -876,6 +860,7 @@ async function scanGameForTactics(sf, game, tacticDepth) {
       fenBefore: cand.fen,
       playerColor: playerColor,
       moves: bestChain,
+      alternativeLines: alternativeLines.length > 0 ? alternativeLines : undefined,
       evalBefore: evalBefore,
       evalAfter: finalEval,
       wpSwing: Math.round(wpSwing * 10) / 10,
@@ -892,11 +877,69 @@ async function scanGameForTactics(sf, game, tacticDepth) {
 }
 
 /**
- * Build the best tactic chain from a candidate position by trying multiple
- * opponent responses at each step and picking the one that yields the longest chain.
+ * Build the primary tactic chain (preferring best defense) and collect
+ * alternative lines at the first branching point.
+ * Returns { moves: [...], alternativeLines: [...] }
  */
 async function buildBestTacticChain(sf, cand, initialMpv, initialUniq, playerColor, tacticDepth) {
-  return await walkChain(sf, cand.fen, cand.moveIdx, initialMpv, initialUniq, playerColor, tacticDepth, true);
+  // Get the primary chain (prefers best defense at each step)
+  const primaryMoves = await walkChain(sf, cand.fen, cand.moveIdx, initialMpv, initialUniq, playerColor, tacticDepth, true);
+
+  if (!primaryMoves || primaryMoves.length < 2) {
+    return { moves: primaryMoves || [], alternativeLines: [] };
+  }
+
+  // Collect alternative lines at the first branching point.
+  // primaryMoves[0] = user's first move, primaryMoves[1] = opponent's response.
+  // Check if other opponent responses also lead to valid tactic chains.
+  const alternativeLines = [];
+  const fenAfterUserMove = primaryMoves[0].fen;
+  const primaryOppUci = primaryMoves[1].uci;
+
+  const oppMpv = await sf.evaluateMultiPV(fenAfterUserMove, tacticDepth, TACTIC_OPP_CANDIDATES);
+  if (oppMpv && oppMpv.length > 1) {
+    const opponentColor = playerColor === 'white' ? 'black' : 'white';
+    const bestOppWp = evalToWinProb(oppMpv[0], opponentColor);
+
+    for (let oi = 0; oi < Math.min(oppMpv.length, TACTIC_OPP_CANDIDATES); oi++) {
+      const oppMoveUci = oppMpv[oi].move;
+      if (oppMoveUci === primaryOppUci) continue; // skip — already the primary line
+
+      // Win probability cap
+      const thisOppWp = evalToWinProb(oppMpv[oi], opponentColor);
+      if (bestOppWp - thisOppWp > TACTIC_OPP_WP_CAP) continue;
+
+      const scratch = new Chess(fenAfterUserMove);
+      const oppMove = scratch.move(oppMoveUci, { sloppy: true });
+      if (!oppMove) continue;
+
+      const oppMoveObj = { uci: oppMoveUci, san: oppMove.san, fen: scratch.fen(), isUser: false };
+
+      if (scratch.in_checkmate() || scratch.in_stalemate() || scratch.in_draw()) {
+        alternativeLines.push([primaryMoves[0], oppMoveObj]);
+        continue;
+      }
+
+      // Check if user has a unique response after this alternative opponent move
+      const nextMpv = await sf.evaluateMultiPV(scratch.fen(), tacticDepth, 2);
+      const nextUniq = checkUniqueness(nextMpv, playerColor, TACTIC_CONTINUATION_THRESHOLD);
+      if (!nextUniq.unique) continue;
+
+      // Walk the rest of the chain from here
+      const subChain = await walkChain(
+        sf, scratch.fen(), cand.moveIdx + 2, null, null, playerColor, tacticDepth, false
+      );
+      const altLine = [primaryMoves[0], oppMoveObj, ...subChain];
+
+      // Only include if it has enough user moves
+      const altUserMoves = altLine.filter(m => m.isUser).length;
+      if (altUserMoves >= TACTIC_MIN_USER_MOVES) {
+        alternativeLines.push(altLine);
+      }
+    }
+  }
+
+  return { moves: primaryMoves, alternativeLines };
 }
 
 /**
@@ -1004,12 +1047,12 @@ async function walkChain(sf, startFen, startMoveIdx, initialMpv, initialUniq, pl
         sf, scratchChess.fen(), moveIdx + 2, null, null, playerColor, tacticDepth, false
       );
 
-      if (!bestOppResult || subChain.length > bestOppResult.continuation.length) {
-        bestOppResult = {
-          oppMoveUci, oppSan: oppMove.san, oppFen: scratchChess.fen(),
-          continuation: subChain, gameOver: false,
-        };
-      }
+      // Prefer best defense: use first valid continuation (best opponent move first)
+      bestOppResult = {
+        oppMoveUci, oppSan: oppMove.san, oppFen: scratchChess.fen(),
+        continuation: subChain, gameOver: false,
+      };
+      break; // found valid chain against best available defense — use it
     }
 
     // No valid opponent response found at all
