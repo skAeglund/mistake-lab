@@ -692,6 +692,8 @@ const TACTIC_MIN_PLY = 6;                  // skip very early opening moves
 const TACTIC_MIN_REMAINING = 2;            // need at least 2 plies remaining in game
 const TACTIC_OPP_CANDIDATES = 3;           // number of opponent responses to try when building chains
 const TACTIC_OPP_WP_CAP = 0.15;            // max win% gap (from opponent's view) an alternative response can be worse than best
+const TACTIC_MAX_ALT_LINES = 3;            // max alternative lines to collect per tactic
+const TACTIC_MAX_ALT_DEPTH = 3;            // max opponent-response branch points to explore for alternatives
 
 /**
  * Convert eval object to win probability (0-1 scale) from the given perspective.
@@ -877,220 +879,125 @@ async function scanGameForTactics(sf, game, tacticDepth) {
 }
 
 /**
- * Build the primary tactic chain (preferring best defense) and collect
- * alternative lines at the first branching point.
- * Returns { moves: [...], alternativeLines: [...] }
+ * Build tactic chains via tree traversal. Collects all valid paths through
+ * the tactic, exploring alternative opponent responses at each branch point.
+ * Returns { moves: [...], alternativeLines: [[...], ...] }
  */
 async function buildBestTacticChain(sf, cand, initialMpv, initialUniq, playerColor, tacticDepth) {
-  // Get the primary chain (prefers best defense at each step)
-  const primaryMoves = await walkChain(sf, cand.fen, cand.moveIdx, initialMpv, initialUniq, playerColor, tacticDepth, true);
+  const ctx = {
+    paths: [],
+    maxAlts: TACTIC_MAX_ALT_LINES,
+    maxBranchDepth: TACTIC_MAX_ALT_DEPTH,
+  };
 
-  if (!primaryMoves || primaryMoves.length < 2) {
-    return { moves: primaryMoves || [], alternativeLines: [] };
-  }
+  await walkTacticTree(sf, cand.fen, playerColor, tacticDepth,
+    [], 0, true, initialMpv, initialUniq, ctx);
 
-  // Collect alternative lines at the first branching point.
-  // primaryMoves[0] = user's first move, primaryMoves[1] = opponent's response.
-  // Check if other opponent responses also lead to valid tactic chains.
-  const alternativeLines = [];
-  const fenAfterUserMove = primaryMoves[0].fen;
-  const primaryOppUci = primaryMoves[1].uci;
+  if (ctx.paths.length === 0) return { moves: [], alternativeLines: [] };
 
-  const oppMpv = await sf.evaluateMultiPV(fenAfterUserMove, tacticDepth, TACTIC_OPP_CANDIDATES);
-  if (oppMpv && oppMpv.length > 1) {
-    const opponentColor = playerColor === 'white' ? 'black' : 'white';
-    const bestOppWp = evalToWinProb(oppMpv[0], opponentColor);
+  // First path is the primary (best defense processed first, depth-first)
+  const primary = ctx.paths[0];
+  const alts = ctx.paths.slice(1).filter(alt => {
+    const userMoves = alt.filter(m => m.isUser).length;
+    return userMoves >= TACTIC_MIN_USER_MOVES;
+  }).slice(0, TACTIC_MAX_ALT_LINES);
 
-    for (let oi = 0; oi < Math.min(oppMpv.length, TACTIC_OPP_CANDIDATES); oi++) {
-      const oppMoveUci = oppMpv[oi].move;
-      if (oppMoveUci === primaryOppUci) continue; // skip — already the primary line
-
-      // Win probability cap
-      const thisOppWp = evalToWinProb(oppMpv[oi], opponentColor);
-      if (bestOppWp - thisOppWp > TACTIC_OPP_WP_CAP) continue;
-
-      const scratch = new Chess(fenAfterUserMove);
-      const oppMove = scratch.move(oppMoveUci, { sloppy: true });
-      if (!oppMove) continue;
-
-      const oppMoveObj = { uci: oppMoveUci, san: oppMove.san, fen: scratch.fen(), isUser: false };
-
-      if (scratch.in_checkmate() || scratch.in_stalemate() || scratch.in_draw()) {
-        alternativeLines.push([primaryMoves[0], oppMoveObj]);
-        continue;
-      }
-
-      // Check if user has a unique response after this alternative opponent move
-      const nextMpv = await sf.evaluateMultiPV(scratch.fen(), tacticDepth, 2);
-      const nextUniq = checkUniqueness(nextMpv, playerColor, TACTIC_CONTINUATION_THRESHOLD);
-      if (!nextUniq.unique) continue;
-
-      // Walk the rest of the chain from here
-      const subChain = await walkChain(
-        sf, scratch.fen(), cand.moveIdx + 2, null, null, playerColor, tacticDepth, false
-      );
-      const altLine = [primaryMoves[0], oppMoveObj, ...subChain];
-
-      // Only include if it has enough user moves
-      const altUserMoves = altLine.filter(m => m.isUser).length;
-      if (altUserMoves >= TACTIC_MIN_USER_MOVES) {
-        alternativeLines.push(altLine);
-      }
-    }
-  }
-
-  return { moves: primaryMoves, alternativeLines };
+  return { moves: primary, alternativeLines: alts };
 }
 
 /**
- * Recursively walk a tactic chain. Returns an array of tactic moves.
- * isFirstMove: true for the initial candidate position (uses stricter threshold).
+ * Recursively walk the tactic tree, collecting all valid complete paths.
+ * Processes best defense (oi=0) first, so ctx.paths[0] is the primary line.
+ *
+ * @param {string} fen - Current position
+ * @param {number} branchDepth - How many alternative branches deep we are (0 = main line)
+ * @param {boolean} isFirstMove - Whether this is the first user move (uses stricter threshold)
+ * @param {object} ctx - Shared context: { paths, maxAlts, maxBranchDepth }
  */
-async function walkChain(sf, startFen, startMoveIdx, initialMpv, initialUniq, playerColor, tacticDepth, isFirstMove) {
-  const tacticMoves = [];
-  let currentFen = startFen;
-  const currentChess = new Chess(currentFen);
-  let moveIdx = startMoveIdx;
-  let isFirst = isFirstMove;
-  let reuseInitial = !!(initialMpv && initialUniq); // reuse initialMpv/initialUniq for the first iteration
+async function walkTacticTree(sf, fen, playerColor, tacticDepth, prefix, branchDepth, isFirstMove, initMpv, initUniq, ctx) {
+  // Safety: limit tactic length
+  if (prefix.length >= 14) { ctx.paths.push(prefix); return; }
 
-  while (true) {
-    // --- User's move (must be unique) ---
-    const threshold = isFirst ? TACTIC_FIRST_MOVE_THRESHOLD : TACTIC_CONTINUATION_THRESHOLD;
-    const userMpv = reuseInitial
-      ? initialMpv
-      : await sf.evaluateMultiPV(currentFen, tacticDepth, 2);
-    const userUniq = reuseInitial
-      ? initialUniq
-      : checkUniqueness(userMpv, playerColor, threshold);
+  // --- User's move (must be unique) ---
+  const threshold = isFirstMove ? TACTIC_FIRST_MOVE_THRESHOLD : TACTIC_CONTINUATION_THRESHOLD;
+  const userMpv = initMpv || await sf.evaluateMultiPV(fen, tacticDepth, 2);
+  const userUniq = initUniq || checkUniqueness(userMpv, playerColor, threshold);
 
-    reuseInitial = false;
-    isFirst = false;
+  if (!userUniq.unique) return; // no valid user move — this branch is a dead end
 
-    if (!userUniq.unique) break;
+  const chess = new Chess(fen);
+  const userMove = chess.move(userUniq.bestMove, { sloppy: true });
+  if (!userMove) return;
 
-    // Apply user's best move
-    const userMoveUci = userUniq.bestMove;
-    const userMove = currentChess.move(userMoveUci, { sloppy: true });
-    if (!userMove) break;
+  const userPath = [...prefix, {
+    uci: userUniq.bestMove,
+    san: userMove.san,
+    fen: chess.fen(),
+    isUser: true,
+  }];
 
-    tacticMoves.push({
-      uci: userMoveUci,
-      san: userMove.san,
-      fen: currentChess.fen(),
-      isUser: true,
-    });
+  // Game over after user's move — complete path
+  if (chess.in_checkmate() || chess.in_stalemate() || chess.in_draw()) {
+    ctx.paths.push(userPath);
+    return;
+  }
 
-    // Check for game-ending position
-    if (currentChess.in_checkmate() || currentChess.in_stalemate() ||
-        currentChess.in_draw()) {
-      break; // tactic ends with checkmate/draw — that's fine
+  // --- Opponent responses ---
+  const oppMpv = await sf.evaluateMultiPV(chess.fen(), tacticDepth, TACTIC_OPP_CANDIDATES);
+  if (!oppMpv || oppMpv.length === 0) {
+    ctx.paths.push(userPath); // no opponent moves possible — end here
+    return;
+  }
+
+  const opponentColor = playerColor === 'white' ? 'black' : 'white';
+  const bestOppWp = evalToWinProb(oppMpv[0], opponentColor);
+  let anyValidBranch = false;
+
+  for (let oi = 0; oi < Math.min(oppMpv.length, TACTIC_OPP_CANDIDATES); oi++) {
+    // Win probability cap (skip for best defense oi=0)
+    if (oi > 0) {
+      const thisOppWp = evalToWinProb(oppMpv[oi], opponentColor);
+      if (bestOppWp - thisOppWp > TACTIC_OPP_WP_CAP) continue;
     }
 
-    // --- Opponent's response: try top N moves, pick the one yielding the longest chain ---
-    const oppMpv = await sf.evaluateMultiPV(currentChess.fen(), tacticDepth, TACTIC_OPP_CANDIDATES);
-    if (!oppMpv || oppMpv.length === 0) break;
+    // Branch depth limit for alternatives only
+    if (oi > 0 && branchDepth >= ctx.maxBranchDepth) continue;
 
-    // Compute win probability cap: opponent responses can't be more than TACTIC_OPP_WP_CAP
-    // worse (from the opponent's perspective) than the best response
-    const opponentColor = playerColor === 'white' ? 'black' : 'white';
-    const bestOppWp = evalToWinProb(oppMpv[0], opponentColor);
+    // Stop if we already have enough paths
+    if (ctx.paths.length > ctx.maxAlts + 1) break;
 
-    let bestOppResult = null; // { oppMove, oppSan, oppFen, continuation }
+    const oppMoveUci = oppMpv[oi].move;
+    const scratchChess = new Chess(chess.fen());
+    const oppMove = scratchChess.move(oppMoveUci, { sloppy: true });
+    if (!oppMove) continue;
 
-    for (let oi = 0; oi < Math.min(oppMpv.length, TACTIC_OPP_CANDIDATES); oi++) {
-      // Skip opponent responses that are unrealistically bad (no human would play this)
-      if (oi > 0) {
-        const thisOppWp = evalToWinProb(oppMpv[oi], opponentColor);
-        if (bestOppWp - thisOppWp > TACTIC_OPP_WP_CAP) continue;
-      }
-
-      const oppMoveUci = oppMpv[oi].move;
-
-      // Test this opponent move in a scratch chess instance
-      const scratchChess = new Chess(currentChess.fen());
-      const oppMove = scratchChess.move(oppMoveUci, { sloppy: true });
-      if (!oppMove) continue;
-
-      // Check if game ends after opponent's move
-      if (scratchChess.in_checkmate() || scratchChess.in_stalemate() ||
-          scratchChess.in_draw()) {
-        // Opponent's move ends the game — this is a valid (short) continuation
-        if (!bestOppResult || 0 > bestOppResult.continuation.length) {
-          bestOppResult = {
-            oppMoveUci, oppSan: oppMove.san, oppFen: scratchChess.fen(),
-            continuation: [], gameOver: true,
-          };
-        }
-        continue;
-      }
-
-      // Check if there's a unique user response after this opponent move
-      const nextUserMpv = await sf.evaluateMultiPV(scratchChess.fen(), tacticDepth, 2);
-      const nextUserUniq = checkUniqueness(nextUserMpv, playerColor, TACTIC_CONTINUATION_THRESHOLD);
-
-      if (!nextUserUniq.unique) {
-        // This opponent response kills the tactic — try next opponent move
-        // But if no better result found yet, record it as a dead end with 0 continuation
-        if (!bestOppResult) {
-          bestOppResult = {
-            oppMoveUci, oppSan: oppMove.san, oppFen: scratchChess.fen(),
-            continuation: [], gameOver: false, deadEnd: true,
-          };
-        }
-        continue;
-      }
-
-      // This opponent response leads to a unique continuation — extend the chain
-      // Recursively walk from here (no initial reuse, not first move)
-      const subChain = await walkChain(
-        sf, scratchChess.fen(), moveIdx + 2, null, null, playerColor, tacticDepth, false
-      );
-
-      // Prefer best defense: use first valid continuation (best opponent move first)
-      bestOppResult = {
-        oppMoveUci, oppSan: oppMove.san, oppFen: scratchChess.fen(),
-        continuation: subChain, gameOver: false,
-      };
-      break; // found valid chain against best available defense — use it
-    }
-
-    // No valid opponent response found at all
-    if (!bestOppResult) break;
-
-    // If all opponent responses killed the tactic, stop here (user's move is the last)
-    if (bestOppResult.deadEnd && bestOppResult.continuation.length === 0) break;
-
-    // Apply the best opponent response
-    // (need to apply it on our actual currentChess instance)
-    const appliedOpp = currentChess.move(bestOppResult.oppMoveUci, { sloppy: true });
-    if (!appliedOpp) break;
-
-    tacticMoves.push({
-      uci: bestOppResult.oppMoveUci,
-      san: bestOppResult.oppSan,
-      fen: currentChess.fen(),
+    const oppPath = [...userPath, {
+      uci: oppMoveUci,
+      san: oppMove.san,
+      fen: scratchChess.fen(),
       isUser: false,
-    });
+    }];
 
-    if (bestOppResult.gameOver) break;
-
-    // Append the sub-chain continuation
-    if (bestOppResult.continuation.length > 0) {
-      tacticMoves.push(...bestOppResult.continuation);
-      break; // sub-chain already walked to completion
+    // Game over after opponent's move
+    if (scratchChess.in_checkmate() || scratchChess.in_stalemate() || scratchChess.in_draw()) {
+      ctx.paths.push(oppPath);
+      anyValidBranch = true;
+      continue;
     }
 
-    // If continuation is empty but not a dead end, the sub-chain found no further moves
-    break;
+    // Recurse — only increment branchDepth for alternatives (oi > 0)
+    const prevCount = ctx.paths.length;
+    const nextBranchDepth = oi === 0 ? branchDepth : branchDepth + 1;
+    await walkTacticTree(sf, scratchChess.fen(), playerColor, tacticDepth,
+      oppPath, nextBranchDepth, false, null, null, ctx);
+
+    if (ctx.paths.length > prevCount) anyValidBranch = true;
   }
 
-  // Safety: limit tactic length to 14 moves (7 user moves)
-  if (tacticMoves.length > 14) {
-    return tacticMoves.slice(0, 14);
+  // If no opponent response led to a valid continuation, tactic ends at user's move
+  if (!anyValidBranch) {
+    ctx.paths.push(userPath);
   }
-
-  return tacticMoves;
 }
 
 
@@ -1373,6 +1280,7 @@ async function main() {
     log(`Tactic depth:    ${CONFIG.tacticDepth} (MultiPV up to ${TACTIC_OPP_CANDIDATES})`);
     log(`Uniqueness:      ${TACTIC_FIRST_MOVE_THRESHOLD * 100}% first move / ${TACTIC_CONTINUATION_THRESHOLD * 100}% continuation`);
     log(`Opponent cap:    ${TACTIC_OPP_WP_CAP * 100}% max win% gap from best response`);
+    log(`Alt lines:       max ${TACTIC_MAX_ALT_LINES} lines, branch depth ${TACTIC_MAX_ALT_DEPTH}`);
     log(`Pre-filter:      opponent must lose ≥${TACTIC_MIN_OPP_CP_LOSS}cp`);
     log(`Min user moves:  ${TACTIC_MIN_USER_MOVES}`);
     log('');
