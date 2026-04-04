@@ -965,7 +965,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Alt lines skip common prefix with solved lines</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cache extracted mistakes in localStorage</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1361,6 +1361,8 @@ let syncDebounceTimer = null;
 let appShown = false; // guard to prevent double showMainApp()
 const GIST_FILENAME = 'mistakelab_progress.json';
 const GIST_GAMES_FILENAME = 'mistakelab_games.json';
+const MISTAKES_CACHE_VERSION = 1;
+const MISTAKES_CACHE_PARAMS = { wpDropThreshold: 10 };
 
 // Populate login fields from saved config + auto-load
 document.addEventListener('DOMContentLoaded', () => {
@@ -1582,6 +1584,49 @@ function cacheUsernames(cache) {
 // Check if a username matches a cache object
 function cacheMatchesUser(cache, username) {
   return cacheUsernames(cache).some(u => u.toLowerCase() === username.toLowerCase());
+}
+
+// ─── Mistakes Cache (localStorage) ───
+function getMistakesCacheKey() { return `mistakelab_mistakes_${currentUsername.toLowerCase()}`; }
+
+function loadMistakesCache() {
+  try {
+    const raw = localStorage.getItem(getMistakesCacheKey());
+    if (!raw) return null;
+    const cache = JSON.parse(raw);
+    if (!cache || cache.version !== MISTAKES_CACHE_VERSION) return null;
+    if (JSON.stringify(cache.params) !== JSON.stringify(MISTAKES_CACHE_PARAMS)) return null;
+    return cache;
+  } catch { return null; }
+}
+
+function saveMistakesCache(rawMistakes, gameFingerprints) {
+  try {
+    const serialized = rawMistakes.map(m => {
+      const obj = { ...m };
+      delete obj.game; // strip circular game reference
+      return obj;
+    });
+    const cache = {
+      version: MISTAKES_CACHE_VERSION,
+      params: { ...MISTAKES_CACHE_PARAMS },
+      games: gameFingerprints,
+      mistakes: serialized,
+    };
+    localStorage.setItem(getMistakesCacheKey(), JSON.stringify(cache));
+  } catch (e) {
+    console.warn('[MistakesCache] Save failed:', e.message);
+  }
+}
+
+function buildGameFingerprint(game) {
+  return { tacticsLen: Array.isArray(game.tactics) ? game.tactics.length : 0 };
+}
+
+function buildGameFingerprints(games) {
+  const fp = {};
+  for (const g of games) fp[g.id] = buildGameFingerprint(g);
+  return fp;
 }
 
 function mergeGames(cached, fetched) {
@@ -2725,90 +2770,140 @@ function cpToWinPct(cp) {
   return 100 / (1 + Math.pow(10, -cp / 400));
 }
 
-function extractAllMistakes() {
-  allMistakes = [];
-  for (const game of allGames) {
-    const moves = game.moves ? game.moves.split(' ') : [];
-    const analysis = game.analysis || [];
-    let playerColor;
-    if (game._playerColor) {
-      playerColor = game._playerColor;
-    } else {
-      const isWhite = game.players?.white?.user?.name?.toLowerCase() === currentUsername.toLowerCase()
-                   || game.players?.white?.user?.id?.toLowerCase() === currentUsername.toLowerCase();
-      playerColor = isWhite ? 'white' : 'black';
-    }
+function extractMistakesForGame(game) {
+  const mistakes = [];
+  const moves = game.moves ? game.moves.split(' ') : [];
+  const analysis = game.analysis || [];
+  let playerColor;
+  if (game._playerColor) {
+    playerColor = game._playerColor;
+  } else {
+    const isWhite = game.players?.white?.user?.name?.toLowerCase() === currentUsername.toLowerCase()
+                 || game.players?.white?.user?.id?.toLowerCase() === currentUsername.toLowerCase();
+    playerColor = isWhite ? 'white' : 'black';
+  }
 
-    // Walk the moves, rebuild positions with chess.js
-    const chess = new Chess(game.initialFen || undefined);
-    for (let i = 0; i < moves.length && i < analysis.length; i++) {
-      const fenBefore = chess.fen();
-      const san = moves[i];
-      const moveResult = chess.move(san, { sloppy: true });
-      if (!moveResult) continue;
+  // Walk the moves, rebuild positions with chess.js
+  const chess = new Chess(game.initialFen || undefined);
+  for (let i = 0; i < moves.length && i < analysis.length; i++) {
+    const fenBefore = chess.fen();
+    const san = moves[i];
+    const moveResult = chess.move(san, { sloppy: true });
+    if (!moveResult) continue;
 
-      // Only look at our moves
-      const ply = i + 1; // 1-indexed
-      const isOurMove = (playerColor === 'white' && ply % 2 === 1) ||
-                        (playerColor === 'black' && ply % 2 === 0);
-      if (!isOurMove) continue;
+    const ply = i + 1;
+    const isOurMove = (playerColor === 'white' && ply % 2 === 1) ||
+                      (playerColor === 'black' && ply % 2 === 0);
+    if (!isOurMove) continue;
 
-      // We need eval BEFORE and AFTER this move
-      const evalBefore = i > 0 ? analysis[i - 1] : null;
-      const evalAfter = analysis[i];
-      if (!evalBefore || !evalAfter) continue;
+    const evalBefore = i > 0 ? analysis[i - 1] : null;
+    const evalAfter = analysis[i];
+    if (!evalBefore || !evalAfter) continue;
 
-      const cpBefore = evalToCp(evalBefore, playerColor);
-      const cpAfter = evalToCp(evalAfter, playerColor);
-      const cpLoss = cpBefore - cpAfter;
-      const wpBefore = cpToWinPct(cpBefore);
-      const wpAfter = cpToWinPct(cpAfter);
-      const wpDrop = wpBefore - wpAfter;
+    const cpBefore = evalToCp(evalBefore, playerColor);
+    const cpAfter = evalToCp(evalAfter, playerColor);
+    const cpLoss = cpBefore - cpAfter;
+    const wpBefore = cpToWinPct(cpBefore);
+    const wpAfter = cpToWinPct(cpAfter);
+    const wpDrop = wpBefore - wpAfter;
 
-      if (wpDrop > 10) { // >10% win probability drop
-        allMistakes.push({
-          type: 'mistake',
-          gameId: game.id,
-          game: game,
-          movePly: ply,
-          fenBefore: fenBefore,
-          sanPlayed: san,
-          cpLoss: Math.round(cpLoss),
-          cpBefore: Math.round(cpBefore),
-          cpAfter: Math.round(cpAfter),
-          wpDrop: Math.round(wpDrop * 10) / 10,
-          playerColor: playerColor,
-          moveNumber: Math.ceil(ply / 2),
-          bestEval: evalBefore,
-        });
-      }
-    }
-
-    // Extract tactics from analyzer output
-    if (Array.isArray(game.tactics)) {
-      for (const tactic of game.tactics) {
-        if (!tactic.moves || tactic.moves.length < 3) continue; // need at least 2 user moves
-        const userMoveCount = tactic.moves.filter(tm => tm.isUser).length;
-        if (userMoveCount < 2) continue;
-        allMistakes.push({
-          type: 'tactic',
-          gameId: game.id,
-          game: game,
-          movePly: tactic.startPly,
-          fenBefore: tactic.fenBefore,
-          playerColor: tactic.playerColor || playerColor,
-          moveNumber: Math.ceil(tactic.startPly / 2),
-          tacticMoves: tactic.moves,
-          tacticAltLines: tactic.alternativeLines || [],
-          wpSwing: tactic.wpSwing || 0,
-          wpDrop: Math.abs(tactic.wpSwing || 0), // reuse for sorting
-          found: tactic.found,
-          evalBefore: tactic.evalBefore,
-          evalAfter: tactic.evalAfter,
-        });
-      }
+    if (wpDrop > MISTAKES_CACHE_PARAMS.wpDropThreshold) {
+      mistakes.push({
+        type: 'mistake',
+        gameId: game.id,
+        movePly: ply,
+        fenBefore: fenBefore,
+        sanPlayed: san,
+        cpLoss: Math.round(cpLoss),
+        cpBefore: Math.round(cpBefore),
+        cpAfter: Math.round(cpAfter),
+        wpDrop: Math.round(wpDrop * 10) / 10,
+        playerColor: playerColor,
+        moveNumber: Math.ceil(ply / 2),
+        bestEval: evalBefore,
+      });
     }
   }
+
+  // Extract tactics from analyzer output
+  if (Array.isArray(game.tactics)) {
+    for (const tactic of game.tactics) {
+      if (!tactic.moves || tactic.moves.length < 3) continue;
+      const userMoveCount = tactic.moves.filter(tm => tm.isUser).length;
+      if (userMoveCount < 2) continue;
+      mistakes.push({
+        type: 'tactic',
+        gameId: game.id,
+        movePly: tactic.startPly,
+        fenBefore: tactic.fenBefore,
+        playerColor: tactic.playerColor || playerColor,
+        moveNumber: Math.ceil(tactic.startPly / 2),
+        tacticMoves: tactic.moves,
+        tacticAltLines: tactic.alternativeLines || [],
+        wpSwing: tactic.wpSwing || 0,
+        wpDrop: Math.abs(tactic.wpSwing || 0),
+        found: tactic.found,
+        evalBefore: tactic.evalBefore,
+        evalAfter: tactic.evalAfter,
+      });
+    }
+  }
+  return mistakes;
+}
+
+function extractAllMistakes() {
+  const currentFingerprints = buildGameFingerprints(allGames);
+  const currentGameIds = new Set(allGames.map(g => g.id));
+  const gamesById = new Map(allGames.map(g => [g.id, g]));
+
+  // Try loading cached mistakes
+  const cache = loadMistakesCache();
+  let rawMistakes = [];
+  let needsExtraction = new Set();
+  let cacheHit = false;
+
+  if (cache) {
+    // Find games needing extraction: new games or fingerprint changed
+    for (const game of allGames) {
+      const cachedFp = cache.games?.[game.id];
+      const currentFp = currentFingerprints[game.id];
+      if (!cachedFp || JSON.stringify(cachedFp) !== JSON.stringify(currentFp)) {
+        needsExtraction.add(game.id);
+      }
+    }
+
+    if (needsExtraction.size === 0) {
+      // Full cache hit — use cached mistakes (filter out games no longer present)
+      rawMistakes = cache.mistakes.filter(m => currentGameIds.has(m.gameId));
+      cacheHit = true;
+      console.log(`[MistakesCache] Full cache hit — ${rawMistakes.length} mistakes from ${currentGameIds.size} games`);
+    } else {
+      // Partial cache hit — keep cached mistakes for unchanged games, extract the rest
+      rawMistakes = cache.mistakes.filter(m => currentGameIds.has(m.gameId) && !needsExtraction.has(m.gameId));
+      console.log(`[MistakesCache] Partial hit — extracting ${needsExtraction.size} of ${currentGameIds.size} games`);
+    }
+  } else {
+    // No cache — extract all
+    for (const game of allGames) needsExtraction.add(game.id);
+    console.log(`[MistakesCache] No cache — extracting all ${allGames.length} games`);
+  }
+
+  // Extract mistakes from games that need it
+  for (const gameId of needsExtraction) {
+    const game = gamesById.get(gameId);
+    if (!game) continue;
+    const extracted = extractMistakesForGame(game);
+    rawMistakes.push(...extracted);
+  }
+
+  // Save cache (raw mistakes before tactic suppression/sorting)
+  if (!cacheHit || needsExtraction.size > 0) {
+    saveMistakesCache(rawMistakes, currentFingerprints);
+  }
+
+  // Restore game references
+  allMistakes = rawMistakes.map(m => ({ ...m, game: gamesById.get(m.gameId) }));
+
   // ── TEST TACTIC — remove after testing ──
   allMistakes.unshift({
     type: 'tactic',
