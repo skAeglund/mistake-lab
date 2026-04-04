@@ -29,7 +29,7 @@
 //   --time-controls Comma-separated: bullet,blitz,rapid,classical (default: all)
 //   --scan-tactics Scan existing analyzed games for tactical puzzles (no fetch)
 //   --tactic-depth MultiPV analysis depth for tactic detection (default: 20)
-//   --rescan       Re-evaluate 'found' flags on existing tactics (no Stockfish needed)
+//   --rescan-tactics Reset _tacticsScanned flags and re-scan all games
 //
 // Examples:
 //   node analyze.js --username DrNykterstein --stockfish ./stockfish
@@ -37,7 +37,7 @@
 //   node analyze.js --username magnus --platform chesscom --stockfish ./stockfish
 //   node analyze.js --username user1 --stockfish ./stockfish --gist-token ghp_xxx --gist-id abc123
 //   node analyze.js --scan-tactics --stockfish ./stockfish --gist-token ghp_xxx --gist-id abc123
-//   node analyze.js --rescan --gist-token ghp_xxx --gist-id abc123
+//   node analyze.js --scan-tactics --rescan-tactics --stockfish ./stockfish --gist-token ghp_xxx --gist-id abc123
 //
 // Download Stockfish: https://stockfishchess.org/download/
 // ═══════════════════════════════════════════════════════════════════════════
@@ -84,12 +84,10 @@ const CONFIG = {
   // Tactic scanning
   scanTactics:   args['scan-tactics'] === 'true' || args['scan-tactics'] === true,
   tacticDepth:   parseInt(args['tactic-depth']) || 20,
-  rescan:        args['rescan'] === 'true' || args['rescan'] === true,
+  rescanTactics:  args['rescan-tactics'] === 'true' || args['rescan-tactics'] === true,
 };
 
-if (CONFIG.rescan) {
-  // Rescan doesn't need Stockfish — just re-evaluates found flags
-} else if (CONFIG.scanTactics) {
+if (CONFIG.scanTactics) {
   if (!CONFIG.stockfishPath) {
     console.error('Usage: node analyze.js --scan-tactics --stockfish <path> [--gist-token X --gist-id Y]');
     process.exit(1);
@@ -97,7 +95,6 @@ if (CONFIG.rescan) {
 } else if (!CONFIG.username || !CONFIG.stockfishPath) {
   console.error('Usage: node analyze.js --username <n> --stockfish <path> [options]');
   console.error('       node analyze.js --scan-tactics --stockfish <path> [options]');
-  console.error('       node analyze.js --rescan [--gist-token X --gist-id Y]');
   console.error('Run with --help for all options.');
   process.exit(1);
 }
@@ -1035,40 +1032,6 @@ async function walkChain(sf, startFen, startMoveIdx, initialMpv, initialUniq, pl
   return tacticMoves;
 }
 
-/**
- * Re-evaluate the 'found' flag on an existing tactic without re-scanning.
- * Returns the corrected found value.
- */
-function rescanTacticFound(game, tactic) {
-  const moves = game.moves ? game.moves.split(' ').filter(Boolean) : [];
-  if (!tactic.moves || tactic.moves.length === 0) return false;
-
-  // Replay the game to get chess.js move results
-  const chess = new Chess(game.initialFen || undefined);
-  const moveResults = [];
-  for (let i = 0; i < moves.length; i++) {
-    const result = chess.move(moves[i], { sloppy: true });
-    if (!result) break;
-    moveResults.push(result);
-  }
-
-  // Compare tactic moves against actual game moves
-  const startIdx = tactic.startPly - 1; // convert 1-indexed ply to 0-indexed
-  let found = true;
-  let gameIdx = startIdx;
-  for (const tm of tactic.moves) {
-    if (gameIdx >= moveResults.length) { found = false; break; }
-    const gameMoveResult = moveResults[gameIdx];
-    if (!gameMoveResult) { found = false; break; }
-    const gameUci = gameMoveResult.from + gameMoveResult.to + (gameMoveResult.promotion || '');
-    if (gameUci !== tm.uci) {
-      if (tm.isUser) { found = false; }
-      break; // game diverged — stop comparing
-    }
-    gameIdx++;
-  }
-  return found;
-}
 
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1251,35 +1214,31 @@ async function main() {
   const hashPerWorker = Math.max(16, Math.floor(CONFIG.hash / numWorkers));
 
   log('═══════════════════════════════════════════════════');
-  log(`  MistakeLab ${CONFIG.rescan ? 'Tactic Rescan' : CONFIG.scanTactics ? 'Tactic Scanner' : 'Analyzer'}`);
+  log(`  MistakeLab ${CONFIG.scanTactics ? 'Tactic Scanner' : 'Analyzer'}`);
   log('═══════════════════════════════════════════════════');
-  if (!CONFIG.scanTactics && !CONFIG.rescan) {
+  if (!CONFIG.scanTactics) {
     log(`Username:    ${CONFIG.username}`);
     log(`Platform:    ${CONFIG.platform}`);
   }
-  if (!CONFIG.rescan) {
-    log(`Stockfish:   ${CONFIG.stockfishPath}`);
-    log(`Depth:       ${CONFIG.scanTactics ? CONFIG.tacticDepth + ' (tactic MultiPV)' : CONFIG.depth}`);
-    log(`Workers:     ${numWorkers} × ${threadsPerWorker} threads, ${hashPerWorker}MB hash each`);
-  }
-  if (!CONFIG.scanTactics && !CONFIG.rescan) log(`Max games:   ${CONFIG.maxGames}`);
+  log(`Stockfish:   ${CONFIG.stockfishPath}`);
+  log(`Depth:       ${CONFIG.scanTactics ? CONFIG.tacticDepth + ' (tactic MultiPV)' : CONFIG.depth}`);
+  log(`Workers:     ${numWorkers} × ${threadsPerWorker} threads, ${hashPerWorker}MB hash each`);
+  if (!CONFIG.scanTactics) log(`Max games:   ${CONFIG.maxGames}`);
   log(`Gist sync:   ${CONFIG.gistToken && CONFIG.gistId ? 'enabled' : 'disabled'}`);
   log(`Output file: ${CONFIG.outputFile}`);
   log('');
 
-  // ── Phase 1: Start Stockfish worker pool (skip for rescan) ──
+  // ── Phase 1: Start Stockfish worker pool ──
   const pool = [];
-  if (!CONFIG.rescan) {
-    for (let w = 0; w < numWorkers; w++) {
-      const sf = new StockfishEngine(CONFIG.stockfishPath);
-      await sf.start(threadsPerWorker, hashPerWorker);
-      pool.push(sf);
-    }
-    log(`${numWorkers} Stockfish worker(s) ready`);
+  for (let w = 0; w < numWorkers; w++) {
+    const sf = new StockfishEngine(CONFIG.stockfishPath);
+    await sf.start(threadsPerWorker, hashPerWorker);
+    pool.push(sf);
   }
+  log(`${numWorkers} Stockfish worker(s) ready`);
 
   // Load position eval cache
-  if (!CONFIG.rescan) loadPosCache();
+  loadPosCache();
 
   function quitAll() { for (const sf of pool) sf.quit(); }
 
@@ -1319,8 +1278,7 @@ async function main() {
   }
   log(`${existingIds.size} games already have analysis`);
 
-  // Seed position cache from existing analyzed games (skip for rescan)
-  if (!CONFIG.rescan) {
+  // Seed position cache from existing analyzed games
     const preSeedCount = Object.keys(posCache).length;
     let seededPositions = 0;
     for (const g of existingGames) {
@@ -1342,69 +1300,6 @@ async function main() {
     if (newEntries > 0) {
       log(`Seeded ${newEntries} new positions into eval cache from existing games (${seededPositions} total scanned)`);
     }
-  }
-
-  // ── Rescan mode: re-evaluate 'found' flags on existing tactics, no Stockfish needed ──
-  if (CONFIG.rescan) {
-    const gamesWithTactics = existingGames.filter(g => Array.isArray(g.tactics) && g.tactics.length > 0);
-    log('');
-    log('═══════════════════════════════════════════════════');
-    log('  Tactic Rescan (found flags only)');
-    log('═══════════════════════════════════════════════════');
-    log(`Games with tactics: ${gamesWithTactics.length}`);
-
-    let totalTactics = 0;
-    let changed = 0;
-    for (const game of gamesWithTactics) {
-      const gameUrl = game.id.startsWith('chesscom_')
-        ? `https://www.chess.com/game/live/${game.id.replace('chesscom_', '')}`
-        : `https://lichess.org/${game.id}`;
-      for (const t of game.tactics) {
-        totalTactics++;
-        const oldFound = t.found;
-        t.found = rescanTacticFound(game, t);
-        if (oldFound !== t.found) {
-          changed++;
-          const userMoves = t.moves.filter(m => m.isUser).map(m => m.san).join(' → ');
-          log(`  ${oldFound ? '✓→✗' : '✗→✓'} Move ${Math.ceil(t.startPly / 2)}: ${userMoves}`);
-          log(`    ${gameUrl}`);
-        }
-      }
-    }
-
-    log('');
-    log(`Rescanned ${totalTactics} tactics across ${gamesWithTactics.length} games`);
-    log(`Changed: ${changed} found flags`);
-
-    if (changed === 0) {
-      log('Nothing to update.');
-      quitAll();
-      return;
-    }
-
-    // Save locally always
-    saveLocalCache(CONFIG.outputFile, buildGameCacheObj(CONFIG.username, existingGames, gistUsernames));
-    log(`Saved to ${CONFIG.outputFile}`);
-
-    // Ask for confirmation before Gist write
-    if (CONFIG.gistToken && CONFIG.gistId) {
-      const rl = createInterface({ input: process.stdin, output: process.stdout });
-      const answer = await new Promise(resolve => {
-        rl.question(`\nPush ${changed} changes to Gist? (y/N) `, resolve);
-      });
-      rl.close();
-      if (answer.trim().toLowerCase() === 'y') {
-        const cacheObj = buildGameCacheObj(CONFIG.username, existingGames, gistUsernames);
-        await writeGistGames(CONFIG.gistToken, CONFIG.gistId, cacheObj,
-          `MistakeLab rescan — ${changed} found flags updated`);
-      } else {
-        log('Skipped Gist write.');
-      }
-    }
-
-    quitAll();
-    return;
-  }
 
   // ── Scan-tactics mode: scan existing games for tactics, then exit ──
   if (CONFIG.scanTactics) {
@@ -1439,6 +1334,15 @@ async function main() {
       quitAll();
       process.exit(0);
     });
+
+    // If --rescan-tactics, reset all _tacticsScanned flags so every game gets re-scanned
+    if (CONFIG.rescanTactics) {
+      let resetCount = 0;
+      for (const game of analyzed) {
+        if (game._tacticsScanned) { game._tacticsScanned = false; resetCount++; }
+      }
+      log(`Rescan mode: reset ${resetCount} _tacticsScanned flags`);
+    }
 
     // Filter to scannable games
     const toScan = [];
