@@ -965,7 +965,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix tactic engine line: clean up stale SF search + preventDefault</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fast tactic invalidation: skip re-extraction on remove</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3952,9 +3952,9 @@ function handleInvalidateTactic() {
     `;
     container.insertBefore(div, container.firstChild);
   } else {
-    // User found this tactic — just remove
+    // User found this tactic — fast remove (no re-extraction needed)
     invalidateTactic(pid);
-    extractAllMistakes();
+    allMistakes = allMistakes.filter(mm => posId(mm) !== pid);
     applyFilters();
     renderGameList();
     buildReviewQueue();
@@ -3965,14 +3965,21 @@ function handleInvalidateTactic() {
 
 function confirmInvalidateTactic(pid, convertToMistake) {
   invalidateTactic(pid);
-  extractAllMistakes();
-  applyFilters();
-  renderGameList();
-  buildReviewQueue();
-  updateSessionProgress();
   if (convertToMistake) {
+    // Need full re-extraction to un-suppress the underlying mistake
+    extractAllMistakes();
+    applyFilters();
+    renderGameList();
+    buildReviewQueue();
+    updateSessionProgress();
     showFeedback('info', 'Converted to mistake', 'The first move will now appear as a single-move review.');
   } else {
+    // Just remove — fast path
+    allMistakes = allMistakes.filter(mm => posId(mm) !== pid);
+    applyFilters();
+    renderGameList();
+    buildReviewQueue();
+    updateSessionProgress();
     showFeedback('info', 'Tactic removed', 'This tactic won\'t appear in reviews.');
   }
 }
