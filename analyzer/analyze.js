@@ -922,19 +922,25 @@ async function scanGameForTactics(sf, game, tacticDepth, maia) {
     }
 
     // Generate a Maia opponent line if available
+    let maiaOpponentMoves = undefined; // comma-joined UCI of Maia's opponent moves
     if (maia && bestChain.length >= 3) {
       const maiaLine = await generateMaiaLine(sf, maia, cand.fen, playerColor, tacticDepth);
       if (maiaLine && maiaLine.length >= 3) {
-        // Check it differs from existing lines (compare opponent moves)
-        const existingOppMoves = [bestChain, ...alternativeLines].map(
-          line => line.filter(m => !m.isUser).map(m => m.uci).join(',')
+        maiaOpponentMoves = maiaLine.filter(m => !m.isUser).map(m => m.uci).join(',');
+
+        // Check if Maia's line matches any existing line
+        const allLines = [bestChain, ...alternativeLines];
+        const matchIdx = allLines.findIndex(line =>
+          line.filter(m => !m.isUser).map(m => m.uci).join(',') === maiaOpponentMoves
         );
-        const maiaOppMoves = maiaLine.filter(m => !m.isUser).map(m => m.uci).join(',');
-        if (!existingOppMoves.includes(maiaOppMoves)) {
-          // Tag all moves in the Maia line with source
+
+        if (matchIdx === -1) {
+          // Unique Maia line — add as new alternative
           const taggedLine = maiaLine.map(m => m.isUser ? m : { ...m, source: 'maia' });
           alternativeLines.push(taggedLine);
         }
+        // If matchIdx >= 0, the existing line already represents the human-likely path.
+        // maiaOpponentMoves stored on the tactic lets the UI identify which line(s) Maia agrees with.
       }
     }
 
@@ -944,6 +950,7 @@ async function scanGameForTactics(sf, game, tacticDepth, maia) {
       playerColor: playerColor,
       moves: bestChain,
       alternativeLines: alternativeLines.length > 0 ? alternativeLines : undefined,
+      maiaOpponentMoves: maiaOpponentMoves,
       evalBefore: evalBefore,
       evalAfter: finalEval,
       wpSwing: Math.round(wpSwing * 10) / 10,
