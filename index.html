@@ -965,7 +965,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Dedup by FEN: suppress mistakes at any tactic solving position</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add tactic invalidation: remove or convert to mistake</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1402,6 +1402,17 @@ function markCompleted(pid) {
     lastSeen: new Date().toISOString(),
   };
   debounceSyncToGist();
+}
+
+// ─── Invalidated Tactics ───
+function getInvalidatedTactics() {
+  try { return new Set(JSON.parse(localStorage.getItem('invalidatedTactics') || '[]')); }
+  catch { return new Set(); }
+}
+function invalidateTactic(pid) {
+  const s = getInvalidatedTactics();
+  s.add(pid);
+  localStorage.setItem('invalidatedTactics', JSON.stringify([...s]));
 }
 
 function posId(m) {
@@ -2843,9 +2854,12 @@ function extractAllMistakes() {
   // Remove mistakes that overlap with tactic positions (tactic takes precedence).
   // Match by FEN rather than ply — a tactic's 2nd move position only collides with
   // a mistake if the game actually reached that position (user found the 1st move).
+  // Invalidated tactics don't suppress mistakes — the mistake comes back.
+  const invalidated = getInvalidatedTactics();
   const tacticFens = new Set();
   for (const m of allMistakes) {
     if (m.type !== 'tactic' || !m.tacticMoves) continue;
+    if (invalidated.has(posId(m))) continue; // don't suppress mistakes for invalidated tactics
     // Position before the first user move
     tacticFens.add(`${m.gameId}_${m.fenBefore}`);
     // Position before each subsequent user move (= FEN after the preceding opponent move)
@@ -2855,7 +2869,13 @@ function extractAllMistakes() {
       }
     }
   }
-  allMistakes = allMistakes.filter(m => m.type === 'tactic' || !tacticFens.has(`${m.gameId}_${m.fenBefore}`));
+  allMistakes = allMistakes.filter(m => {
+    // Remove invalidated tactics
+    if (m.type === 'tactic' && invalidated.has(posId(m))) return false;
+    // Remove mistakes suppressed by active tactics
+    if (m.type !== 'tactic' && tacticFens.has(`${m.gameId}_${m.fenBefore}`)) return false;
+    return true;
+  });
 
   // Sort by severity (biggest win% drop / tactic swing first)
   allMistakes.sort((a, b) => b.wpDrop - a.wpDrop);
@@ -3669,11 +3689,13 @@ async function evaluateTacticMove(from, to, move) {
         srsInfo = srsTag(gradeLabel, srsCard);
       }
 
+      const invalidateBtn = `<div style="margin-top:8px;"><button class="btn btn-ghost btn-sm" style="font-size:10px;color:var(--text-muted);border-color:var(--border);" onclick="handleInvalidateTactic()">✕ Bad tactic</button></div>`;
+
       showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
         '⚡ Tactic complete!',
         `<code>${escHtml(move.san)}</code> — solved in ${totalUserMoves} moves` +
         (tacticWrongAttempts > 0 ? ` (${tacticWrongAttempts} wrong attempt${tacticWrongAttempts>1?'s':''})` : '') +
-        srsInfo);
+        srsInfo + invalidateBtn);
       updateSessionProgress();
       renderQueue();
       tacticMode = false;
@@ -3811,6 +3833,54 @@ function tacticTryAgain() {
       hintBtn.style.borderColor = '';
       hintBtn.style.color = '';
     }
+  }
+}
+
+function handleInvalidateTactic() {
+  const m = filteredMistakes[currentMistakeIdx];
+  if (!m || m.type !== 'tactic') return;
+  const pid = posId(m);
+  const container = document.getElementById('feedbackContainer');
+
+  if (m.found === false) {
+    // User missed this tactic in the game — offer to convert to mistake
+    const div = document.createElement('div');
+    div.className = 'feedback-box';
+    div.style.cssText = 'background:rgba(255,193,7,0.08);border-left:3px solid var(--yellow);';
+    div.innerHTML = `
+      <div class="feedback-title" style="color:var(--yellow)">Remove this tactic?</div>
+      <div class="feedback-text">
+        You missed this in the game. Converting to a mistake will keep the first move as a single-move review.
+        <div style="margin-top:8px;display:flex;gap:8px;">
+          <button class="btn btn-ghost btn-sm" style="border-color:var(--yellow);color:var(--yellow);" onclick="confirmInvalidateTactic('${pid}', true)">Convert to mistake</button>
+          <button class="btn btn-ghost btn-sm" onclick="confirmInvalidateTactic('${pid}', false)">Just remove</button>
+        </div>
+      </div>
+    `;
+    container.insertBefore(div, container.firstChild);
+  } else {
+    // User found this tactic — just remove
+    invalidateTactic(pid);
+    extractAllMistakes();
+    applyFilters();
+    renderGameList();
+    buildReviewQueue();
+    updateSessionProgress();
+    showFeedback('info', 'Tactic removed', 'This tactic won\'t appear in reviews.');
+  }
+}
+
+function confirmInvalidateTactic(pid, convertToMistake) {
+  invalidateTactic(pid);
+  extractAllMistakes();
+  applyFilters();
+  renderGameList();
+  buildReviewQueue();
+  updateSessionProgress();
+  if (convertToMistake) {
+    showFeedback('info', 'Converted to mistake', 'The first move will now appear as a single-move review.');
+  } else {
+    showFeedback('info', 'Tactic removed', 'This tactic won\'t appear in reviews.');
   }
 }
 
