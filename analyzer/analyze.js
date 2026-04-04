@@ -30,6 +30,7 @@
 //   --scan-tactics Scan existing analyzed games for tactical puzzles (no fetch)
 //   --tactic-depth MultiPV analysis depth for tactic detection (default: 20)
 //   --rescan-tactics Reset _tacticsScanned flags and re-scan all games
+//   --maia-model    Path to Maia ONNX model for human-like opponent lines (optional)
 //
 // Examples:
 //   node analyze.js --username DrNykterstein --stockfish ./stockfish
@@ -49,6 +50,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const https = require('https');
+let MaiaEngine;
+try { MaiaEngine = require('./maia.js').MaiaEngine; } catch { MaiaEngine = null; }
 
 // ─── Arg parsing ───
 function parseArgs() {
@@ -85,6 +88,7 @@ const CONFIG = {
   scanTactics:   args['scan-tactics'] === 'true' || args['scan-tactics'] === true,
   tacticDepth:   parseInt(args['tactic-depth']) || 20,
   rescanTactics:  args['rescan-tactics'] === 'true' || args['rescan-tactics'] === true,
+  maiaModel:      args['maia-model'] || null,
 };
 
 if (CONFIG.scanTactics) {
@@ -739,10 +743,70 @@ function checkUniqueness(mpvResults, perspective, threshold) {
 }
 
 /**
+ * Generate a Maia opponent line for a tactic. Uses Maia for opponent moves
+ * and Stockfish to verify user move uniqueness. Returns a complete line
+ * (array of move objects) or null if no valid tactic emerges.
+ */
+async function generateMaiaLine(sf, maia, fenBefore, playerColor, tacticDepth) {
+  if (!maia) return null;
+
+  const tacticMoves = [];
+  const chess = new Chess(fenBefore);
+  let isFirst = true;
+
+  while (tacticMoves.length < 14) {
+    // --- User's move (Stockfish MultiPV to check uniqueness) ---
+    const threshold = isFirst ? TACTIC_FIRST_MOVE_THRESHOLD : TACTIC_CONTINUATION_THRESHOLD;
+    isFirst = false;
+
+    const userMpv = await sf.evaluateMultiPV(chess.fen(), tacticDepth, 2);
+    const userUniq = checkUniqueness(userMpv, playerColor, threshold);
+    if (!userUniq.unique) break;
+
+    const userMoveUci = userUniq.bestMove;
+    const userMove = chess.move(userMoveUci, { sloppy: true });
+    if (!userMove) break;
+
+    tacticMoves.push({
+      uci: userMoveUci,
+      san: userMove.san,
+      fen: chess.fen(),
+      isUser: true,
+    });
+
+    if (chess.in_checkmate() || chess.in_stalemate() || chess.in_draw()) break;
+
+    // --- Opponent's move (Maia argmax — human-like response) ---
+    const maiaMove = await maia.predict(chess.fen());
+    if (!maiaMove) break;
+
+    const oppMove = chess.move(maiaMove, { sloppy: true });
+    if (!oppMove) break;
+
+    tacticMoves.push({
+      uci: maiaMove,
+      san: oppMove.san,
+      fen: chess.fen(),
+      isUser: false,
+      source: 'maia',
+    });
+
+    if (chess.in_checkmate() || chess.in_stalemate() || chess.in_draw()) break;
+  }
+
+  // Must have at least 2 user moves
+  const userMoveCount = tacticMoves.filter(m => m.isUser).length;
+  if (userMoveCount < TACTIC_MIN_USER_MOVES) return null;
+
+  return tacticMoves;
+}
+
+/**
  * Scan a single game for tactics. Requires Stockfish engine for MultiPV analysis.
+ * Optionally uses Maia for human-like opponent lines.
  * Returns an array of tactic objects to store on the game.
  */
-async function scanGameForTactics(sf, game, tacticDepth) {
+async function scanGameForTactics(sf, game, tacticDepth, maia) {
   const moves = game.moves ? game.moves.split(' ').filter(Boolean) : [];
   const analysis = game.analysis || [];
   if (moves.length < 10 || analysis.length < 10) return [];
@@ -855,6 +919,23 @@ async function scanGameForTactics(sf, game, tacticDepth) {
         break; // game diverged from tactic line — stop comparing
       }
       gameIdx++;
+    }
+
+    // Generate a Maia opponent line if available
+    if (maia && bestChain.length >= 3) {
+      const maiaLine = await generateMaiaLine(sf, maia, cand.fen, playerColor, tacticDepth);
+      if (maiaLine && maiaLine.length >= 3) {
+        // Check it differs from existing lines (compare opponent moves)
+        const existingOppMoves = [bestChain, ...alternativeLines].map(
+          line => line.filter(m => !m.isUser).map(m => m.uci).join(',')
+        );
+        const maiaOppMoves = maiaLine.filter(m => !m.isUser).map(m => m.uci).join(',');
+        if (!existingOppMoves.includes(maiaOppMoves)) {
+          // Tag all moves in the Maia line with source
+          const taggedLine = maiaLine.map(m => m.isUser ? m : { ...m, source: 'maia' });
+          alternativeLines.push(taggedLine);
+        }
+      }
     }
 
     tactics.push({
@@ -1283,6 +1364,25 @@ async function main() {
     log(`Alt lines:       max ${TACTIC_MAX_ALT_LINES} lines, branch depth ${TACTIC_MAX_ALT_DEPTH}`);
     log(`Pre-filter:      opponent must lose ≥${TACTIC_MIN_OPP_CP_LOSS}cp`);
     log(`Min user moves:  ${TACTIC_MIN_USER_MOVES}`);
+
+    // Initialize Maia if model path is provided
+    let maia = null;
+    if (CONFIG.maiaModel && MaiaEngine) {
+      try {
+        maia = new MaiaEngine();
+        const modelPath = path.resolve(CONFIG.maiaModel);
+        const movesDir = path.dirname(modelPath);
+        await maia.init(modelPath, movesDir);
+        log(`Maia:            loaded (ELO ${maia.elo}, argmax)`);
+      } catch (e) {
+        logError(`Maia init failed: ${e.message} — continuing without Maia`);
+        maia = null;
+      }
+    } else if (CONFIG.maiaModel && !MaiaEngine) {
+      log(`Maia:            skipped (onnxruntime-web not installed — run npm install)`);
+    } else {
+      log(`Maia:            off (use --maia-model <path> to enable)`);
+    }
     log('');
 
     let totalTactics = 0;
@@ -1346,7 +1446,7 @@ async function main() {
         const gameStart = Date.now();
         try {
           await sf.newGame();
-          const tactics = await scanGameForTactics(sf, game, CONFIG.tacticDepth);
+          const tactics = await scanGameForTactics(sf, game, CONFIG.tacticDepth, maia);
           game.tactics = tactics;
           game._tacticsScanned = true;
 
