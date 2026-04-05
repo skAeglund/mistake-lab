@@ -965,7 +965,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cache extracted mistakes in localStorage</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix alt line prefix dedup and 0-moves skip</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3815,37 +3815,7 @@ async function evaluateTacticMove(from, to, move) {
         tacticMode = false; // pause until user clicks
       } else {
         // ── Tactic fully complete (all lines solved) ──
-        const pid = posId(m);
-        let grade, gradeLabel;
-        if (tacticWrongAttempts > 0) {
-          grade = FSRS_GRADE.again; gradeLabel = 'Again';
-        } else if (tacticHintUsed) {
-          grade = FSRS_GRADE.hard; gradeLabel = 'Hard (hint)';
-        } else {
-          grade = FSRS_GRADE.easy; gradeLabel = 'Easy';
-        }
-
-        let srsInfo = '';
-        if (!srsRecorded) {
-          const srsCard = recordReview(pid, grade);
-          srsRecorded = true;
-          srsInfo = srsTag(gradeLabel, srsCard);
-        }
-
-        const linesLabel = tacticAltLines.length > 0
-          ? ` (${tacticAltLines.length + 1} lines)` : '';
-        const invalidateBtn = `<div style="margin-top:8px;"><button class="btn btn-ghost btn-sm" style="font-size:10px;color:var(--text-muted);border-color:var(--border);" onclick="handleInvalidateTactic()">✕ Bad tactic</button></div>`;
-
-        showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
-          '⚡ Tactic complete!',
-          `<code>${escHtml(move.san)}</code> — solved${linesLabel}` +
-          (tacticWrongAttempts > 0 ? ` (${tacticWrongAttempts} wrong attempt${tacticWrongAttempts>1?'s':''})` : '') +
-          srsInfo + invalidateBtn);
-        updateSessionProgress();
-        renderQueue();
-        tacticMode = false;
-        document.getElementById('btnRetry').classList.remove('hidden');
-        document.getElementById('btnHint').classList.add('hidden');
+        finishTacticComplete(move.san);
       }
     } else {
       // ── More moves to go — show feedback then auto-play opponent ──
@@ -3951,6 +3921,44 @@ function tacticAutoPlayOpponent() {
   }, 300);
 }
 
+function finishTacticComplete(lastMoveSan) {
+  const m = filteredMistakes[currentMistakeIdx];
+  if (!m) return;
+
+  const pid = posId(m);
+  let grade, gradeLabel;
+  if (tacticWrongAttempts > 0) {
+    grade = FSRS_GRADE.again; gradeLabel = 'Again';
+  } else if (tacticHintUsed) {
+    grade = FSRS_GRADE.hard; gradeLabel = 'Hard (hint)';
+  } else {
+    grade = FSRS_GRADE.easy; gradeLabel = 'Easy';
+  }
+
+  let srsInfo = '';
+  if (!srsRecorded) {
+    const srsCard = recordReview(pid, grade);
+    srsRecorded = true;
+    srsInfo = srsTag(gradeLabel, srsCard);
+  }
+
+  const linesLabel = tacticAltLines.length > 0
+    ? ` (${tacticAltLines.length + 1} lines)` : '';
+  const invalidateBtn = `<div style="margin-top:8px;"><button class="btn btn-ghost btn-sm" style="font-size:10px;color:var(--text-muted);border-color:var(--border);" onclick="handleInvalidateTactic()">✕ Bad tactic</button></div>`;
+
+  const moveLabel = lastMoveSan ? `<code>${escHtml(lastMoveSan)}</code> — solved` : 'Solved';
+  showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
+    '⚡ Tactic complete!',
+    `${moveLabel}${linesLabel}` +
+    (tacticWrongAttempts > 0 ? ` (${tacticWrongAttempts} wrong attempt${tacticWrongAttempts>1?'s':''})` : '') +
+    srsInfo + invalidateBtn);
+  updateSessionProgress();
+  renderQueue();
+  tacticMode = false;
+  document.getElementById('btnRetry').classList.remove('hidden');
+  document.getElementById('btnHint').classList.add('hidden');
+}
+
 function loadNextTacticAlt() {
   const m = filteredMistakes[currentMistakeIdx];
   if (!m || m.type !== 'tactic') return;
@@ -3969,6 +3977,20 @@ function loadNextTacticAlt() {
       else break;
     }
     if (len > commonLen) commonLen = len;
+  }
+
+  // If all user moves are already in the common prefix, skip this alt line
+  const totalUserMoves = altLine.filter(tm => tm.isUser).length;
+  const solvedUserMoves = altLine.slice(0, commonLen).filter(tm => tm.isUser).length;
+  if (solvedUserMoves >= totalUserMoves) {
+    tacticSolvedLines.push([...altLine]);
+    if (tacticAltIdx + 1 < tacticAltLines.length) {
+      loadNextTacticAlt(); // skip to next alt
+    } else {
+      // All lines exhausted — trigger tactic completion
+      finishTacticComplete();
+    }
+    return;
   }
 
   // Reset board and replay the common prefix
@@ -4008,8 +4030,6 @@ function loadNextTacticAlt() {
   renderTacticLine();
 
   // Count remaining user moves (the ones they haven't proven yet)
-  const totalUserMoves = altLine.filter(tm => tm.isUser).length;
-  const solvedUserMoves = altLine.slice(0, commonLen).filter(tm => tm.isUser).length;
   const remainingUserMoves = totalUserMoves - solvedUserMoves;
   tacticPrefixUserMoves = solvedUserMoves;
   const altLabel = `Alt line ${tacticAltIdx + 1}/${tacticAltLines.length}`;

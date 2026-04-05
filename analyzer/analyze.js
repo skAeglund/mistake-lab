@@ -928,20 +928,43 @@ async function scanGameForTactics(sf, game, tacticDepth, maia) {
       if (maiaLine && maiaLine.length >= 3) {
         maiaOpponentMoves = maiaLine.filter(m => !m.isUser).map(m => m.uci).join(',');
 
-        // Check if Maia's line matches any existing line
+        // Check if Maia's line matches or is a prefix/extension of any existing line.
+        // A line that starts with the same opponent moves but just continues further
+        // is a continuation, not a true alternative.
         const allLines = [bestChain, ...alternativeLines];
-        const matchIdx = allLines.findIndex(line =>
-          line.filter(m => !m.isUser).map(m => m.uci).join(',') === maiaOpponentMoves
-        );
+        const isDuplicate = allLines.some(line => {
+          const lineOpp = line.filter(m => !m.isUser).map(m => m.uci).join(',');
+          return lineOpp === maiaOpponentMoves
+            || maiaOpponentMoves.startsWith(lineOpp + ',')
+            || maiaOpponentMoves.startsWith(lineOpp)
+            || lineOpp.startsWith(maiaOpponentMoves + ',')
+            || lineOpp.startsWith(maiaOpponentMoves);
+        });
 
-        if (matchIdx === -1) {
+        if (!isDuplicate) {
           // Unique Maia line — add as new alternative
           const taggedLine = maiaLine.map(m => m.isUser ? m : { ...m, source: 'maia' });
           alternativeLines.push(taggedLine);
         }
-        // If matchIdx >= 0, the existing line already represents the human-likely path.
         // maiaOpponentMoves stored on the tactic lets the UI identify which line(s) Maia agrees with.
       }
+    }
+
+    // Deduplicate alternative lines: remove any that are a prefix/extension of the primary
+    // or of each other (these are continuations, not true alternatives)
+    const primaryOpp = bestChain.filter(m => !m.isUser).map(m => m.uci).join(',');
+    const dedupedAlts = [];
+    for (const alt of alternativeLines) {
+      const altOpp = alt.filter(m => !m.isUser).map(m => m.uci).join(',');
+      // Skip if same as primary or prefix/extension of primary
+      if (altOpp === primaryOpp || altOpp.startsWith(primaryOpp + ',') || primaryOpp.startsWith(altOpp + ',')) continue;
+      // Skip if same as or prefix/extension of an already-kept alt
+      const dupOfKept = dedupedAlts.some(kept => {
+        const keptOpp = kept.filter(m => !m.isUser).map(m => m.uci).join(',');
+        return altOpp === keptOpp || altOpp.startsWith(keptOpp + ',') || keptOpp.startsWith(altOpp + ',');
+      });
+      if (dupOfKept) continue;
+      dedupedAlts.push(alt);
     }
 
     tactics.push({
@@ -949,7 +972,7 @@ async function scanGameForTactics(sf, game, tacticDepth, maia) {
       fenBefore: cand.fen,
       playerColor: playerColor,
       moves: bestChain,
-      alternativeLines: alternativeLines.length > 0 ? alternativeLines : undefined,
+      alternativeLines: dedupedAlts.length > 0 ? dedupedAlts : undefined,
       maiaOpponentMoves: maiaOpponentMoves,
       evalBefore: evalBefore,
       evalAfter: finalEval,
