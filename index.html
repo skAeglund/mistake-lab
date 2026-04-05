@@ -350,6 +350,9 @@
     box-shadow: 0 0 0 1px var(--accent-dim);
   }
   .engine-line-moves .move.user-move { color: var(--text-primary); font-weight: 600; }
+  .engine-line-moves .alt-bracket { color: var(--text-muted); font-size: 12px; user-select: none; }
+  .engine-line-moves .alt-move { color: var(--text-muted); font-style: italic; }
+  .engine-line-moves .alt-move.active { color: var(--accent); font-style: normal; }
   .engine-line-nav {
     display: flex; gap: 6px; margin-top: 8px; align-items: center;
   }
@@ -1070,7 +1073,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Restore green filter arrows</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Alternative engine lines: branch from any position in engine line</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -4298,6 +4301,33 @@ function onBoardClick(e) {
     return;
   }
 
+  // Engine line browsing — allow click-to-move for branching
+  if (browsingLine && engineLine) {
+    const squareEl = e.target.closest('[data-square]');
+    if (!squareEl) return;
+    const sq = squareEl.getAttribute('data-square');
+    if (!sq) return;
+
+    const fen = getEngineLineFen();
+    if (!fen) return;
+    const chess = new Chess(fen);
+    const turn = chess.turn();
+    const piece = chess.get(sq);
+
+    if (selectedSquare) {
+      if (sq === selectedSquare) { deselectionPending = true; return; }
+      if (piece && piece.color === turn) { clearSelection(); selectSquare(sq); return; }
+      e.stopPropagation(); e.preventDefault();
+      clearSelection();
+      clearArrows();
+      handleEngineLineBranch(selectedSquare, sq);
+      return;
+    } else {
+      if (piece && piece.color === turn) selectSquare(sq);
+    }
+    return;
+  }
+
   if (!gameEngine || browsingLine) return;
 
   const m = filteredMistakes[currentMistakeIdx];
@@ -4683,6 +4713,17 @@ function onDragStart(source, piece) {
     selectSquare(source);
     return true;
   }
+  // Allow moves during engine line browsing (for branching)
+  if (browsingLine && engineLine) {
+    const fen = getEngineLineFen();
+    if (!fen) return false;
+    const turn = fen.split(' ')[1];
+    if ((turn === 'w' && piece.search(/^b/) !== -1) ||
+        (turn === 'b' && piece.search(/^w/) !== -1)) return false;
+    if (selectedSquare !== source) clearSelection();
+    selectSquare(source);
+    return true;
+  }
   if (!gameEngine || browsingLine) return false;
   const m = filteredMistakes[currentMistakeIdx];
   if (!m) return false;
@@ -4712,6 +4753,16 @@ function onDrop(source, target) {
   if (!gameEngine) return 'snapback';
   // If piece was dropped back on same square, it was a click — keep selection
   if (source === target) return 'snapback';
+
+  // Engine line browsing — route to branch handler (don't touch gameEngine)
+  if (browsingLine && engineLine) {
+    deselectionPending = false;
+    clearArrows();
+    clearSelection();
+    handleEngineLineBranch(source, target);
+    return 'snapback'; // handleEngineLineBranch positions the board directly
+  }
+
   deselectionPending = false; // real drag happened — suppress mouseup deselection
   clearArrows();
   const move = gameEngine.move({
@@ -4790,6 +4841,7 @@ function onDrop(source, target) {
 
 function onSnapEnd() {
   if (openingFilterMode) { if (filterChess) boardObj.position(filterChess.fen()); return; }
+  if (browsingLine && engineLine) { const f = getEngineLineFen(); if (f) boardObj.position(f); return; }
   if (gameEngine) boardObj.position(gameEngine.fen());
 }
 
@@ -5815,8 +5867,173 @@ function buildEngineLine(baseFen, userMove, contUci) {
 
   if (moves.length <= 1) return; // no continuation to show
 
-  engineLine = { baseFen, moves, currentIdx: 0 }; // start highlighting user's move
+  engineLine = { baseFen, moves, currentIdx: 0, alternatives: [], activeAlt: -1 }; // start highlighting user's move
   renderEngineLine();
+}
+
+// ─── Engine Line Branching Helpers ───
+
+/** Get the FEN at the current position in the active engine line path */
+function getEngineLineFen() {
+  if (!engineLine) return null;
+  const idx = engineLine.currentIdx;
+  if (idx === -1) return engineLine.baseFen;
+  if (engineLine.activeAlt >= 0) {
+    const alt = engineLine.alternatives[engineLine.activeAlt];
+    if (idx > alt.branchIdx) {
+      return alt.moves[idx - alt.branchIdx - 1].fen;
+    }
+  }
+  return engineLine.moves[idx].fen;
+}
+
+/** Get the total length of the currently active path */
+function getActivePathLength() {
+  if (!engineLine) return 0;
+  if (engineLine.activeAlt >= 0) {
+    const alt = engineLine.alternatives[engineLine.activeAlt];
+    return alt.branchIdx + 1 + alt.moves.length;
+  }
+  return engineLine.moves.length;
+}
+
+/** Get the move object at index in the active path */
+function getActiveMoveAt(idx) {
+  if (!engineLine || idx < 0) return null;
+  if (engineLine.activeAlt >= 0) {
+    const alt = engineLine.alternatives[engineLine.activeAlt];
+    if (idx > alt.branchIdx) {
+      return alt.moves[idx - alt.branchIdx - 1] || null;
+    }
+  }
+  return engineLine.moves[idx] || null;
+}
+
+/** Handle a move made while browsing an engine line — create or extend a branch */
+async function handleEngineLineBranch(source, target) {
+  if (!engineLine) return 'snapback';
+  const currentFen = getEngineLineFen();
+  if (!currentFen) return 'snapback';
+
+  const chess = new Chess(currentFen);
+  const move = chess.move({ from: source, to: target, promotion: 'q' });
+  if (!move) return 'snapback';
+
+  const uci = source + target + (move.promotion || '');
+  const newFen = chess.fen();
+  const idx = engineLine.currentIdx;
+
+  // Check if this move matches the next move in the active path
+  const nextIdx = idx + 1;
+  const nextMove = getActiveMoveAt(nextIdx);
+  if (nextMove && nextMove.uci === uci) {
+    // Same move — just advance
+    goToLineMove(nextIdx);
+    return undefined;
+  }
+
+  // Check if this move matches the next move in the main line (when in an alt)
+  if (engineLine.activeAlt >= 0 && idx <= engineLine.alternatives[engineLine.activeAlt].branchIdx) {
+    const mainNext = engineLine.moves[nextIdx];
+    if (mainNext && mainNext.uci === uci) {
+      // Switch back to main line and advance
+      engineLine.activeAlt = -1;
+      goToLineMove(nextIdx);
+      renderEngineLine();
+      return undefined;
+    }
+  }
+
+  // Also check if this move matches a different existing alt that branches at the same point
+  for (let ai = 0; ai < engineLine.alternatives.length; ai++) {
+    const alt = engineLine.alternatives[ai];
+    if (alt.branchIdx === idx && alt.moves.length > 0 && alt.moves[0].uci === uci) {
+      // Switch to this alt
+      engineLine.activeAlt = ai;
+      goToLineMove(nextIdx);
+      renderEngineLine();
+      return undefined;
+    }
+  }
+
+  // New branch — build it with SF analysis
+  const userMove = { san: move.san, uci, fen: newFen };
+
+  // Show the move on the board immediately
+  boardObj.position(newFen, false);
+  clearHighlights();
+
+  // Determine if we're inside an alt (depth 1) and past its branch point
+  // → replace continuation (depth limit = 2)
+  const inAlt = engineLine.activeAlt >= 0 && idx > engineLine.alternatives[engineLine.activeAlt].branchIdx;
+
+  if (inAlt) {
+    // Replace the rest of the current alt from this point
+    const alt = engineLine.alternatives[engineLine.activeAlt];
+    const altMoveIdx = idx - alt.branchIdx; // 0-based into alt.moves (the move AFTER branchIdx)
+    // Truncate alt moves to the point before the new move, then add the new branch
+    alt.moves = alt.moves.slice(0, altMoveIdx);
+    alt.moves.push(userMove);
+
+    // Run SF analysis for continuation
+    if (sfReady) {
+      try {
+        stopPreAnalysis();
+        const result = await sfAnalyze(newFen, 18, 1);
+        if (engineLine && engineLine.activeAlt >= 0 && engineLine.alternatives[engineLine.activeAlt] === alt) {
+          const contMoves = parseSfContinuation(newFen, result);
+          alt.moves.push(...contMoves);
+        }
+      } catch (e) { /* ignore */ }
+    }
+
+    engineLine.currentIdx = idx + 1; // point to the new move
+    renderEngineLine();
+    goToLineMove(engineLine.currentIdx);
+    return undefined;
+  }
+
+  // Branching from main line → create new alt
+  const newAlt = { branchIdx: idx, moves: [userMove] };
+
+  // Run SF analysis for continuation
+  if (sfReady) {
+    try {
+      stopPreAnalysis();
+      const result = await sfAnalyze(newFen, 18, 1);
+      if (engineLine) {
+        const contMoves = parseSfContinuation(newFen, result);
+        newAlt.moves.push(...contMoves);
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  if (!engineLine) return undefined; // navigated away during analysis
+
+  engineLine.alternatives.push(newAlt);
+  engineLine.activeAlt = engineLine.alternatives.length - 1;
+  engineLine.currentIdx = idx + 1; // point to the new move
+  renderEngineLine();
+  goToLineMove(engineLine.currentIdx);
+  return undefined;
+}
+
+/** Parse SF analysis result into continuation move objects */
+function parseSfContinuation(fen, result) {
+  const contUci = result?.pvs?.[0]?.moves || '';
+  if (!contUci) return [];
+  const chess = new Chess(fen);
+  const moves = [];
+  const uciMoves = contUci.trim().split(/\s+/).filter(Boolean);
+  for (const uci of uciMoves) {
+    const from = uci.substring(0, 2);
+    const to = uci.substring(2, 4);
+    const promo = uci.length > 4 ? uci[4] : undefined;
+    const r = chess.move({ from, to, promotion: promo });
+    if (!r) break;
+    moves.push({ san: r.san, uci, fen: chess.fen() });
+  }
+  return moves;
 }
 
 function renderEngineLine() {
@@ -5836,22 +6053,42 @@ function renderEngineLine() {
   let moveNum = parseInt(fenParts[5]) || 1;
   let isWhiteTurn = fenParts[1] === 'w';
 
+  // Collect alt lines grouped by branchIdx for insertion
+  const altsByBranch = {};
+  for (let ai = 0; ai < engineLine.alternatives.length; ai++) {
+    const alt = engineLine.alternatives[ai];
+    if (!altsByBranch[alt.branchIdx]) altsByBranch[alt.branchIdx] = [];
+    altsByBranch[alt.branchIdx].push(ai);
+  }
+
   let movesHtml = '';
+  // Track move number / turn state for main line
+  let mn = moveNum;
+  let wt = isWhiteTurn;
+
   for (let i = 0; i < engineLine.moves.length; i++) {
     const mv = engineLine.moves[i];
-    const activeClass = i === engineLine.currentIdx ? ' active' : '';
+    const isActiveMain = engineLine.activeAlt === -1 && i === engineLine.currentIdx;
+    const activeClass = isActiveMain ? ' active' : '';
     const userClass = mv.isUser ? ' user-move' : '';
 
-    if (isWhiteTurn) {
-      movesHtml += `<span class="move-num">${moveNum}.</span>`;
+    if (wt) {
+      movesHtml += `<span class="move-num">${mn}.</span>`;
     } else if (i === 0) {
-      movesHtml += `<span class="move-num">${moveNum}…</span>`;
+      movesHtml += `<span class="move-num">${mn}…</span>`;
     }
 
-    movesHtml += `<span class="move${activeClass}${userClass}" onclick="goToLineMove(${i})">${escHtml(mv.san)}</span> `;
+    movesHtml += `<span class="move${activeClass}${userClass}" onclick="goToMainLineMove(${i})">${escHtml(mv.san)}</span> `;
 
-    if (!isWhiteTurn) moveNum++;
-    isWhiteTurn = !isWhiteTurn;
+    if (!wt) mn++;
+    wt = !wt;
+
+    // Insert any alt lines that branch after this move
+    if (altsByBranch[i]) {
+      for (const ai of altsByBranch[i]) {
+        movesHtml += renderAltLineHtml(ai, i, moveNum, isWhiteTurn);
+      }
+    }
   }
 
   div.innerHTML = `
@@ -5861,7 +6098,7 @@ function renderEngineLine() {
       <button class="btn btn-ghost btn-sm" onclick="lineStep(-1)">‹</button>
       <button class="btn btn-ghost btn-sm" onclick="lineStep(1)">›</button>
       <button class="btn btn-ghost btn-sm" onclick="exitEngineLine()">Back</button>
-      <span class="hint">← → to step</span>
+      <span class="hint">← → to step · make a move to branch</span>
     </div>
   `;
 
@@ -5874,35 +6111,81 @@ function renderEngineLine() {
   }
 }
 
+/** Render HTML for a single alternative line in PGN parenthesis style */
+function renderAltLineHtml(altIdx, branchIdx, baseMoveNum, baseIsWhite) {
+  const alt = engineLine.alternatives[altIdx];
+  if (!alt || alt.moves.length === 0) return '';
+
+  // Compute the move number and turn at the branch point
+  let mn = baseMoveNum;
+  let wt = baseIsWhite;
+  for (let i = 0; i <= branchIdx; i++) {
+    if (!wt) mn++;
+    wt = !wt;
+  }
+  // Now mn/wt = the move number and turn for the move AFTER branchIdx (= alt.moves[0])
+
+  let html = '<span class="alt-bracket">(</span>';
+  for (let j = 0; j < alt.moves.length; j++) {
+    const mv = alt.moves[j];
+    const globalIdx = branchIdx + 1 + j;
+    const isActiveAlt = engineLine.activeAlt === altIdx && globalIdx === engineLine.currentIdx;
+    const activeClass = isActiveAlt ? ' active' : '';
+
+    if (wt) {
+      html += `<span class="move-num">${mn}.</span>`;
+    } else if (j === 0) {
+      html += `<span class="move-num">${mn}…</span>`;
+    }
+
+    html += `<span class="move alt-move${activeClass}" onclick="goToAltLineMove(${altIdx},${globalIdx})">${escHtml(mv.san)}</span> `;
+
+    if (!wt) mn++;
+    wt = !wt;
+  }
+  html += '<span class="alt-bracket">)</span> ';
+  return html;
+}
+
+/** Switch to an alternative line and navigate to a specific position */
+function goToAltLineMove(altIdx, globalIdx) {
+  if (!engineLine || altIdx < 0 || altIdx >= engineLine.alternatives.length) return;
+  engineLine.activeAlt = altIdx;
+  goToLineMove(globalIdx); // goToLineMove already calls renderEngineLine
+}
+
 function goToLineMove(idx) {
-  if (!engineLine || idx < -1 || idx >= engineLine.moves.length) return;
+  if (!engineLine) return;
+  const pathLen = getActivePathLength();
+  if (idx < -1 || idx >= pathLen) return;
   engineLine.currentIdx = idx;
   browsingLine = true;
 
   if (idx === -1) {
-    // Back to base position (before user's move)
     boardObj.position(engineLine.baseFen, false);
   } else {
-    boardObj.position(engineLine.moves[idx].fen, false);
-    // Highlight the move
-    const uci = engineLine.moves[idx].uci;
-    const from = uci.substring(0, 2);
-    const to = uci.substring(2, 4);
-    clearHighlights();
+    const fen = getEngineLineFen();
+    if (fen) boardObj.position(fen, false);
   }
+  clearHighlights();
 
-  // Update active class in the move list
-  const moveEls = document.querySelectorAll('#engineLineBox .move');
-  moveEls.forEach((el, i) => {
-    el.classList.toggle('active', i === idx);
-  });
+  // Re-render move list to update active highlights
+  renderEngineLine();
   updateEvalBar();
 }
 
+/** Click handler for main line moves — switches activeAlt to main */
+function goToMainLineMove(idx) {
+  if (!engineLine) return;
+  if (idx >= engineLine.moves.length) return;
+  engineLine.activeAlt = -1;
+  goToLineMove(idx);
+}
 function lineStep(delta) {
   if (!engineLine) return;
   const newIdx = engineLine.currentIdx + delta;
-  if (newIdx < -1 || newIdx >= engineLine.moves.length) return;
+  const pathLen = getActivePathLength();
+  if (newIdx < -1 || newIdx >= pathLen) return;
   // Navigating left past the bad move → exit and let user retry
   if (newIdx === -1 && engineLine.wrongMove) {
     if (tacticMode) {
@@ -5912,6 +6195,7 @@ function lineStep(delta) {
     }
     return;
   }
+  // When stepping left into the shared prefix from an alt, stay in the alt
   goToLineMove(newIdx);
 }
 
