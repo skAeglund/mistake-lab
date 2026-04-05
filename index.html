@@ -1070,7 +1070,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Preserve filter board orientation across filter mode re-entries</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix: block opponent piece interaction via click-to-move after line completes</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -4281,7 +4281,8 @@ function onBoardClick(e) {
     }
 
     // Clicking another own piece — reselect
-    if (piece && piece.color === turn) {
+    const userColor1 = m.playerColor === 'white' ? 'w' : 'b';
+    if (piece && piece.color === turn && (piece.color === userColor1 || contLineBrowsing)) {
       clearSelection();
       selectSquare(sq);
       return; // let drag start on the new piece
@@ -4360,7 +4361,8 @@ function onBoardClick(e) {
     }
   } else {
     // Nothing selected — select if it's our piece (let drag also start via chessboard.js)
-    if (piece && piece.color === turn) {
+    const userColor2 = m.playerColor === 'white' ? 'w' : 'b';
+    if (piece && piece.color === turn && (piece.color === userColor2 || contLineBrowsing)) {
       selectSquare(sq);
     }
   }
@@ -4640,6 +4642,9 @@ function onDragStart(source, piece) {
       (gameEngine.turn() === 'b' && piece.search(/^w/) !== -1)) {
     return false;
   }
+  // Only allow moving the user's own pieces — except during continuation line browsing
+  const userPrefix = m.playerColor === 'white' ? 'w' : 'b';
+  if (piece.charAt(0) !== userPrefix && !contLineBrowsing) return false;
   // Ensure selection highlights are visible while dragging
   if (selectedSquare !== source) clearSelection();
   selectSquare(source);
