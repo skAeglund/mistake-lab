@@ -1068,7 +1068,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix single-game display: standard notation, actual player names</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Shared detectPlayerColor helper, explicit both-side check</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2928,14 +2928,7 @@ function extractMistakesForGame(game) {
   const mistakes = [];
   const moves = game.moves ? game.moves.split(' ') : [];
   const analysis = game.analysis || [];
-  let playerColor;
-  if (game._playerColor) {
-    playerColor = game._playerColor;
-  } else {
-    const isWhite = game.players?.white?.user?.name?.toLowerCase() === currentUsername.toLowerCase()
-                 || game.players?.white?.user?.id?.toLowerCase() === currentUsername.toLowerCase();
-    playerColor = isWhite ? 'white' : 'black';
-  }
+  let playerColor = detectPlayerColor(game);
 
   // Walk the moves, rebuild positions with chess.js
   const chess = new Chess(game.initialFen || undefined);
@@ -3102,11 +3095,7 @@ function extractAllMistakes() {
   for (const game of allGames) {
     const stats = moveStatsData[game.id];
     if (!stats) continue;
-    const playerColor = game._playerColor || (
-      game.players?.white?.user?.name?.toLowerCase() === currentUsername.toLowerCase() ||
-      game.players?.white?.user?.id?.toLowerCase() === currentUsername.toLowerCase()
-        ? 'white' : 'black'
-    );
+    const playerColor = detectPlayerColor(game);
     const { winner, whiteRating, blackRating } = getGameResultInfo(game);
     const opponentColor = playerColor === 'white' ? 'black' : 'white';
     const opponentName = game.players?.[opponentColor]?.user?.name || 'Unknown';
@@ -3257,6 +3246,20 @@ function setFilter(el) {
 
 function fenPositionKey(fen) {
   return fen.split(' ').slice(0, 4).join(' ');
+}
+
+// Detect which color the current user played in a game
+// Checks both sides explicitly; _playerColor takes precedence if present
+function detectPlayerColor(game) {
+  if (game._playerColor) return game._playerColor;
+  const u = currentUsername.toLowerCase();
+  const wName = game.players?.white?.user?.name?.toLowerCase();
+  const wId = game.players?.white?.user?.id?.toLowerCase();
+  if (wName === u || wId === u) return 'white';
+  const bName = game.players?.black?.user?.name?.toLowerCase();
+  const bId = game.players?.black?.user?.id?.toLowerCase();
+  if (bName === u || bId === u) return 'black';
+  return 'white'; // shouldn't happen — fallback
 }
 
 // Extract game result and player info for opening explorer stats
