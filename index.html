@@ -216,6 +216,61 @@
     display: flex; gap: 6px; flex-wrap: wrap;
   }
 
+  /* Opening explorer stats table */
+  .explorer-stats { width: 100%; margin-bottom: 12px; }
+  .explorer-stats-header {
+    display: grid; grid-template-columns: minmax(50px,auto) 50px 1fr;
+    gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--border);
+    font-size: 11px; color: var(--text-muted); font-weight: 600;
+  }
+  .explorer-stats-row {
+    display: grid; grid-template-columns: minmax(50px,auto) 50px 1fr;
+    gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--border);
+    font-size: 12px; cursor: pointer; align-items: center;
+  }
+  .explorer-stats-row:hover { background: var(--bg-hover); }
+  .explorer-move { font-weight: 600; font-family: var(--font-mono, monospace); color: var(--text-primary); }
+  .explorer-count { text-align: center; color: var(--text-secondary); font-size: 11px; }
+  .explorer-bar {
+    display: flex; height: 14px; border-radius: 3px; overflow: hidden;
+    font-size: 0;
+  }
+  .explorer-bar-w { background: #8a8; color: #fff; font-size: 9px; display: flex; align-items: center; justify-content: center; min-width: 0; }
+  .explorer-bar-d { background: #999; color: #fff; font-size: 9px; display: flex; align-items: center; justify-content: center; min-width: 0; }
+  .explorer-bar-b { background: #555; color: #fff; font-size: 9px; display: flex; align-items: center; justify-content: center; min-width: 0; }
+  .explorer-single-game {
+    font-size: 10px; color: var(--text-secondary); white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  .explorer-single-game a { color: var(--accent); text-decoration: none; margin-left: 3px; }
+  .explorer-single-game a:hover { text-decoration: underline; }
+  .explorer-footer {
+    font-size: 10px; color: var(--text-muted); margin-top: 8px; line-height: 1.4;
+  }
+  .explorer-no-data {
+    font-size: 12px; color: var(--text-muted); padding: 20px 0; text-align: center;
+  }
+
+  /* Opening line display in left panel */
+  .opening-line-display {
+    padding: 8px; margin-top: 6px; border-radius: 6px;
+    background: var(--bg-card); border: 1px solid var(--border);
+    font-size: 12px; line-height: 1.7;
+  }
+  .opening-line-display .opening-name {
+    font-size: 11px; color: var(--text-muted); margin-bottom: 4px;
+    font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .opening-line-display .move-pair { display: inline; }
+  .opening-line-display .move-num { color: var(--text-muted); font-size: 11px; }
+  .opening-line-display .move-san {
+    font-family: var(--font-mono, monospace); font-weight: 500;
+    cursor: pointer; padding: 1px 3px; border-radius: 3px;
+    color: var(--text-primary);
+  }
+  .opening-line-display .move-san:hover { background: var(--bg-hover); }
+  .opening-line-display .move-san.active { background: var(--accent); color: #fff; }
+
   .game-list {
     flex: 1; overflow-y: auto; padding: 8px;
   }
@@ -1008,7 +1063,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Exit filter mode when entering review mode</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Opening explorer: stats table, move line, frequency arrows</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1069,6 +1124,7 @@
           <button class="chip-close" onclick="event.stopPropagation();clearOpeningFilter()" title="Clear opening filter">✕</button>
         </span>
       </div>
+      <div class="opening-line-display hidden" id="openingLineDisplay"></div>
     </div>
     <div class="game-list" id="gameList"></div>
   </div>
@@ -1116,8 +1172,7 @@
   <!-- Right panel: Feedback -->
   <div class="panel-right">
     <div class="opening-filter-panel hidden" id="openingFilterPanel">
-      <h4>♟ Opening Filter</h4>
-      <div class="filter-moves" id="filterMoveDisplay">Starting position</div>
+      <div id="explorerStatsContainer"></div>
       <input type="text" class="fen-input" id="filterFenInput"
              placeholder="Paste FEN here…"
              onchange="setFilterFromFen(this.value)"
@@ -1275,6 +1330,8 @@ let filterMoveIdx = -1;          // current index into filterMoveHistory
 let gameFenIndex = null;         // Map<gameId, Set<positionKey>>
 let fenIndexGameCount = 0;       // allGames.length when index was built
 let savedBoardState = null;      // { fen, orientation, mistakeIdx } to restore after filter mode
+let positionMoveIndex = null;    // Map<positionKey, Map<moveSAN, MoveStats>> for opening explorer
+let filterArrows = [];           // [{from, to, opacity}] frequency arrows in filter mode
 
 // ─── Maia 3 state ───
 let maiaSession = null;       // ONNX InferenceSession
@@ -1438,7 +1495,7 @@ let syncDebounceTimer = null;
 let appShown = false; // guard to prevent double showMainApp()
 const GIST_FILENAME = 'mistakelab_progress.json';
 const GIST_GAMES_FILENAME = 'mistakelab_games.json';
-const MISTAKES_CACHE_VERSION = 2;
+const MISTAKES_CACHE_VERSION = 3;
 const MISTAKES_CACHE_PARAMS = { wpDropThreshold: 10 };
 
 // Populate login fields from saved config + auto-load
@@ -1677,7 +1734,7 @@ function loadMistakesCache() {
   } catch { return null; }
 }
 
-function saveMistakesCache(rawMistakes, gameFingerprints, fenData) {
+function saveMistakesCache(rawMistakes, gameFingerprints, fenData, moveStatsData) {
   try {
     const serialized = rawMistakes.map(m => {
       const obj = { ...m };
@@ -1690,13 +1747,14 @@ function saveMistakesCache(rawMistakes, gameFingerprints, fenData) {
       games: gameFingerprints,
       mistakes: serialized,
       fenIndex: fenData || {},
+      moveStatsIndex: moveStatsData || {},
     };
     localStorage.setItem(getMistakesCacheKey(), JSON.stringify(cache));
   } catch (e) {
-    // If quota exceeded, retry without FEN index
-    if (e.name === 'QuotaExceededError' && fenData) {
-      console.warn('[MistakesCache] Quota exceeded — saving without FEN index');
-      saveMistakesCache(rawMistakes, gameFingerprints, null);
+    // If quota exceeded, retry without FEN index and moveStats
+    if (e.name === 'QuotaExceededError' && (fenData || moveStatsData)) {
+      console.warn('[MistakesCache] Quota exceeded — saving without FEN/moveStats index');
+      saveMistakesCache(rawMistakes, gameFingerprints, null, null);
     } else {
       console.warn('[MistakesCache] Save failed:', e.message);
     }
@@ -2877,12 +2935,15 @@ function extractMistakesForGame(game) {
   // Walk the moves, rebuild positions with chess.js
   const chess = new Chess(game.initialFen || undefined);
   const fens = [fenPositionKey(chess.fen())]; // collect all position keys for opening filter index
+  const moveStats = []; // collect {posKey, moveUci, moveSan} for opening explorer
   for (let i = 0; i < moves.length; i++) {
     const fenBefore = chess.fen();
+    const posKey = fenPositionKey(fenBefore);
     const san = moves[i];
     const moveResult = chess.move(san, { sloppy: true });
     if (!moveResult) continue;
     fens.push(fenPositionKey(chess.fen()));
+    moveStats.push({ posKey, moveUci: moveResult.from + moveResult.to + (moveResult.promotion || ''), moveSan: moveResult.san });
 
     // Mistake extraction only within analysis bounds
     if (i >= analysis.length) continue;
@@ -2944,7 +3005,7 @@ function extractMistakesForGame(game) {
       });
     }
   }
-  return { mistakes, fens };
+  return { mistakes, fens, moveStats };
 }
 
 function extractAllMistakes() {
@@ -2958,6 +3019,7 @@ function extractAllMistakes() {
   let needsExtraction = new Set();
   let cacheHit = false;
   const fenData = {}; // gameId → array of position keys (for FEN index)
+  const moveStatsData = {}; // gameId → array of {posKey, moveUci, moveSan} (for opening explorer)
 
   if (cache) {
     // Find games needing extraction: new games or fingerprint changed
@@ -2979,6 +3041,12 @@ function extractAllMistakes() {
           if (cache.fenIndex[gid]) fenData[gid] = cache.fenIndex[gid];
         }
       }
+      // Restore cached moveStats data
+      if (cache.moveStatsIndex) {
+        for (const gid of currentGameIds) {
+          if (cache.moveStatsIndex[gid]) moveStatsData[gid] = cache.moveStatsIndex[gid];
+        }
+      }
       console.log(`[MistakesCache] Full cache hit — ${rawMistakes.length} mistakes from ${currentGameIds.size} games`);
     } else {
       // Partial cache hit — keep cached mistakes for unchanged games, extract the rest
@@ -2987,6 +3055,11 @@ function extractAllMistakes() {
       if (cache.fenIndex) {
         for (const gid of currentGameIds) {
           if (!needsExtraction.has(gid) && cache.fenIndex[gid]) fenData[gid] = cache.fenIndex[gid];
+        }
+      }
+      if (cache.moveStatsIndex) {
+        for (const gid of currentGameIds) {
+          if (!needsExtraction.has(gid) && cache.moveStatsIndex[gid]) moveStatsData[gid] = cache.moveStatsIndex[gid];
         }
       }
       console.log(`[MistakesCache] Partial hit — extracting ${needsExtraction.size} of ${currentGameIds.size} games`);
@@ -3004,11 +3077,12 @@ function extractAllMistakes() {
     const result = extractMistakesForGame(game);
     rawMistakes.push(...result.mistakes);
     fenData[gameId] = result.fens;
+    moveStatsData[gameId] = result.moveStats;
   }
 
   // Save cache (raw mistakes before tactic suppression/sorting)
   if (!cacheHit || needsExtraction.size > 0) {
-    saveMistakesCache(rawMistakes, currentFingerprints, fenData);
+    saveMistakesCache(rawMistakes, currentFingerprints, fenData, moveStatsData);
   }
 
   // Build gameFenIndex from collected FEN data
@@ -3017,6 +3091,49 @@ function extractAllMistakes() {
     gameFenIndex.set(gid, new Set(fens));
   }
   fenIndexBuilding = false;
+
+  // Build positionMoveIndex for opening explorer
+  positionMoveIndex = new Map();
+  for (const game of allGames) {
+    const stats = moveStatsData[game.id];
+    if (!stats) continue;
+    const playerColor = game._playerColor || (
+      game.players?.white?.user?.name?.toLowerCase() === currentUsername.toLowerCase() ||
+      game.players?.white?.user?.id?.toLowerCase() === currentUsername.toLowerCase()
+        ? 'white' : 'black'
+    );
+    const { winner, whiteRating, blackRating } = getGameResultInfo(game);
+    const opponentColor = playerColor === 'white' ? 'black' : 'white';
+    const opponentName = game.players?.[opponentColor]?.user?.name || 'Unknown';
+    const opponentRating = (opponentColor === 'white' ? whiteRating : blackRating) || null;
+    const userRating = (playerColor === 'white' ? whiteRating : blackRating) || null;
+    const result = winner === playerColor ? 'win' : winner === opponentColor ? 'loss' : 'draw';
+
+    for (const ms of stats) {
+      if (!positionMoveIndex.has(ms.posKey)) {
+        positionMoveIndex.set(ms.posKey, new Map());
+      }
+      const posMap = positionMoveIndex.get(ms.posKey);
+      if (!posMap.has(ms.moveSan)) {
+        posMap.set(ms.moveSan, { san: ms.moveSan, uci: ms.moveUci, count: 0, whiteWins: 0, blackWins: 0, draws: 0, games: [] });
+      }
+      const entry = posMap.get(ms.moveSan);
+      entry.count++;
+      if (winner === 'white') entry.whiteWins++;
+      else if (winner === 'black') entry.blackWins++;
+      else entry.draws++;
+      entry.games.push({
+        gameId: game.id,
+        userColor: playerColor,
+        opponentName,
+        opponentRating,
+        userRating,
+        result,
+        source: game._source || 'lichess',
+      });
+    }
+  }
+  console.log(`[OpeningExplorer] Built positionMoveIndex with ${positionMoveIndex.size} positions`);
 
   // Restore game references
   allMistakes = rawMistakes.map(m => ({ ...m, game: gamesById.get(m.gameId) }));
@@ -3135,6 +3252,33 @@ function setFilter(el) {
 
 function fenPositionKey(fen) {
   return fen.split(' ').slice(0, 4).join(' ');
+}
+
+// Extract game result and player info for opening explorer stats
+function getGameResultInfo(game) {
+  // Determine winner: Lichess has game.winner ('white'|'black'|absent=draw)
+  // Chess.com: derive from PGN Result header
+  let winner = game.winner || null; // 'white', 'black', or null=draw
+  if (!winner && game.pgn) {
+    const rm = game.pgn.match(/\[Result\s+"([^"]+)"\]/);
+    if (rm) {
+      if (rm[1] === '1-0') winner = 'white';
+      else if (rm[1] === '0-1') winner = 'black';
+      // '1/2-1/2' or '*' → null (draw/unknown)
+    }
+  }
+  // Ratings: Lichess has game.players.white.rating; Chess.com PGN has WhiteElo/BlackElo
+  let whiteRating = game.players?.white?.rating || null;
+  let blackRating = game.players?.black?.rating || null;
+  if (!whiteRating && game.pgn) {
+    const wm = game.pgn.match(/\[WhiteElo\s+"(\d+)"\]/);
+    if (wm) whiteRating = parseInt(wm[1]);
+  }
+  if (!blackRating && game.pgn) {
+    const bm = game.pgn.match(/\[BlackElo\s+"(\d+)"\]/);
+    if (bm) blackRating = parseInt(bm[1]);
+  }
+  return { winner, whiteRating, blackRating };
 }
 
 let fenIndexBuilding = false;    // true while async build is in progress
@@ -3417,6 +3561,7 @@ function updateOpeningFilterUI() {
   const emptyMsg = document.getElementById('emptyMsg');
   const evalBar = document.getElementById('evalBar');
   const evalBtn = document.getElementById('btnEvalBar');
+  const lineDisplay = document.getElementById('openingLineDisplay');
 
   if (openingFilterMode) {
     // Show filter panel, hide training UI
@@ -3432,46 +3577,18 @@ function updateOpeningFilterUI() {
     const fenInput = document.getElementById('filterFenInput');
     if (filterChess) fenInput.value = filterChess.fen();
 
-    // Update move display
-    const moveDisplay = document.getElementById('filterMoveDisplay');
-    if (filterChess && filterMoveIdx > 0) {
-      // Replay from start to get move SANs
-      const sans = [];
-      const replay = new Chess();
-      for (let i = 1; i <= filterMoveIdx; i++) {
-        const prevFen = filterMoveHistory[i - 1];
-        const currFen = filterMoveHistory[i];
-        replay.load(prevFen);
-        // Find the move that leads to currFen
-        const legalMoves = replay.moves({ verbose: true });
-        for (const lm of legalMoves) {
-          replay.move(lm);
-          if (fenPositionKey(replay.fen()) === fenPositionKey(currFen)) {
-            const moveNum = Math.ceil(i / 2);
-            if (i % 2 === 1) sans.push(`${moveNum}. ${lm.san}`);
-            else sans.push(`${moveNum}… ${lm.san}`);
-            break;
-          }
-          replay.undo();
-        }
-      }
-      moveDisplay.textContent = sans.join(' ') || 'Starting position';
-    } else {
-      moveDisplay.textContent = 'Starting position';
-    }
+    // Replay filter history to get SANs
+    const moveSans = replayFilterMoveSans();
 
-    // Show match count or building indicator
-    if (fenIndexBuilding) {
-      moveDisplay.textContent += ' · ⟳ Indexing games…';
-    } else if (gameFenIndex) {
-      const key = filterChess ? fenPositionKey(filterChess.fen()) : null;
-      const startKey = fenPositionKey('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1');
-      if (key && key !== startKey) {
-        let matchCount = 0;
-        for (const [gid, fens] of gameFenIndex) { if (fens.has(key)) matchCount++; }
-        moveDisplay.textContent += ` · ${matchCount} game${matchCount !== 1 ? 's' : ''}`;
-      }
-    }
+    // Render opening line display in left panel
+    renderOpeningLineDisplay(moveSans);
+    if (lineDisplay) lineDisplay.classList.remove('hidden');
+
+    // Render explorer stats table in right panel
+    renderExplorerStats();
+
+    // Update filter arrows
+    updateFilterArrows();
 
     // Hide the chip while editing
     chip.style.display = 'none';
@@ -3484,32 +3601,25 @@ function updateOpeningFilterUI() {
     if (evalBtn) evalBtn.style.display = '';
     btn.classList.remove('active');
 
+    // Hide line display and clear arrows
+    if (lineDisplay) lineDisplay.classList.add('hidden');
+    filterArrows = [];
+    renderArrows();
+
     // Show/hide active filter chip
     if (openingFilterFen) {
       // Build move text for chip
+      const moveSans = replayFilterMoveSans();
       let chipText = '';
-      if (filterMoveHistory.length > 1 && filterMoveIdx > 0) {
-        const sans = [];
-        const replay = new Chess();
-        const limit = Math.min(filterMoveIdx, 6); // Show at most ~6 half-moves
-        for (let i = 1; i <= filterMoveIdx; i++) {
-          replay.load(filterMoveHistory[i - 1]);
-          const legalMoves = replay.moves({ verbose: true });
-          for (const lm of legalMoves) {
-            replay.move(lm);
-            if (fenPositionKey(replay.fen()) === fenPositionKey(filterMoveHistory[i])) {
-              if (i <= limit) {
-                const moveNum = Math.ceil(i / 2);
-                if (i % 2 === 1) sans.push(`${moveNum}.${lm.san}`);
-                else sans.push(lm.san);
-              }
-              break;
-            }
-            replay.undo();
-          }
-        }
-        if (filterMoveIdx > limit) sans.push('…');
-        chipText = sans.join(' ');
+      if (moveSans.length > 0) {
+        const limit = Math.min(moveSans.length, 6);
+        const parts = moveSans.slice(0, limit).map((s, i) => {
+          const halfMove = i + 1;
+          const moveNum = Math.ceil(halfMove / 2);
+          return halfMove % 2 === 1 ? `${moveNum}.${s.san}` : s.san;
+        });
+        if (moveSans.length > limit) parts.push('…');
+        chipText = parts.join(' ');
       }
       if (!chipText) chipText = 'Custom FEN';
       document.getElementById('openingFilterChipText').textContent = chipText;
@@ -3526,6 +3636,254 @@ function updateOpeningFilterUI() {
     // Restore eval bar visibility
     if (typeof updateEvalBar === 'function') updateEvalBar();
   }
+}
+
+// Replay filterMoveHistory to extract SANs for each half-move
+function replayFilterMoveSans() {
+  const result = [];
+  if (!filterChess || filterMoveIdx <= 0) return result;
+  const replay = new Chess();
+  for (let i = 1; i <= filterMoveIdx; i++) {
+    const prevFen = filterMoveHistory[i - 1];
+    const currFen = filterMoveHistory[i];
+    replay.load(prevFen);
+    const legalMoves = replay.moves({ verbose: true });
+    for (const lm of legalMoves) {
+      replay.move(lm);
+      if (fenPositionKey(replay.fen()) === fenPositionKey(currFen)) {
+        result.push({ san: lm.san, from: lm.from, to: lm.to, halfMoveIdx: i });
+        break;
+      }
+      replay.undo();
+    }
+  }
+  return result;
+}
+
+// Render the opening line display in the left panel
+function renderOpeningLineDisplay(moveSans) {
+  const el = document.getElementById('openingLineDisplay');
+  if (!el) return;
+  if (moveSans.length === 0) {
+    el.innerHTML = '<div class="opening-name">Starting position</div>';
+    return;
+  }
+
+  // Find opening name from any matching game
+  let openingName = '';
+  if (filterChess && gameFenIndex) {
+    const key = fenPositionKey(filterChess.fen());
+    const nameCount = {};
+    for (const game of allGames) {
+      const fens = gameFenIndex.get(game.id);
+      if (fens && fens.has(key) && game.opening?.name) {
+        nameCount[game.opening.name] = (nameCount[game.opening.name] || 0) + 1;
+      }
+    }
+    // Pick the most common opening name
+    let maxC = 0;
+    for (const [name, c] of Object.entries(nameCount)) {
+      if (c > maxC) { maxC = c; openingName = name; }
+    }
+  }
+
+  let html = '';
+  if (openingName) html += `<div class="opening-name">${escapeHtml(openingName)}</div>`;
+
+  // Build move pairs: 1. e4 e5  2. Nf3 ...
+  for (let i = 0; i < moveSans.length; i++) {
+    const halfMove = i + 1;
+    const moveNum = Math.ceil(halfMove / 2);
+    const isWhite = halfMove % 2 === 1;
+    const isActive = (i + 1) === filterMoveIdx;
+
+    if (isWhite) {
+      html += `<span class="move-pair"><span class="move-num">${moveNum}.</span>`;
+    }
+    html += `<span class="move-san${isActive ? ' active' : ''}" onclick="navigateFilterLine(${i + 1})">${moveSans[i].san}</span> `;
+    if (!isWhite || i === moveSans.length - 1) {
+      html += '</span>';
+    }
+  }
+  el.innerHTML = html;
+}
+
+// Navigate to a specific half-move in the filter line
+function navigateFilterLine(targetIdx) {
+  if (!filterChess || targetIdx < 0 || targetIdx >= filterMoveHistory.length) return;
+  filterMoveIdx = targetIdx;
+  filterChess.load(filterMoveHistory[filterMoveIdx]);
+  boardObj.position(filterChess.fen());
+  clearHighlights();
+  applyOpeningFilterFromBoard();
+}
+
+// Build a link to view a game on its platform
+function buildGameLink(gameId, source) {
+  if (source === 'chesscom' || gameId.startsWith('chesscom_')) {
+    const numId = gameId.replace('chesscom_', '');
+    return `https://www.chess.com/game/live/${numId}`;
+  }
+  return `https://lichess.org/${gameId}`;
+}
+
+// Render the explorer stats table in the right panel
+function renderExplorerStats() {
+  const container = document.getElementById('explorerStatsContainer');
+  if (!container) return;
+
+  const key = filterChess ? fenPositionKey(filterChess.fen()) : null;
+  const colorFilter = filters.color !== 'both' ? filters.color : null;
+
+  if (!key || !positionMoveIndex || !positionMoveIndex.has(key)) {
+    container.innerHTML = '<div class="explorer-no-data">No games found in this position.</div>';
+    return;
+  }
+
+  const posMap = positionMoveIndex.get(key);
+
+  // Filter by color if active — only show moves played as that color
+  // Determine whose turn it is from the FEN
+  const turnColor = key.split(' ')[1] === 'w' ? 'white' : 'black';
+
+  // Build rows: aggregate stats per move, optionally filtering by user color
+  const rows = [];
+  for (const [san, stats] of posMap) {
+    let filteredGames = stats.games;
+    if (colorFilter) {
+      // Only show this move if the user was playing as the color that's moving
+      // For "user's moves": turnColor must match colorFilter
+      // For "opponent's moves": turnColor must be opposite of colorFilter
+      // We show both — user's moves and opponent responses — but filter by which games qualify
+      filteredGames = stats.games.filter(g => g.userColor === colorFilter);
+    }
+    if (filteredGames.length === 0) continue;
+
+    let whiteWins = 0, blackWins = 0, draws = 0;
+    for (const g of filteredGames) {
+      if (g.result === 'win') { if (g.userColor === 'white') whiteWins++; else blackWins++; }
+      else if (g.result === 'loss') { if (g.userColor === 'white') blackWins++; else whiteWins++; }
+      else draws++;
+    }
+    rows.push({
+      san, uci: stats.uci, count: filteredGames.length,
+      whiteWins, blackWins, draws,
+      games: filteredGames,
+    });
+  }
+
+  rows.sort((a, b) => b.count - a.count);
+
+  if (rows.length === 0) {
+    container.innerHTML = '<div class="explorer-no-data">No games found in this position.</div>';
+    return;
+  }
+
+  let html = '<div class="explorer-stats">';
+  html += '<div class="explorer-stats-header"><span>Move</span><span style="text-align:center">Games</span><span>Results</span></div>';
+
+  const totalGames = rows.reduce((s, r) => s + r.count, 0);
+  const isUserMove = colorFilter ? (turnColor === colorFilter) : null;
+
+  for (const row of rows) {
+    html += `<div class="explorer-stats-row" onclick="explorerPlayMove('${row.uci}')">`;
+    html += `<span class="explorer-move">${row.san}</span>`;
+    html += `<span class="explorer-count">${row.count}</span>`;
+
+    if (row.count === 1) {
+      // Single game: show inline summary
+      const g = row.games[0];
+      const userName = currentUsername || 'you';
+      const resultStr = g.result === 'win' ? '1-0' : g.result === 'loss' ? '0-1' : '½-½';
+      // Show from user perspective
+      const userR = g.userRating ? `(${g.userRating})` : '';
+      const oppR = g.opponentRating ? `(${g.opponentRating})` : '';
+      const link = buildGameLink(g.gameId, g.source);
+      html += `<span class="explorer-single-game">${escapeHtml(userName)}${userR} ${resultStr} ${escapeHtml(g.opponentName)}${oppR}<a href="${link}" target="_blank" rel="noopener">↗</a></span>`;
+    } else {
+      // Results bar
+      const total = row.whiteWins + row.draws + row.blackWins;
+      const wPct = total > 0 ? (row.whiteWins / total * 100) : 0;
+      const dPct = total > 0 ? (row.draws / total * 100) : 0;
+      const bPct = total > 0 ? (row.blackWins / total * 100) : 0;
+      html += '<span class="explorer-bar">';
+      if (wPct > 0) html += `<span class="explorer-bar-w" style="width:${wPct}%">${wPct >= 15 ? row.whiteWins : ''}</span>`;
+      if (dPct > 0) html += `<span class="explorer-bar-d" style="width:${dPct}%">${dPct >= 15 ? row.draws : ''}</span>`;
+      if (bPct > 0) html += `<span class="explorer-bar-b" style="width:${bPct}%">${bPct >= 15 ? row.blackWins : ''}</span>`;
+      html += '</span>';
+    }
+
+    html += '</div>';
+  }
+  html += '</div>';
+
+  // Footer
+  const colorLabel = colorFilter || boardObj?.orientation() || 'white';
+  html += `<div class="explorer-footer">`;
+  html += `Showing moves played ${isUserMove === true ? 'by' : isUserMove === false ? 'against' : 'in games of'} <b>${escapeHtml(currentUsername || 'you')}</b>`;
+  if (colorFilter) html += ` as <b>${colorLabel}</b>`;
+  html += ` in this position. ${totalGames} game${totalGames !== 1 ? 's' : ''}.`;
+  html += `</div>`;
+
+  container.innerHTML = html;
+}
+
+// Play a move from the explorer stats table
+function explorerPlayMove(uci) {
+  if (!filterChess) return;
+  const from = uci.substring(0, 2);
+  const to = uci.substring(2, 4);
+  const promo = uci.length > 4 ? uci[4] : undefined;
+  const move = filterChess.move({ from, to, promotion: promo || 'q' });
+  if (!move) return;
+  filterMoveHistory = filterMoveHistory.slice(0, filterMoveIdx + 1);
+  filterMoveHistory.push(filterChess.fen());
+  filterMoveIdx = filterMoveHistory.length - 1;
+  boardObj.position(filterChess.fen());
+  clearHighlights();
+  highlightSquaresWithColor(from, to, 'var(--accent)');
+  applyOpeningFilterFromBoard();
+}
+
+// Update filter arrows based on positionMoveIndex for current position
+function updateFilterArrows() {
+  filterArrows = [];
+  if (!openingFilterMode || !filterChess || !positionMoveIndex) { renderArrows(); return; }
+
+  const key = fenPositionKey(filterChess.fen());
+  const posMap = positionMoveIndex.get(key);
+  if (!posMap || posMap.size === 0) { renderArrows(); return; }
+
+  const colorFilter = filters.color !== 'both' ? filters.color : null;
+
+  // Collect moves with their counts
+  const arrowData = [];
+  for (const [san, stats] of posMap) {
+    let count = stats.count;
+    if (colorFilter) {
+      count = stats.games.filter(g => g.userColor === colorFilter).length;
+    }
+    if (count === 0) continue;
+    const from = stats.uci.substring(0, 2);
+    const to = stats.uci.substring(2, 4);
+    arrowData.push({ from, to, count });
+  }
+
+  if (arrowData.length === 0) { renderArrows(); return; }
+
+  const maxCount = Math.max(...arrowData.map(a => a.count));
+  for (const a of arrowData) {
+    const opacity = 0.2 + 0.6 * (a.count / maxCount);
+    filterArrows.push({ from: a.from, to: a.to, opacity });
+  }
+  renderArrows();
+}
+
+// Simple HTML escaper
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
 }
 
 function applyFilters() {
@@ -5977,7 +6335,7 @@ function renderArrows() {
     const boardEl = document.querySelector('#board [class^="board-"]');
     if (!boardEl) return;
 
-    const hasSomething = activeArrows.size > 0 || ghostArrow || bestMoveArrow || hintArrow;
+    const hasSomething = activeArrows.size > 0 || ghostArrow || bestMoveArrow || hintArrow || filterArrows.length > 0;
     svg.classList.toggle('hidden', !hasSomething);
     if (!hasSomething) { svg.innerHTML = ''; return; }
 
@@ -6032,6 +6390,8 @@ function renderArrows() {
         </g>`;
     };
 
+    // Filter mode frequency arrows (behind everything)
+    for (const fa of filterArrows) drawOne(fa.from, fa.to, 'rgba(180, 160, 100, ' + fa.opacity + ')', 1);
     // Best move arrow first (behind user arrows)
     if (bestMoveArrow) drawOne(bestMoveArrow.from, bestMoveArrow.to, 'rgba(62, 207, 142, 0.7)', 1);
     // Hint arrow
