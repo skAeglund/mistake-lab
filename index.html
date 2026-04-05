@@ -1070,7 +1070,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix mobile: switch to training layout before board init in filter mode</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Preserve filter board orientation across filter mode re-entries</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1340,6 +1340,7 @@ let fenIndexGameCount = 0;       // allGames.length when index was built
 let savedBoardState = null;      // { fen, orientation, mistakeIdx } to restore after filter mode
 let positionMoveIndex = null;    // Map<positionKey, Map<moveSAN, MoveStats>> for opening explorer
 let filterArrows = [];           // [{from, to, opacity}] frequency arrows in filter mode
+let savedFilterOrientation = null; // board orientation to restore when re-entering filter mode
 
 // ─── Maia 3 state ───
 let maiaSession = null;       // ONNX InferenceSession
@@ -3399,13 +3400,13 @@ function enterOpeningFilter() {
   // Initialize board if needed (must happen after mobile layout switch)
   if (!boardObj) { document.getElementById('board').offsetHeight; initBoard(); }
   boardObj.position(filterChess.fen());
-  // Orient board to white for filter mode (standard view)
-  boardObj.orientation('white');
 
-  // Sync color filter to board perspective
-  filters.color = 'white';
+  // Restore saved filter orientation, or default to white on first entry
+  const filterOrientation = savedFilterOrientation || 'white';
+  boardObj.orientation(filterOrientation);
+  filters.color = filterOrientation;
   document.querySelectorAll('.filter-chip[data-filter="color"]').forEach(c => {
-    c.classList.toggle('active', c.dataset.value === 'white');
+    c.classList.toggle('active', c.dataset.value === filterOrientation);
   });
 
   applyFilters();
@@ -3419,11 +3420,15 @@ function enterOpeningFilter() {
 function exitOpeningFilter(clearFilter) {
   openingFilterMode = false;
 
+  // Save filter orientation for re-entry
+  savedFilterOrientation = boardObj ? boardObj.orientation() : null;
+
   if (clearFilter) {
     openingFilterFen = null;
     filterChess = null;
     filterMoveHistory = [];
     filterMoveIdx = -1;
+    savedFilterOrientation = null;
   }
 
   // Recompute filters first so filteredMistakes is up to date
@@ -3470,6 +3475,7 @@ function clearOpeningFilter() {
     filterChess = null;
     filterMoveHistory = [];
     filterMoveIdx = -1;
+    savedFilterOrientation = null;
     applyFilters();
     gameListDisplayLimit = 50;
     reviewListDisplayLimit = 50;
