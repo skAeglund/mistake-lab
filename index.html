@@ -1008,7 +1008,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Auto-select color filter from board perspective on filter entry</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Exit filter mode when entering review mode</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3693,6 +3693,20 @@ function renderGameList() {
 
 // ─── Review mode ───
 function toggleReviewMode() {
+  // Exit opening filter mode (keep the filter active)
+  if (openingFilterMode) {
+    openingFilterMode = false;
+    savedBoardState = null;
+    document.getElementById('openingFilterPanel').classList.add('hidden');
+    document.getElementById('feedbackArea').classList.remove('hidden');
+    document.getElementById('positionNav').style.display = '';
+    const evalBar = document.getElementById('evalBar');
+    const evalBtn = document.getElementById('btnEvalBar');
+    if (evalBar) evalBar.style.display = '';
+    if (evalBtn) evalBtn.style.display = '';
+    document.getElementById('btnOpeningFilter').classList.remove('active');
+    updateOpeningFilterUI();
+  }
   reviewMode = !reviewMode;
   const btn = document.getElementById('btnReviewMode');
   const title = document.getElementById('panelTitle');
