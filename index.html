@@ -1070,7 +1070,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix filter drag-drop: skip animation when piece already at target</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Restore green filter arrows</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -6560,7 +6560,7 @@ function renderArrows() {
     for (const fa of filterArrows) {
       // Skip the hovered arrow — it will be drawn separately in blue
       if (hoverFilterArrow && fa.from === hoverFilterArrow.from && fa.to === hoverFilterArrow.to) continue;
-      drawOne(fa.from, fa.to, 'rgba(255, 236, 53, ' + fa.opacity + ')', 1);
+      drawOne(fa.from, fa.to, 'rgba(21, 120, 27, ' + fa.opacity + ')', 1);
     }
     // Hovered move arrow (blue, high opacity)
     if (hoverFilterArrow) drawOne(hoverFilterArrow.from, hoverFilterArrow.to, 'rgba(66, 133, 244, 0.8)', 1);
