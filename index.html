@@ -1070,7 +1070,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Explorer: hover stats row highlights arrow in blue</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix filter drag-drop: skip animation when piece already at target</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3530,7 +3530,7 @@ function applyOpeningFilterFromBoard() {
   updateOpeningFilterUI();
 }
 
-function filterMakeMove(from, to) {
+function filterMakeMove(from, to, animate) {
   if (!filterChess) return null;
   const move = filterChess.move({ from, to, promotion: 'q' });
   if (!move) return null;
@@ -3540,7 +3540,7 @@ function filterMakeMove(from, to) {
   filterMoveHistory.push(filterChess.fen());
   filterMoveIdx = filterMoveHistory.length - 1;
 
-  boardObj.position(filterChess.fen());
+  boardObj.position(filterChess.fen(), animate !== false);
   clearHighlights();
   highlightSquaresWithColor(from, to, 'var(--accent)');
   applyOpeningFilterFromBoard();
@@ -4706,7 +4706,7 @@ function onDrop(source, target) {
   if (openingFilterMode) {
     if (source === target) return 'snapback';
     clearSelection();
-    const move = filterMakeMove(source, target);
+    const move = filterMakeMove(source, target, false);
     return move ? undefined : 'snapback';
   }
   if (!gameEngine) return 'snapback';
