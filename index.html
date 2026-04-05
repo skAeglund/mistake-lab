@@ -1068,7 +1068,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix mobile: constrain explorer panel so board stays visible</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Move opening line display to center panel (visible on mobile)</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1129,7 +1129,6 @@
           <button class="chip-close" onclick="event.stopPropagation();clearOpeningFilter()" title="Clear opening filter">✕</button>
         </span>
       </div>
-      <div class="opening-line-display hidden" id="openingLineDisplay"></div>
     </div>
     <div class="game-list" id="gameList"></div>
   </div>
@@ -1166,6 +1165,7 @@
       <button class="btn btn-ghost btn-sm hidden" id="btnLichess" onclick="openLichessAnalysis()" title="Open in Lichess analysis board">🔍 Analysis</button>
       <button class="btn btn-ghost btn-sm hidden" id="btnViewGame" onclick="openGameOnSite()" title="View the original game on Lichess or Chess.com">♟ View Game</button>
     </div>
+    <div class="opening-line-display hidden" id="openingLineDisplay"></div>
     <div class="empty-board-msg" id="emptyMsg">
       <svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
         <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
