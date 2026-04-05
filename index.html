@@ -1008,7 +1008,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix FEN index: set game count after allGames is finalized</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Auto-select color filter from board perspective on filter entry</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3229,6 +3229,12 @@ function enterOpeningFilter() {
   // Orient board to white for filter mode (standard view)
   boardObj.orientation('white');
 
+  // Sync color filter to board perspective
+  filters.color = 'white';
+  document.querySelectorAll('.filter-chip[data-filter="color"]').forEach(c => {
+    c.classList.toggle('active', c.dataset.value === 'white');
+  });
+
   // Close drawer and switch to training mode on mobile so board is visible
   closeDrawer();
   if (document.body.classList.contains('mobile-browsing')) {
@@ -3236,6 +3242,11 @@ function enterOpeningFilter() {
     document.body.classList.add('mobile-training');
   }
 
+  applyFilters();
+  gameListDisplayLimit = 50;
+  if (reviewMode) renderReviewList();
+  else renderGameList();
+  updateSessionProgress();
   updateOpeningFilterUI();
 }
 
