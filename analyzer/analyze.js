@@ -745,14 +745,19 @@ function checkUniqueness(mpvResults, perspective, threshold) {
 /**
  * Generate a Maia opponent line for a tactic. Uses Maia for opponent moves
  * and Stockfish to verify user move uniqueness. Returns a complete line
- * (array of move objects) or null if no valid tactic emerges.
+ * (array of move objects) or null if Maia never diverges from the primary line.
  */
-async function generateMaiaLine(sf, maia, fenBefore, playerColor, tacticDepth) {
+async function generateMaiaLine(sf, maia, fenBefore, playerColor, tacticDepth, primaryLine) {
   if (!maia) return null;
+
+  // Extract opponent moves from the primary line for divergence detection
+  const primaryOppMoves = primaryLine.filter(m => !m.isUser).map(m => m.uci);
 
   const tacticMoves = [];
   const chess = new Chess(fenBefore);
   let isFirst = true;
+  let diverged = false;
+  let oppMoveIdx = 0; // index into primaryOppMoves
 
   while (tacticMoves.length < 14) {
     // --- User's move (Stockfish MultiPV to check uniqueness) ---
@@ -780,6 +785,14 @@ async function generateMaiaLine(sf, maia, fenBefore, playerColor, tacticDepth) {
     const maiaMove = await maia.predict(chess.fen());
     if (!maiaMove) break;
 
+    // Check if Maia diverges from the primary line
+    if (!diverged && oppMoveIdx < primaryOppMoves.length) {
+      if (maiaMove !== primaryOppMoves[oppMoveIdx]) diverged = true;
+      oppMoveIdx++;
+    } else {
+      diverged = true; // past the end of the primary line = diverged
+    }
+
     const oppMove = chess.move(maiaMove, { sloppy: true });
     if (!oppMove) break;
 
@@ -793,6 +806,9 @@ async function generateMaiaLine(sf, maia, fenBefore, playerColor, tacticDepth) {
 
     if (chess.in_checkmate() || chess.in_stalemate() || chess.in_draw()) break;
   }
+
+  // Only return if Maia actually diverged from the primary line
+  if (!diverged) return null;
 
   // Must have at least 2 user moves
   const userMoveCount = tacticMoves.filter(m => m.isUser).length;
@@ -922,31 +938,18 @@ async function scanGameForTactics(sf, game, tacticDepth, maia) {
     }
 
     // Generate a Maia opponent line if available
-    let maiaOpponentMoves = undefined; // comma-joined UCI of Maia's opponent moves
+    let maiaOpponentMoves = undefined;
     if (maia && bestChain.length >= 3) {
-      const maiaLine = await generateMaiaLine(sf, maia, cand.fen, playerColor, tacticDepth);
+      const maiaLine = await generateMaiaLine(sf, maia, cand.fen, playerColor, tacticDepth, bestChain);
       if (maiaLine && maiaLine.length >= 3) {
+        // Maia diverged — add as alternative if it differs from existing lines
         maiaOpponentMoves = maiaLine.filter(m => !m.isUser).map(m => m.uci).join(',');
-
-        // Check if Maia's line matches or is a prefix/extension of any existing line.
-        // A line that starts with the same opponent moves but just continues further
-        // is a continuation, not a true alternative.
-        const allLines = [bestChain, ...alternativeLines];
-        const isDuplicate = allLines.some(line => {
-          const lineOpp = line.filter(m => !m.isUser).map(m => m.uci).join(',');
-          return lineOpp === maiaOpponentMoves
-            || maiaOpponentMoves.startsWith(lineOpp + ',')
-            || maiaOpponentMoves.startsWith(lineOpp)
-            || lineOpp.startsWith(maiaOpponentMoves + ',')
-            || lineOpp.startsWith(maiaOpponentMoves);
-        });
-
-        if (!isDuplicate) {
-          // Unique Maia line — add as new alternative
-          const taggedLine = maiaLine.map(m => m.isUser ? m : { ...m, source: 'maia' });
-          alternativeLines.push(taggedLine);
-        }
-        // maiaOpponentMoves stored on the tactic lets the UI identify which line(s) Maia agrees with.
+        const taggedLine = maiaLine.map(m => m.isUser ? m : { ...m, source: 'maia' });
+        alternativeLines.push(taggedLine);
+      } else {
+        // Maia agreed with the primary line (or couldn't produce a valid tactic)
+        // Still record what Maia would play for UI labeling
+        maiaOpponentMoves = bestChain.filter(m => !m.isUser).map(m => m.uci).join(',');
       }
     }
 
