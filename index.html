@@ -1008,7 +1008,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cache FEN index alongside mistakes — no separate build pass</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Show loading indicator before extraction with browser yield</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2770,6 +2770,8 @@ async function fetchGames(autoUsername) {
       localStorage.setItem('mistakelab_username', username);
       saveGamesCache(username, buildGameCacheObj(username, allGames));
 
+      btn.textContent = `Analyzing ${allGames.length} games…`;
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
       extractAllMistakes();
       applyFilters();
       await loadFromGist(); // Load SRS progress
@@ -2783,6 +2785,8 @@ async function fetchGames(autoUsername) {
         // Render immediately from cache
         allGames = cachedGames;
         localStorage.setItem('mistakelab_username', username);
+        btn.textContent = `Analyzing ${allGames.length} games…`;
+        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
         extractAllMistakes();
         applyFilters();
         showMainApp();
@@ -2822,6 +2826,9 @@ async function fetchGames(autoUsername) {
       saveGamesCache(username, buildGameCacheObj(username, allGames));
 
       // Re-extract and re-render
+      if (appShown) setSyncStatus('syncing', 'Analyzing…');
+      else btn.textContent = `Analyzing ${allGames.length} games…`;
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
       extractAllMistakes();
       applyFilters();
 
