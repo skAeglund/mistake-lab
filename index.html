@@ -1070,7 +1070,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Remove dead handleInvalidateTactic/confirmInvalidateTactic code</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Restore convert-to-mistake dialog when last line invalidated on missed tactic</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -5241,13 +5241,32 @@ function handleInvalidateLine() {
 
   // Check if any valid lines remain for this tactic
   if (!tacticHasValidLines(m)) {
-    // No valid lines left — remove the entire tactic
-    allMistakes = allMistakes.filter(mm => posId(mm) !== pid);
-    applyFilters();
-    renderGameList();
-    buildReviewQueue();
-    updateSessionProgress();
-    showFeedback('info', 'Tactic removed', 'All lines invalidated — tactic won\'t appear in reviews.');
+    if (m.found === false) {
+      // User missed this tactic — offer to convert the first move to a single-move mistake
+      const container = document.getElementById('feedbackContainer');
+      const div = document.createElement('div');
+      div.className = 'feedback-box';
+      div.style.cssText = 'background:rgba(255,193,7,0.08);border-left:3px solid var(--yellow);';
+      div.innerHTML = `
+        <div class="feedback-title" style="color:var(--yellow)">Remove this tactic?</div>
+        <div class="feedback-text">
+          You missed this in the game. Converting to a mistake will keep the first move as a single-move review.
+          <div style="margin-top:8px;display:flex;gap:8px;">
+            <button class="btn btn-ghost btn-sm" style="border-color:var(--yellow);color:var(--yellow);" onclick="confirmRemoveLastLine(true)">Convert to mistake</button>
+            <button class="btn btn-ghost btn-sm" onclick="confirmRemoveLastLine(false)">Just remove</button>
+          </div>
+        </div>
+      `;
+      container.insertBefore(div, container.firstChild);
+    } else {
+      // No valid lines left — remove the entire tactic
+      allMistakes = allMistakes.filter(mm => posId(mm) !== pid);
+      applyFilters();
+      renderGameList();
+      buildReviewQueue();
+      updateSessionProgress();
+      showFeedback('info', 'Tactic removed', 'All lines invalidated — tactic won\'t appear in reviews.');
+    }
     return;
   }
 
@@ -5280,6 +5299,30 @@ function handleInvalidateLine() {
   } else {
     // No more unsolved lines — finish the tactic
     finishTacticComplete();
+  }
+}
+
+function confirmRemoveLastLine(convertToMistake) {
+  if (convertToMistake) {
+    // Full re-extraction to un-suppress the underlying single-move mistake
+    extractAllMistakes();
+    applyFilters();
+    renderGameList();
+    buildReviewQueue();
+    updateSessionProgress();
+    showFeedback('info', 'Converted to mistake', 'The first move will now appear as a single-move review.');
+  } else {
+    // Fast remove — tactic disappears, underlying mistake stays suppressed until next load
+    const m = filteredMistakes[currentMistakeIdx];
+    if (m) {
+      const pid = posId(m);
+      allMistakes = allMistakes.filter(mm => posId(mm) !== pid);
+    }
+    applyFilters();
+    renderGameList();
+    buildReviewQueue();
+    updateSessionProgress();
+    showFeedback('info', 'Tactic removed', 'This tactic won\'t appear in reviews.');
   }
 }
 
