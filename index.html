@@ -1070,7 +1070,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add per-line invalidation for tactics (Bad Line button)</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Simplify: replace Bad Tactic with Bad Line for all tactics</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -4976,10 +4976,7 @@ function finishTacticComplete(lastMoveSan) {
 
   const linesLabel = tacticAltLines.length > 0
     ? ` (${tacticAltLines.length + 1} lines)` : '';
-  const isMultiLine = tacticAltLines.length > 0 || getInvalidatedLines(pid).size > 0;
-  const invalidateBtn = isMultiLine
-    ? `<div style="margin-top:8px;"><button class="btn btn-ghost btn-sm" style="font-size:10px;color:var(--text-muted);border-color:var(--border);" onclick="handleInvalidateLine()">✕ Bad line</button></div>`
-    : `<div style="margin-top:8px;"><button class="btn btn-ghost btn-sm" style="font-size:10px;color:var(--text-muted);border-color:var(--border);" onclick="handleInvalidateTactic()">✕ Bad tactic</button></div>`;
+  const invalidateBtn = `<div style="margin-top:8px;"><button class="btn btn-ghost btn-sm" style="font-size:10px;color:var(--text-muted);border-color:var(--border);" onclick="handleInvalidateLine()">✕ Bad line</button></div>`;
 
   const moveLabel = lastMoveSan ? `<code>${escHtml(lastMoveSan)}</code> — solved` : 'Solved';
   showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
