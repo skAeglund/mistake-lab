@@ -825,6 +825,11 @@
     .info-card h4 { margin-bottom: 6px; }
     .engine-line { padding: 10px; }
 
+    /* Opening explorer: constrain panel so board stays visible */
+    .opening-filter-panel { padding: 8px; }
+    #explorerStatsContainer { max-height: 35vh; overflow-y: auto; }
+    .opening-line-display { font-size: 11px; }
+
     /* Maia controls compact */
     .maia-controls { padding: 10px 12px; }
 
@@ -1063,7 +1068,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Opening explorer: stats table, move line, frequency arrows</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix mobile: constrain explorer panel so board stays visible</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
