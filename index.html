@@ -1008,7 +1008,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Opening filter: legal move dots and move highlighting</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cache FEN index alongside mistakes — no separate build pass</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1438,7 +1438,7 @@ let syncDebounceTimer = null;
 let appShown = false; // guard to prevent double showMainApp()
 const GIST_FILENAME = 'mistakelab_progress.json';
 const GIST_GAMES_FILENAME = 'mistakelab_games.json';
-const MISTAKES_CACHE_VERSION = 1;
+const MISTAKES_CACHE_VERSION = 2;
 const MISTAKES_CACHE_PARAMS = { wpDropThreshold: 10 };
 
 // Populate login fields from saved config + auto-load
@@ -1677,7 +1677,7 @@ function loadMistakesCache() {
   } catch { return null; }
 }
 
-function saveMistakesCache(rawMistakes, gameFingerprints) {
+function saveMistakesCache(rawMistakes, gameFingerprints, fenData) {
   try {
     const serialized = rawMistakes.map(m => {
       const obj = { ...m };
@@ -1689,10 +1689,17 @@ function saveMistakesCache(rawMistakes, gameFingerprints) {
       params: { ...MISTAKES_CACHE_PARAMS },
       games: gameFingerprints,
       mistakes: serialized,
+      fenIndex: fenData || {},
     };
     localStorage.setItem(getMistakesCacheKey(), JSON.stringify(cache));
   } catch (e) {
-    console.warn('[MistakesCache] Save failed:', e.message);
+    // If quota exceeded, retry without FEN index
+    if (e.name === 'QuotaExceededError' && fenData) {
+      console.warn('[MistakesCache] Quota exceeded — saving without FEN index');
+      saveMistakesCache(rawMistakes, gameFingerprints, null);
+    } else {
+      console.warn('[MistakesCache] Save failed:', e.message);
+    }
   }
 }
 
@@ -2862,11 +2869,16 @@ function extractMistakesForGame(game) {
 
   // Walk the moves, rebuild positions with chess.js
   const chess = new Chess(game.initialFen || undefined);
-  for (let i = 0; i < moves.length && i < analysis.length; i++) {
+  const fens = [fenPositionKey(chess.fen())]; // collect all position keys for opening filter index
+  for (let i = 0; i < moves.length; i++) {
     const fenBefore = chess.fen();
     const san = moves[i];
     const moveResult = chess.move(san, { sloppy: true });
     if (!moveResult) continue;
+    fens.push(fenPositionKey(chess.fen()));
+
+    // Mistake extraction only within analysis bounds
+    if (i >= analysis.length) continue;
 
     const ply = i + 1;
     const isOurMove = (playerColor === 'white' && ply % 2 === 1) ||
@@ -2925,7 +2937,7 @@ function extractMistakesForGame(game) {
       });
     }
   }
-  return mistakes;
+  return { mistakes, fens };
 }
 
 function extractAllMistakes() {
@@ -2938,6 +2950,7 @@ function extractAllMistakes() {
   let rawMistakes = [];
   let needsExtraction = new Set();
   let cacheHit = false;
+  const fenData = {}; // gameId → array of position keys (for FEN index)
 
   if (cache) {
     // Find games needing extraction: new games or fingerprint changed
@@ -2953,10 +2966,22 @@ function extractAllMistakes() {
       // Full cache hit — use cached mistakes (filter out games no longer present)
       rawMistakes = cache.mistakes.filter(m => currentGameIds.has(m.gameId));
       cacheHit = true;
+      // Restore cached FEN data
+      if (cache.fenIndex) {
+        for (const gid of currentGameIds) {
+          if (cache.fenIndex[gid]) fenData[gid] = cache.fenIndex[gid];
+        }
+      }
       console.log(`[MistakesCache] Full cache hit — ${rawMistakes.length} mistakes from ${currentGameIds.size} games`);
     } else {
       // Partial cache hit — keep cached mistakes for unchanged games, extract the rest
       rawMistakes = cache.mistakes.filter(m => currentGameIds.has(m.gameId) && !needsExtraction.has(m.gameId));
+      // Restore cached FEN data for unchanged games
+      if (cache.fenIndex) {
+        for (const gid of currentGameIds) {
+          if (!needsExtraction.has(gid) && cache.fenIndex[gid]) fenData[gid] = cache.fenIndex[gid];
+        }
+      }
       console.log(`[MistakesCache] Partial hit — extracting ${needsExtraction.size} of ${currentGameIds.size} games`);
     }
   } else {
@@ -2969,14 +2994,23 @@ function extractAllMistakes() {
   for (const gameId of needsExtraction) {
     const game = gamesById.get(gameId);
     if (!game) continue;
-    const extracted = extractMistakesForGame(game);
-    rawMistakes.push(...extracted);
+    const result = extractMistakesForGame(game);
+    rawMistakes.push(...result.mistakes);
+    fenData[gameId] = result.fens;
   }
 
   // Save cache (raw mistakes before tactic suppression/sorting)
   if (!cacheHit || needsExtraction.size > 0) {
-    saveMistakesCache(rawMistakes, currentFingerprints);
+    saveMistakesCache(rawMistakes, currentFingerprints, fenData);
   }
+
+  // Build gameFenIndex from collected FEN data
+  gameFenIndex = new Map();
+  for (const [gid, fens] of Object.entries(fenData)) {
+    gameFenIndex.set(gid, new Set(fens));
+  }
+  fenIndexGameCount = allGames.length;
+  fenIndexBuilding = false;
 
   // Restore game references
   allMistakes = rawMistakes.map(m => ({ ...m, game: gamesById.get(m.gameId) }));
@@ -3097,16 +3131,14 @@ function fenPositionKey(fen) {
 let fenIndexBuilding = false;    // true while async build is in progress
 
 function buildFenIndex() {
-  if (fenIndexBuilding) return; // already in progress
-  if (gameFenIndex && fenIndexGameCount === allGames.length) {
-    // Already built and up to date — apply immediately
-    if (openingFilterMode) applyOpeningFilterFromBoard();
-    return;
-  }
+  // Index is normally built during extractAllMistakes — this is a fallback
+  if (fenIndexBuilding) return;
+  if (gameFenIndex && fenIndexGameCount === allGames.length) return;
+
   fenIndexBuilding = true;
   const t0 = performance.now();
   const newIndex = new Map();
-  const games = allGames.slice(); // snapshot
+  const games = allGames.slice();
   const BATCH = 50;
   let i = 0;
 
@@ -3128,15 +3160,11 @@ function buildFenIndex() {
     if (i < games.length) {
       setTimeout(processBatch, 0);
     } else {
-      // Done
       gameFenIndex = newIndex;
       fenIndexGameCount = games.length;
       fenIndexBuilding = false;
-      console.log(`[OpeningFilter] Built FEN index for ${games.length} games (${newIndex.size} entries) in ${(performance.now()-t0).toFixed(0)}ms`);
-      // Apply the filter now that the index is ready
-      if (openingFilterMode || openingFilterFen) {
-        applyOpeningFilterFromBoard();
-      }
+      console.log(`[OpeningFilter] Fallback FEN index built for ${games.length} games in ${(performance.now()-t0).toFixed(0)}ms`);
+      if (openingFilterMode || openingFilterFen) applyOpeningFilterFromBoard();
     }
   }
   processBatch();
