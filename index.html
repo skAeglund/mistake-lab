@@ -1008,7 +1008,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Async FEN index build: non-blocking opening filter</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Opening filter: add flip board with color filter sync</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1126,6 +1126,7 @@
         Play moves on the board or paste a FEN. Use ← → to undo/redo.
       </div>
       <div class="filter-actions">
+        <button class="btn btn-ghost btn-sm" onclick="filterFlipBoard()">⇅ Flip</button>
         <button class="btn btn-ghost btn-sm" onclick="filterReset()">↺ Reset</button>
         <button class="btn btn-ghost btn-sm" onclick="exitOpeningFilter(false)" style="border-color:var(--accent);color:var(--accent)">✓ Done</button>
         <button class="btn btn-ghost btn-sm" onclick="clearOpeningFilter()">✕ Clear</button>
@@ -3308,6 +3309,23 @@ function filterRedoMove() {
   filterChess.load(filterMoveHistory[filterMoveIdx]);
   boardObj.position(filterChess.fen());
   applyOpeningFilterFromBoard();
+}
+
+function filterFlipBoard() {
+  if (!boardObj) return;
+  const newOrientation = boardObj.orientation() === 'white' ? 'black' : 'white';
+  boardObj.orientation(newOrientation);
+  // Sync the color filter to match board perspective
+  filters.color = newOrientation;
+  document.querySelectorAll('.filter-chip[data-filter="color"]').forEach(c => {
+    c.classList.toggle('active', c.dataset.value === newOrientation);
+  });
+  applyFilters();
+  gameListDisplayLimit = 50;
+  if (reviewMode) renderReviewList();
+  else renderGameList();
+  updateSessionProgress();
+  updateOpeningFilterUI();
 }
 
 function filterReset() {
