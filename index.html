@@ -173,6 +173,49 @@
   }
   .filter-chip:hover:not(.active) { border-color: var(--border-active); color: var(--text-secondary); }
 
+  /* Opening filter */
+  .opening-filter-chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 4px 8px 4px 10px; border-radius: 20px;
+    font-size: 11px; font-weight: 600; font-family: var(--font-mono, monospace);
+    border: 1px solid var(--accent); color: var(--accent);
+    background: var(--accent-glow); cursor: pointer;
+    max-width: 100%; overflow: hidden;
+  }
+  .opening-filter-chip .chip-text {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .opening-filter-chip .chip-close {
+    flex-shrink: 0; width: 16px; height: 16px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    background: transparent; border: none; color: var(--accent);
+    cursor: pointer; font-size: 13px; line-height: 1; padding: 0;
+  }
+  .opening-filter-chip .chip-close:hover { background: rgba(255,255,255,0.1); }
+
+  .opening-filter-panel {
+    padding: 12px;
+  }
+  .opening-filter-panel h4 {
+    margin: 0 0 8px; font-size: 13px; color: var(--text-secondary);
+  }
+  .opening-filter-panel .fen-input {
+    width: 100%; padding: 6px 8px; font-size: 11px;
+    font-family: var(--font-mono, monospace);
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text-primary);
+    outline: none; margin-bottom: 8px;
+  }
+  .opening-filter-panel .fen-input:focus { border-color: var(--accent); }
+  .opening-filter-panel .filter-moves {
+    font-size: 12px; color: var(--text-secondary);
+    font-family: var(--font-mono, monospace);
+    margin-bottom: 10px; min-height: 20px; line-height: 1.6;
+  }
+  .opening-filter-panel .filter-actions {
+    display: flex; gap: 6px; flex-wrap: wrap;
+  }
+
   .game-list {
     flex: 1; overflow-y: auto; padding: 8px;
   }
@@ -965,7 +1008,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix alt line prefix dedup and 0-moves skip</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add opening filter: filter games by position with transposition support</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1019,6 +1062,13 @@
         <button class="filter-chip" data-filter="platform" data-value="lichess" onclick="setFilter(this)">Lichess</button>
         <button class="filter-chip" data-filter="platform" data-value="chesscom" onclick="setFilter(this)">Chess.com</button>
       </div>
+      <div class="filter-row" style="margin-top:6px;" id="openingFilterRow">
+        <button class="filter-chip" id="btnOpeningFilter" onclick="toggleOpeningFilter()">♟ Opening</button>
+        <span id="openingFilterChip" class="opening-filter-chip" style="display:none;" onclick="enterOpeningFilter()">
+          <span class="chip-text" id="openingFilterChipText"></span>
+          <button class="chip-close" onclick="event.stopPropagation();clearOpeningFilter()" title="Clear opening filter">✕</button>
+        </span>
+      </div>
     </div>
     <div class="game-list" id="gameList"></div>
   </div>
@@ -1065,6 +1115,22 @@
 
   <!-- Right panel: Feedback -->
   <div class="panel-right">
+    <div class="opening-filter-panel hidden" id="openingFilterPanel">
+      <h4>♟ Opening Filter</h4>
+      <div class="filter-moves" id="filterMoveDisplay">Starting position</div>
+      <input type="text" class="fen-input" id="filterFenInput"
+             placeholder="Paste FEN here…"
+             onchange="setFilterFromFen(this.value)"
+             onkeydown="if(event.key==='Enter'){setFilterFromFen(this.value);event.preventDefault()}">
+      <div style="font-size:10px;color:var(--text-muted);margin-bottom:10px;">
+        Play moves on the board or paste a FEN. Use ← → to undo/redo.
+      </div>
+      <div class="filter-actions">
+        <button class="btn btn-ghost btn-sm" onclick="filterReset()">↺ Reset</button>
+        <button class="btn btn-ghost btn-sm" onclick="exitOpeningFilter(false)" style="border-color:var(--accent);color:var(--accent)">✓ Done</button>
+        <button class="btn btn-ghost btn-sm" onclick="clearOpeningFilter()">✕ Clear</button>
+      </div>
+    </div>
     <div class="feedback-area" id="feedbackArea">
       <div class="info-card" id="posInfoCard" style="display:none">
         <h4>Current Position</h4>
@@ -1198,6 +1264,16 @@ let gameListDisplayLimit = 50;
 let reviewListDisplayLimit = 50;
 
 const filters = { color: 'both', severity: 'all', platform: 'all', type: 'all' };
+
+// ─── Opening filter state ───
+let openingFilterMode = false;   // true when the board is in filter-input mode
+let openingFilterFen = null;     // position key (first 4 FEN fields) when filter is active
+let filterChess = null;          // chess.js instance for filter board
+let filterMoveHistory = [];      // array of FENs for undo (index 0 = start)
+let filterMoveIdx = -1;          // current index into filterMoveHistory
+let gameFenIndex = null;         // Map<gameId, Set<positionKey>>
+let fenIndexGameCount = 0;       // allGames.length when index was built
+let savedBoardState = null;      // { fen, orientation, mistakeIdx } to restore after filter mode
 
 // ─── Maia 3 state ───
 let maiaSession = null;       // ONNX InferenceSession
@@ -3011,6 +3087,348 @@ function setFilter(el) {
   if (activeGameId) selectGame(activeGameId);
 }
 
+// ─── Opening filter ───
+
+function fenPositionKey(fen) {
+  return fen.split(' ').slice(0, 4).join(' ');
+}
+
+function buildFenIndex() {
+  if (gameFenIndex && fenIndexGameCount === allGames.length) return gameFenIndex;
+  const t0 = performance.now();
+  gameFenIndex = new Map();
+  for (const game of allGames) {
+    const moves = game.moves ? game.moves.split(' ') : [];
+    const chess = new Chess(game.initialFen || undefined);
+    const fens = new Set();
+    fens.add(fenPositionKey(chess.fen()));
+    for (const san of moves) {
+      const result = chess.move(san, { sloppy: true });
+      if (!result) break;
+      fens.add(fenPositionKey(chess.fen()));
+    }
+    gameFenIndex.set(game.id, fens);
+  }
+  fenIndexGameCount = allGames.length;
+  console.log(`[OpeningFilter] Built FEN index for ${allGames.length} games (${gameFenIndex.size} entries) in ${(performance.now()-t0).toFixed(0)}ms`);
+  return gameFenIndex;
+}
+
+function gameMatchesOpeningFen(gameId) {
+  if (!openingFilterFen || !gameFenIndex) return true;
+  const fens = gameFenIndex.get(gameId);
+  return fens ? fens.has(openingFilterFen) : false;
+}
+
+function toggleOpeningFilter() {
+  if (openingFilterMode) {
+    exitOpeningFilter(false);
+  } else {
+    enterOpeningFilter();
+  }
+}
+
+function enterOpeningFilter() {
+  buildFenIndex();
+  openingFilterMode = true;
+
+  // Save current board state for restoration
+  const currentM = currentMistakeIdx >= 0 ? filteredMistakes[currentMistakeIdx] : null;
+  savedBoardState = {
+    fen: gameEngine ? gameEngine.fen() : null,
+    orientation: boardObj ? boardObj.orientation() : 'white',
+    posId: currentM ? posId(currentM) : null,
+  };
+
+  // Initialize filter chess at the current filter position or start
+  if (openingFilterFen) {
+    // Restore from active filter — try to rebuild from existing history
+    if (filterChess && filterMoveHistory.length > 0) {
+      // Already have history from last session, keep it
+    } else {
+      // Reconstruct from FEN only (no move history)
+      const fullFen = openingFilterFen + ' 0 1';
+      filterChess = new Chess(fullFen);
+      filterMoveHistory = [filterChess.fen()];
+      filterMoveIdx = 0;
+    }
+  } else {
+    filterChess = new Chess();
+    filterMoveHistory = [filterChess.fen()];
+    filterMoveIdx = 0;
+  }
+
+  // Initialize board if needed
+  if (!boardObj) { document.getElementById('board').offsetHeight; initBoard(); }
+  boardObj.position(filterChess.fen());
+  // Orient board to white for filter mode (standard view)
+  boardObj.orientation('white');
+
+  // Close drawer and switch to training mode on mobile so board is visible
+  closeDrawer();
+  if (document.body.classList.contains('mobile-browsing')) {
+    document.body.classList.remove('mobile-browsing');
+    document.body.classList.add('mobile-training');
+  }
+
+  updateOpeningFilterUI();
+}
+
+function exitOpeningFilter(clearFilter) {
+  openingFilterMode = false;
+
+  if (clearFilter) {
+    openingFilterFen = null;
+    filterChess = null;
+    filterMoveHistory = [];
+    filterMoveIdx = -1;
+  }
+
+  // Recompute filters first so filteredMistakes is up to date
+  applyFilters();
+  gameListDisplayLimit = 50;
+  reviewListDisplayLimit = 50;
+
+  // Restore board state
+  if (savedBoardState) {
+    boardObj.orientation(savedBoardState.orientation);
+    if (savedBoardState.posId) {
+      // Find the position in the (possibly re-filtered) list
+      const newIdx = filteredMistakes.findIndex(m => posId(m) === savedBoardState.posId);
+      if (newIdx >= 0) {
+        loadPosition(newIdx);
+      } else {
+        boardObj.position('start');
+        currentMistakeIdx = -1;
+        document.getElementById('emptyMsg').classList.remove('hidden');
+      }
+    } else {
+      boardObj.position('start');
+      currentMistakeIdx = -1;
+      document.getElementById('emptyMsg').classList.remove('hidden');
+    }
+    savedBoardState = null;
+  } else {
+    boardObj.position('start');
+    currentMistakeIdx = -1;
+    document.getElementById('emptyMsg').classList.remove('hidden');
+  }
+
+  if (reviewMode) renderReviewList();
+  else renderGameList();
+  updateSessionProgress();
+  updateOpeningFilterUI();
+}
+
+function clearOpeningFilter() {
+  if (openingFilterMode) {
+    exitOpeningFilter(true);
+  } else {
+    openingFilterFen = null;
+    filterChess = null;
+    filterMoveHistory = [];
+    filterMoveIdx = -1;
+    applyFilters();
+    gameListDisplayLimit = 50;
+    reviewListDisplayLimit = 50;
+    if (reviewMode) renderReviewList();
+    else renderGameList();
+    updateSessionProgress();
+    updateOpeningFilterUI();
+  }
+}
+
+function applyOpeningFilterFromBoard() {
+  if (!filterChess) return;
+  const key = fenPositionKey(filterChess.fen());
+  // Only filter if not the starting position
+  const startKey = fenPositionKey('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1');
+  openingFilterFen = (key === startKey) ? null : key;
+  applyFilters();
+  gameListDisplayLimit = 50;
+  if (reviewMode) renderReviewList();
+  else renderGameList();
+  updateSessionProgress();
+  updateOpeningFilterUI();
+}
+
+function filterMakeMove(from, to) {
+  if (!filterChess) return null;
+  const move = filterChess.move({ from, to, promotion: 'q' });
+  if (!move) return null;
+
+  // Truncate any redo history
+  filterMoveHistory = filterMoveHistory.slice(0, filterMoveIdx + 1);
+  filterMoveHistory.push(filterChess.fen());
+  filterMoveIdx = filterMoveHistory.length - 1;
+
+  boardObj.position(filterChess.fen());
+  applyOpeningFilterFromBoard();
+  return move;
+}
+
+function filterUndoMove() {
+  if (!filterChess || filterMoveIdx <= 0) return;
+  filterMoveIdx--;
+  filterChess.load(filterMoveHistory[filterMoveIdx]);
+  boardObj.position(filterChess.fen());
+  applyOpeningFilterFromBoard();
+}
+
+function filterRedoMove() {
+  if (!filterChess || filterMoveIdx >= filterMoveHistory.length - 1) return;
+  filterMoveIdx++;
+  filterChess.load(filterMoveHistory[filterMoveIdx]);
+  boardObj.position(filterChess.fen());
+  applyOpeningFilterFromBoard();
+}
+
+function filterReset() {
+  if (!filterChess) return;
+  filterChess.reset();
+  filterMoveHistory = [filterChess.fen()];
+  filterMoveIdx = 0;
+  boardObj.position('start');
+  applyOpeningFilterFromBoard();
+}
+
+function setFilterFromFen(fenStr) {
+  if (!fenStr || !fenStr.trim()) return;
+  fenStr = fenStr.trim();
+  // Validate FEN by trying to load it
+  const testChess = new Chess();
+  const loaded = testChess.load(fenStr);
+  if (!loaded) {
+    showFeedback('error', 'Invalid FEN', 'Could not parse the given FEN string.');
+    // Restore the input to current value
+    document.getElementById('filterFenInput').value = filterChess ? filterChess.fen() : '';
+    return;
+  }
+  filterChess = testChess;
+  filterMoveHistory = [filterChess.fen()];
+  filterMoveIdx = 0;
+  boardObj.position(filterChess.fen());
+  applyOpeningFilterFromBoard();
+}
+
+function updateOpeningFilterUI() {
+  const btn = document.getElementById('btnOpeningFilter');
+  const chip = document.getElementById('openingFilterChip');
+  const panel = document.getElementById('openingFilterPanel');
+  const feedbackArea = document.getElementById('feedbackArea');
+  const posNav = document.getElementById('positionNav');
+  const emptyMsg = document.getElementById('emptyMsg');
+  const evalBar = document.getElementById('evalBar');
+  const evalBtn = document.getElementById('btnEvalBar');
+
+  if (openingFilterMode) {
+    // Show filter panel, hide training UI
+    panel.classList.remove('hidden');
+    feedbackArea.classList.add('hidden');
+    posNav.style.display = 'none';
+    emptyMsg.classList.add('hidden');
+    if (evalBar) evalBar.style.display = 'none';
+    if (evalBtn) evalBtn.style.display = 'none';
+    btn.classList.add('active');
+
+    // Update FEN input
+    const fenInput = document.getElementById('filterFenInput');
+    if (filterChess) fenInput.value = filterChess.fen();
+
+    // Update move display
+    const moveDisplay = document.getElementById('filterMoveDisplay');
+    if (filterChess && filterMoveIdx > 0) {
+      // Replay from start to get move SANs
+      const sans = [];
+      const replay = new Chess();
+      for (let i = 1; i <= filterMoveIdx; i++) {
+        const prevFen = filterMoveHistory[i - 1];
+        const currFen = filterMoveHistory[i];
+        replay.load(prevFen);
+        // Find the move that leads to currFen
+        const legalMoves = replay.moves({ verbose: true });
+        for (const lm of legalMoves) {
+          replay.move(lm);
+          if (fenPositionKey(replay.fen()) === fenPositionKey(currFen)) {
+            const moveNum = Math.ceil(i / 2);
+            if (i % 2 === 1) sans.push(`${moveNum}. ${lm.san}`);
+            else sans.push(`${moveNum}… ${lm.san}`);
+            break;
+          }
+          replay.undo();
+        }
+      }
+      moveDisplay.textContent = sans.join(' ') || 'Starting position';
+    } else {
+      moveDisplay.textContent = 'Starting position';
+    }
+
+    // Show match count
+    if (gameFenIndex) {
+      const key = filterChess ? fenPositionKey(filterChess.fen()) : null;
+      const startKey = fenPositionKey('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1');
+      if (key && key !== startKey) {
+        let matchCount = 0;
+        for (const [gid, fens] of gameFenIndex) { if (fens.has(key)) matchCount++; }
+        moveDisplay.textContent += ` · ${matchCount} game${matchCount !== 1 ? 's' : ''}`;
+      }
+    }
+
+    // Hide the chip while editing
+    chip.style.display = 'none';
+  } else {
+    // Restore training UI
+    panel.classList.add('hidden');
+    feedbackArea.classList.remove('hidden');
+    posNav.style.display = '';
+    if (evalBar) evalBar.style.display = '';
+    if (evalBtn) evalBtn.style.display = '';
+    btn.classList.remove('active');
+
+    // Show/hide active filter chip
+    if (openingFilterFen) {
+      // Build move text for chip
+      let chipText = '';
+      if (filterMoveHistory.length > 1 && filterMoveIdx > 0) {
+        const sans = [];
+        const replay = new Chess();
+        const limit = Math.min(filterMoveIdx, 6); // Show at most ~6 half-moves
+        for (let i = 1; i <= filterMoveIdx; i++) {
+          replay.load(filterMoveHistory[i - 1]);
+          const legalMoves = replay.moves({ verbose: true });
+          for (const lm of legalMoves) {
+            replay.move(lm);
+            if (fenPositionKey(replay.fen()) === fenPositionKey(filterMoveHistory[i])) {
+              if (i <= limit) {
+                const moveNum = Math.ceil(i / 2);
+                if (i % 2 === 1) sans.push(`${moveNum}.${lm.san}`);
+                else sans.push(lm.san);
+              }
+              break;
+            }
+            replay.undo();
+          }
+        }
+        if (filterMoveIdx > limit) sans.push('…');
+        chipText = sans.join(' ');
+      }
+      if (!chipText) chipText = 'Custom FEN';
+      document.getElementById('openingFilterChipText').textContent = chipText;
+      chip.style.display = '';
+    } else {
+      chip.style.display = 'none';
+    }
+
+    // Show empty message if no position loaded and not in filter mode
+    if (currentMistakeIdx < 0 && !openingFilterMode) {
+      emptyMsg.classList.remove('hidden');
+    }
+
+    // Restore eval bar visibility
+    if (typeof updateEvalBar === 'function') updateEvalBar();
+  }
+}
+
 function applyFilters() {
   filteredMistakes = allMistakes.filter(m => {
     if (filters.color !== 'both' && m.playerColor !== filters.color) return false;
@@ -3021,6 +3439,7 @@ function applyFilters() {
       if (filters.platform === 'chesscom' && !isChesscom) return false;
       if (filters.platform === 'lichess' && isChesscom) return false;
     }
+    if (openingFilterFen && !gameMatchesOpeningFen(m.gameId)) return false;
     return true;
   });
 }
@@ -3094,6 +3513,8 @@ function renderGameList() {
       color = isWhite ? 'white' : 'black';
     }
     if (filters.color !== 'both' && color !== filters.color) continue;
+    // Opening filter
+    if (openingFilterFen && !gameMatchesOpeningFen(g.id)) continue;
 
     const mistakes = filteredMistakes.filter(m => m.gameId === g.id);
     // Skip games with no matching positions when filtering by type
@@ -3320,6 +3741,26 @@ function onBoardClick(e) {
     return;
   }
 
+  // Opening filter mode — handle click-to-move via filterChess
+  if (openingFilterMode && filterChess) {
+    const squareEl = e.target.closest('[data-square]');
+    if (!squareEl) return;
+    const sq = squareEl.getAttribute('data-square');
+    if (!sq) return;
+    const turn = filterChess.turn();
+    const piece = filterChess.get(sq);
+    if (selectedSquare) {
+      if (sq === selectedSquare) { deselectionPending = true; return; }
+      if (piece && piece.color === turn) { clearSelection(); selectSquare(sq); return; }
+      e.stopPropagation(); e.preventDefault();
+      const move = filterMakeMove(selectedSquare, sq);
+      clearSelection();
+    } else {
+      if (piece && piece.color === turn) selectSquare(sq);
+    }
+    return;
+  }
+
   if (!gameEngine || browsingLine) return;
 
   const m = filteredMistakes[currentMistakeIdx];
@@ -3464,6 +3905,20 @@ function clearSelection() {
 
 // ─── Select game ───
 function selectGame(gameId) {
+  // Exit opening filter mode (keep the filter active)
+  if (openingFilterMode) {
+    openingFilterMode = false;
+    savedBoardState = null;
+    document.getElementById('openingFilterPanel').classList.add('hidden');
+    document.getElementById('feedbackArea').classList.remove('hidden');
+    document.getElementById('positionNav').style.display = '';
+    const evalBar = document.getElementById('evalBar');
+    const evalBtn = document.getElementById('btnEvalBar');
+    if (evalBar) evalBar.style.display = '';
+    if (evalBtn) evalBtn.style.display = '';
+    document.getElementById('btnOpeningFilter').classList.remove('active');
+    updateOpeningFilterUI();
+  }
   // Ensure we leave browsing mode (safety net for no-mistakes early return)
   if (document.body.classList.contains('mobile-browsing')) {
     document.body.classList.remove('mobile-browsing');
@@ -3667,8 +4122,18 @@ function loadPosition(globalIdx) {
 
 // ─── Board interaction ───
 function onDragStart(source, piece) {
-  if (!gameEngine || browsingLine) return false;
   if (isRightClicking) return false;
+  // Opening filter mode — allow drags based on filterChess
+  if (openingFilterMode) {
+    if (!filterChess) return false;
+    if (filterChess.game_over()) return false;
+    if ((filterChess.turn() === 'w' && piece.search(/^b/) !== -1) ||
+        (filterChess.turn() === 'b' && piece.search(/^w/) !== -1)) return false;
+    if (selectedSquare !== source) clearSelection();
+    selectSquare(source);
+    return true;
+  }
+  if (!gameEngine || browsingLine) return false;
   const m = filteredMistakes[currentMistakeIdx];
   if (!m) return false;
   if (gameEngine.game_over()) return false;
@@ -3684,6 +4149,13 @@ function onDragStart(source, piece) {
 }
 
 function onDrop(source, target) {
+  // Opening filter mode — route to filterMakeMove
+  if (openingFilterMode) {
+    if (source === target) return 'snapback';
+    clearSelection();
+    const move = filterMakeMove(source, target);
+    return move ? undefined : 'snapback';
+  }
   if (!gameEngine) return 'snapback';
   // If piece was dropped back on same square, it was a click — keep selection
   if (source === target) return 'snapback';
@@ -3764,6 +4236,7 @@ function onDrop(source, target) {
 }
 
 function onSnapEnd() {
+  if (openingFilterMode) { if (filterChess) boardObj.position(filterChess.fen()); return; }
   if (gameEngine) boardObj.position(gameEngine.fen());
 }
 
@@ -5128,6 +5601,7 @@ async function advanceContinuation(contUci) {
 
 // ─── Navigation ───
 function prevPosition() {
+  if (openingFilterMode) { filterUndoMove(); return; }
   if (currentMistakeIdx <= 0) return;
   clearArrows()
   if (reviewMode) {
@@ -5146,6 +5620,7 @@ function prevPosition() {
 }
 
 function nextPosition() {
+  if (openingFilterMode) { filterRedoMove(); return; }
   if (currentMistakeIdx < 0) return;
   clearArrows()
   if (reviewMode) {
@@ -5587,6 +6062,7 @@ function closeMobileFeedback() {
 // ─── Keyboard shortcuts ───
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    if (openingFilterMode) { exitOpeningFilter(false); return; }
     if (!document.getElementById('mobileFeedbackOverlay').classList.contains('hidden')) { closeMobileFeedback(); return; }
     if (document.body.classList.contains('drawer-open')) { closeDrawer(); return; }
     if (contLineBrowsing) { contLineGoToEnd(); return; }
@@ -5596,6 +6072,12 @@ document.addEventListener('keydown', (e) => {
     closeSettings();
   }
   if (e.target.tagName === 'INPUT') return;
+  // Opening filter mode — arrow keys undo/redo, block other shortcuts
+  if (openingFilterMode) {
+    if (e.key === 'ArrowLeft') { filterUndoMove(); e.preventDefault(); }
+    if (e.key === 'ArrowRight') { filterRedoMove(); e.preventDefault(); }
+    return;
+  }
   // Arrow keys: engine line takes priority (for wrong-move browsing during tactics)
   if (e.key === 'ArrowLeft') {
     if (engineLine) { lineStep(-1); e.preventDefault(); }
