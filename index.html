@@ -1068,7 +1068,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Move opening line display to center panel (visible on mobile)</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix single-game display: standard notation, actual player names</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3796,15 +3796,20 @@ function renderExplorerStats() {
     html += `<span class="explorer-count">${row.count}</span>`;
 
     if (row.count === 1) {
-      // Single game: show inline summary
+      // Single game: show inline summary in standard notation (white result black)
       const g = row.games[0];
       const userName = currentUsername || 'you';
-      const resultStr = g.result === 'win' ? '1-0' : g.result === 'loss' ? '0-1' : '½-½';
-      // Show from user perspective
-      const userR = g.userRating ? `(${g.userRating})` : '';
-      const oppR = g.opponentRating ? `(${g.opponentRating})` : '';
+      const isUserWhite = g.userColor === 'white';
+      const whiteName = isUserWhite ? userName : g.opponentName;
+      const blackName = isUserWhite ? g.opponentName : userName;
+      const whiteR = (isUserWhite ? g.userRating : g.opponentRating);
+      const blackR = (isUserWhite ? g.opponentRating : g.userRating);
+      const whiteRStr = whiteR ? `(${whiteR})` : '';
+      const blackRStr = blackR ? `(${blackR})` : '';
+      const whiteWon = (g.result === 'win' && isUserWhite) || (g.result === 'loss' && !isUserWhite);
+      const resultStr = g.result === 'draw' ? '½-½' : whiteWon ? '1-0' : '0-1';
       const link = buildGameLink(g.gameId, g.source);
-      html += `<span class="explorer-single-game">${escapeHtml(userName)}${userR} ${resultStr} ${escapeHtml(g.opponentName)}${oppR}<a href="${link}" target="_blank" rel="noopener">↗</a></span>`;
+      html += `<span class="explorer-single-game">${escapeHtml(whiteName)}${whiteRStr} ${resultStr} ${escapeHtml(blackName)}${blackRStr}<a href="${link}" target="_blank" rel="noopener">↗</a></span>`;
     } else {
       // Results bar
       const total = row.whiteWins + row.draws + row.blackWins;
