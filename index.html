@@ -1068,7 +1068,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Shared detectPlayerColor helper, explicit both-side check</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix detectPlayerColor: validate _playerColor against actual player names</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1500,7 +1500,7 @@ let syncDebounceTimer = null;
 let appShown = false; // guard to prevent double showMainApp()
 const GIST_FILENAME = 'mistakelab_progress.json';
 const GIST_GAMES_FILENAME = 'mistakelab_games.json';
-const MISTAKES_CACHE_VERSION = 3;
+const MISTAKES_CACHE_VERSION = 4;
 const MISTAKES_CACHE_PARAMS = { wpDropThreshold: 10 };
 
 // Populate login fields from saved config + auto-load
@@ -3249,16 +3249,20 @@ function fenPositionKey(fen) {
 }
 
 // Detect which color the current user played in a game
-// Checks both sides explicitly; _playerColor takes precedence if present
+// Validates _playerColor against actual player names to catch bad stamps
 function detectPlayerColor(game) {
-  if (game._playerColor) return game._playerColor;
   const u = currentUsername.toLowerCase();
   const wName = game.players?.white?.user?.name?.toLowerCase();
   const wId = game.players?.white?.user?.id?.toLowerCase();
-  if (wName === u || wId === u) return 'white';
   const bName = game.players?.black?.user?.name?.toLowerCase();
   const bId = game.players?.black?.user?.id?.toLowerCase();
-  if (bName === u || bId === u) return 'black';
+  const matchesWhite = wName === u || wId === u;
+  const matchesBlack = bName === u || bId === u;
+  // If we can determine from player names, that's authoritative
+  if (matchesWhite && !matchesBlack) return 'white';
+  if (matchesBlack && !matchesWhite) return 'black';
+  // Fall back to _playerColor (e.g. when username doesn't match either side)
+  if (game._playerColor) return game._playerColor;
   return 'white'; // shouldn't happen — fallback
 }
 
@@ -3974,14 +3978,7 @@ function renderGameList() {
       if (filters.platform === 'chesscom' && !isChesscom) continue;
       if (filters.platform === 'lichess' && isChesscom) continue;
     }
-    let color;
-    if (g._playerColor) {
-      color = g._playerColor;
-    } else {
-      const isWhite = g.players?.white?.user?.name?.toLowerCase() === currentUsername.toLowerCase()
-                   || g.players?.white?.user?.id?.toLowerCase() === currentUsername.toLowerCase();
-      color = isWhite ? 'white' : 'black';
-    }
+    let color = detectPlayerColor(g);
     if (filters.color !== 'both' && color !== filters.color) continue;
     // Opening filter
     if (openingFilterFen && !gameMatchesOpeningFen(g.id)) continue;
