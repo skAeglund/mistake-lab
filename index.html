@@ -1073,7 +1073,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Engine lines: 6-ply limit with on-demand extension</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Adaptive engine analysis: stability-based early exit + live arrow</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1267,6 +1267,7 @@ let arrowStartSquare = null;
 let activeArrows = new Set(); // Stores strings like "e2e4"
 let ghostArrow = null; // { from: 'e2', to: 'e4' }
 let bestMoveArrow = null; // { from: 'e2', to: 'e4' } — shown for engine best move reveals
+let analysisArrow = null; // { from: 'e2', to: 'e4' } — temporary arrow during SF analysis
 let isRightClicking = false;
 let lastTouchTime = 0; // prevents synthetic mousedown from double-firing after touch
 
@@ -2068,6 +2069,101 @@ function sfAnalyze(fen, depth = 16, multiPv = 1) {
     }
     sfWorker.addEventListener('message', handler);
   });
+}
+
+// ─── Adaptive analysis with stability-based early exit ───
+function sfAnalyzeAdaptive(fen, { minDepth = 16, maxDepth = 22, stableCount = 2, onUpdate = null } = {}) {
+  return new Promise(async (resolve) => {
+    if (sfSearchActive) {
+      sfLog('sfAnalyzeAdaptive', `terminating worker (search was active)`);
+      sfWorker.terminate();
+      sfWorker = null;
+      sfReady = false;
+      sfSearchActive = false;
+      preAnalysisListener = null;
+      preAnalysisReadyHandler = null;
+      await initStockfish();
+    }
+    if (!sfReady) { resolve(null); return; }
+
+    sfLog('sfAnalyzeAdaptive', `START fen=${fen.split(' ').slice(0,2).join(' ')}… minD=${minDepth} maxD=${maxDepth} stable=${stableCount}`);
+
+    const collected = {};
+    let lastBestMove = null;
+    let stableDepths = 0;
+    let resolved = false;
+
+    sfWorker.postMessage('setoption name MultiPV value 1');
+    sfWorker.postMessage(`position fen ${fen}`);
+    sfWorker.postMessage(`go depth ${maxDepth}`);
+    sfSearchActive = true;
+
+    function handler(e) {
+      const line = e.data;
+      if (typeof line !== 'string') return;
+
+      if (line.startsWith('info') && line.includes(' pv ')) {
+        const dM = line.match(/depth (\d+)/);
+        const cpM = line.match(/score cp (-?\d+)/);
+        const mateM = line.match(/score mate (-?\d+)/);
+        const pvM = line.match(/ pv (.+)/);
+        const d = parseInt(dM?.[1] || '0');
+        let cp = 0;
+        if (cpM) cp = parseInt(cpM[1]);
+        else if (mateM) cp = parseInt(mateM[1]) > 0 ? 10000 : -10000;
+        const moves = pvM?.[1]?.trim() || '';
+        const firstMove = moves.split(' ')[0];
+
+        if (!collected[1] || d >= collected[1].depth) {
+          collected[1] = { cp, moves, depth: d, firstMove };
+        }
+
+        if (onUpdate && firstMove && d >= minDepth) onUpdate(d, firstMove, cp, moves);
+
+        // Check stability after minDepth
+        if (d >= minDepth && !resolved) {
+          if (firstMove === lastBestMove) {
+            stableDepths++;
+          } else {
+            stableDepths = 1;
+            lastBestMove = firstMove;
+          }
+          // Stable for stableCount+1 consecutive depths (first observation + N increases)
+          if (stableDepths >= stableCount + 1) {
+            resolved = true;
+            sfLog('sfAnalyzeAdaptive', `STABLE EXIT at depth ${d} bestMove=${firstMove} stableFor=${stableDepths}`);
+            resolve({ bestMove: firstMove, pvs: [collected[1]], fen, earlyExit: true, exitDepth: d });
+          }
+        }
+      }
+
+      if (line.startsWith('bestmove')) {
+        sfWorker.removeEventListener('message', handler);
+        sfSearchActive = false;
+        if (!resolved) {
+          const bm = line.split(' ')[1];
+          const pvs = Object.keys(collected)
+            .sort((a, b) => parseInt(a) - parseInt(b))
+            .map(k => collected[k]);
+          sfLog('sfAnalyzeAdaptive', `FULL DEPTH bestmove=${bm} depth=${pvs[0]?.depth}`);
+          resolve({ bestMove: bm, pvs, fen });
+        }
+      }
+    }
+    sfWorker.addEventListener('message', handler);
+  });
+}
+
+/** Show/update/clear the temporary analysis arrow */
+function showAnalysisArrow(uci) {
+  if (!uci || uci.length < 4) { analysisArrow = null; renderArrows(); return; }
+  const from = uci.substring(0, 2);
+  const to = uci.substring(2, 4);
+  analysisArrow = { from, to };
+  renderArrows();
+}
+function clearAnalysisArrow() {
+  if (analysisArrow) { analysisArrow = null; renderArrows(); }
 }
 
 // ─── Streaming pre-analysis (runs up to depth 30 while user thinks) ───
@@ -4954,7 +5050,10 @@ async function evaluateTacticMove(from, to, move) {
       if (!sfReady) return;
       try {
         stopPreAnalysis();
-        const afterResult = await sfAnalyze(afterFen, 18, 1);
+        const afterResult = await sfAnalyzeAdaptive(afterFen, {
+          onUpdate: (d, uci) => { if (tacticMode && currentSolveFen === snapshotSolveFen) showAnalysisArrow(uci); }
+        });
+        clearAnalysisArrow();
         // Check if user already retried or navigated away
         if (!tacticMode || currentSolveFen !== snapshotSolveFen || currentAttempts !== snapshotAttempts) return;
         const contUci = afterResult?.pvs?.[0]?.moves || '';
@@ -5502,7 +5601,10 @@ async function evaluateMove(from, to, move) {
     sfLog('evaluateMove', `SLOW PATH: analyzing after-move position`);
     stopPreAnalysis();
     const afterFen = gameEngine.fen();
-    const afterResult = await sfAnalyze(afterFen, 16, 1);
+    const afterResult = await sfAnalyzeAdaptive(afterFen, {
+      onUpdate: (d, uci) => { if (currentMistakeIdx === mistakeIdx) showAnalysisArrow(uci); }
+    });
+    clearAnalysisArrow();
     sfLog('evaluateMove', `after-move result: bestMove=${afterResult?.bestMove} mistakeIdx snapshot=${mistakeIdx} current=${currentMistakeIdx}`);
     if (currentMistakeIdx !== mistakeIdx) {
       sfLog('evaluateMove', `ABORT after slow-path: user navigated away`);
@@ -5983,7 +6085,10 @@ async function handleEngineLineBranch(source, target) {
     if (sfReady) {
       try {
         stopPreAnalysis();
-        const result = await sfAnalyze(newFen, 18, 1);
+        const result = await sfAnalyzeAdaptive(newFen, {
+          onUpdate: (d, uci) => { if (engineLine) showAnalysisArrow(uci); }
+        });
+        clearAnalysisArrow();
         if (engineLine && engineLine.activeAlt >= 0 && engineLine.alternatives[engineLine.activeAlt] === alt) {
           const contMoves = parseSfContinuation(newFen, result, ENGINE_LINE_PLY - 1);
           alt.moves.push(...contMoves);
@@ -6005,7 +6110,10 @@ async function handleEngineLineBranch(source, target) {
   if (sfReady) {
     try {
       stopPreAnalysis();
-      const result = await sfAnalyze(newFen, 18, 1);
+      const result = await sfAnalyzeAdaptive(newFen, {
+        onUpdate: (d, uci) => { if (engineLine) showAnalysisArrow(uci); }
+      });
+      clearAnalysisArrow();
       if (engineLine) {
         const contMoves = parseSfContinuation(newFen, result, ENGINE_LINE_PLY - 1);
         newAlt.moves.push(...contMoves);
@@ -6065,7 +6173,7 @@ function prepareEngineLineExtension() {
   const extensionPromise = (async () => {
     try {
       stopPreAnalysis();
-      const result = await sfAnalyze(endFen, 18, 1);
+      const result = await sfAnalyzeAdaptive(endFen);
       if (!engineLine || !result) return null;
       return parseSfContinuation(endFen, result, ENGINE_LINE_PLY);
     } catch { return null; }
@@ -6112,7 +6220,10 @@ async function _doExtendEngineLine() {
   if (!extMoves && sfReady) {
     try {
       stopPreAnalysis();
-      const result = await sfAnalyze(endFen, 18, 1);
+      const result = await sfAnalyzeAdaptive(endFen, {
+        onUpdate: (d, uci) => { if (engineLine) showAnalysisArrow(uci); }
+      });
+      clearAnalysisArrow();
       if (!engineLine) return;
       extMoves = parseSfContinuation(endFen, result, ENGINE_LINE_PLY);
     } catch { return; }
@@ -6878,6 +6989,7 @@ function clearArrows() {
   activeArrows.clear();
   ghostArrow = null;
   bestMoveArrow = null;
+  analysisArrow = null;
   renderArrows();
 }
 
@@ -6886,7 +6998,7 @@ function renderArrows() {
     const boardEl = document.querySelector('#board [class^="board-"]');
     if (!boardEl) return;
 
-    const hasSomething = activeArrows.size > 0 || ghostArrow || bestMoveArrow || hintArrow || filterArrows.length > 0;
+    const hasSomething = activeArrows.size > 0 || ghostArrow || bestMoveArrow || analysisArrow || hintArrow || filterArrows.length > 0;
     svg.classList.toggle('hidden', !hasSomething);
     if (!hasSomething) { svg.innerHTML = ''; return; }
 
@@ -6950,6 +7062,7 @@ function renderArrows() {
     // Hovered move arrow (blue, high opacity)
     if (hoverFilterArrow) drawOne(hoverFilterArrow.from, hoverFilterArrow.to, 'rgba(66, 133, 244, 0.8)', 1);
     // Best move arrow first (behind user arrows)
+    if (analysisArrow) drawOne(analysisArrow.from, analysisArrow.to, 'rgba(100, 160, 255, 0.5)', 1);
     if (bestMoveArrow) drawOne(bestMoveArrow.from, bestMoveArrow.to, 'rgba(62, 207, 142, 0.7)', 1);
     // Hint arrow
     if (hintArrow) drawOne(hintArrow.from, hintArrow.to, 'rgba(66, 133, 244, 0.7)', 1);
@@ -6984,6 +7097,7 @@ function drawArrow(from, to) {
 
 function hideArrow() {
   bestMoveArrow = null;
+  analysisArrow = null;
   renderArrows();
 }
 
