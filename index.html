@@ -1070,7 +1070,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add confirmation dialog for all line invalidation actions</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Label Maia alt lines as human-like opponent mistakes</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -5076,13 +5076,14 @@ function loadNextTacticAlt() {
   const remainingUserMoves = totalUserMoves - solvedUserMoves;
   tacticPrefixUserMoves = solvedUserMoves;
   const altLabel = `Alt line ${tacticAltIdx + 1}/${tacticAltLines.length}`;
+  const isMaia = altLine.some(mv => !mv.isUser && mv.source === 'maia');
 
   const infoCard = document.getElementById('posInfoCard');
   infoCard.style.display = '';
   document.getElementById('posInfoContent').innerHTML = `
     <div style="font-size:13px;line-height:1.7">
       <div>⚡ <strong>${altLabel}</strong> — ${remainingUserMoves} move${remainingUserMoves !== 1 ? 's' : ''} to find</div>
-      <div style="font-size:11px;color:var(--text-muted)">Opponent plays differently</div>
+      <div style="font-size:11px;color:var(--text-muted)">${isMaia ? '🧠 Opponent plays a common human mistake' : 'Opponent plays differently'}</div>
       <div id="tacticProgress" style="font-size:12px;margin-top:2px;color:var(--text-muted)">Move 1 of ${remainingUserMoves}</div>
     </div>
   `;
