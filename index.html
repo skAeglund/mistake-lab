@@ -1008,7 +1008,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add opening filter: filter games by position with transposition support</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Async FEN index build: non-blocking opening filter</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3093,25 +3093,52 @@ function fenPositionKey(fen) {
   return fen.split(' ').slice(0, 4).join(' ');
 }
 
+let fenIndexBuilding = false;    // true while async build is in progress
+
 function buildFenIndex() {
-  if (gameFenIndex && fenIndexGameCount === allGames.length) return gameFenIndex;
-  const t0 = performance.now();
-  gameFenIndex = new Map();
-  for (const game of allGames) {
-    const moves = game.moves ? game.moves.split(' ') : [];
-    const chess = new Chess(game.initialFen || undefined);
-    const fens = new Set();
-    fens.add(fenPositionKey(chess.fen()));
-    for (const san of moves) {
-      const result = chess.move(san, { sloppy: true });
-      if (!result) break;
-      fens.add(fenPositionKey(chess.fen()));
-    }
-    gameFenIndex.set(game.id, fens);
+  if (fenIndexBuilding) return; // already in progress
+  if (gameFenIndex && fenIndexGameCount === allGames.length) {
+    // Already built and up to date — apply immediately
+    if (openingFilterMode) applyOpeningFilterFromBoard();
+    return;
   }
-  fenIndexGameCount = allGames.length;
-  console.log(`[OpeningFilter] Built FEN index for ${allGames.length} games (${gameFenIndex.size} entries) in ${(performance.now()-t0).toFixed(0)}ms`);
-  return gameFenIndex;
+  fenIndexBuilding = true;
+  const t0 = performance.now();
+  const newIndex = new Map();
+  const games = allGames.slice(); // snapshot
+  const BATCH = 50;
+  let i = 0;
+
+  function processBatch() {
+    const end = Math.min(i + BATCH, games.length);
+    for (; i < end; i++) {
+      const game = games[i];
+      const moves = game.moves ? game.moves.split(' ') : [];
+      const chess = new Chess(game.initialFen || undefined);
+      const fens = new Set();
+      fens.add(fenPositionKey(chess.fen()));
+      for (const san of moves) {
+        const result = chess.move(san, { sloppy: true });
+        if (!result) break;
+        fens.add(fenPositionKey(chess.fen()));
+      }
+      newIndex.set(game.id, fens);
+    }
+    if (i < games.length) {
+      setTimeout(processBatch, 0);
+    } else {
+      // Done
+      gameFenIndex = newIndex;
+      fenIndexGameCount = games.length;
+      fenIndexBuilding = false;
+      console.log(`[OpeningFilter] Built FEN index for ${games.length} games (${newIndex.size} entries) in ${(performance.now()-t0).toFixed(0)}ms`);
+      // Apply the filter now that the index is ready
+      if (openingFilterMode || openingFilterFen) {
+        applyOpeningFilterFromBoard();
+      }
+    }
+  }
+  processBatch();
 }
 
 function gameMatchesOpeningFen(gameId) {
@@ -3363,8 +3390,10 @@ function updateOpeningFilterUI() {
       moveDisplay.textContent = 'Starting position';
     }
 
-    // Show match count
-    if (gameFenIndex) {
+    // Show match count or building indicator
+    if (fenIndexBuilding) {
+      moveDisplay.textContent += ' · ⟳ Indexing games…';
+    } else if (gameFenIndex) {
       const key = filterChess ? fenPositionKey(filterChess.fen()) : null;
       const startKey = fenPositionKey('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1');
       if (key && key !== startKey) {
