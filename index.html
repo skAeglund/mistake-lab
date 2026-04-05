@@ -1073,7 +1073,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Alternative engine lines: branch from any position in engine line</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Engine lines: 6-ply limit with on-demand extension</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1297,6 +1297,7 @@ let sfSearchActive = false;     // true when a go command has been sent and best
 let selectedSquare = null;      // for click-to-move
 let deselectionPending = false; // true after mousedown on already-selected square; mouseup will deselect
 let engineLine = null;          // { baseFen, moves: [{uci,san,fen}], currentIdx: -1, userMove: {san,from,to} }
+const ENGINE_LINE_PLY = 6;     // max ply per engine line segment (extended on demand)
 let browsingLine = false;       // true when stepping through engine line
 let contLine = null;            // { baseFen, moves: [{san,uci,fen,isUser}], currentIdx }
 let contLineBrowsing = false;   // true when navigating to a non-terminal contLine position
@@ -5847,10 +5848,12 @@ function buildEngineLine(baseFen, userMove, contUci) {
     isUser: true,
   });
 
-  // Parse continuation UCI moves
+  // Parse continuation UCI moves (limited to ENGINE_LINE_PLY total)
   if (contUci) {
+    const maxCont = ENGINE_LINE_PLY - 1; // user's move already counts as 1
     const uciMoves = contUci.trim().split(/\s+/).filter(Boolean);
     for (const uci of uciMoves) {
+      if (moves.length >= ENGINE_LINE_PLY) break;
       const from = uci.substring(0, 2);
       const to = uci.substring(2, 4);
       const promo = uci.length > 4 ? uci[4] : undefined;
@@ -5867,8 +5870,9 @@ function buildEngineLine(baseFen, userMove, contUci) {
 
   if (moves.length <= 1) return; // no continuation to show
 
-  engineLine = { baseFen, moves, currentIdx: 0, alternatives: [], activeAlt: -1 }; // start highlighting user's move
+  engineLine = { baseFen, moves, currentIdx: 0, alternatives: [], activeAlt: -1, extension: null }; // start highlighting user's move
   renderEngineLine();
+  prepareEngineLineExtension();
 }
 
 // ─── Engine Line Branching Helpers ───
@@ -5981,7 +5985,7 @@ async function handleEngineLineBranch(source, target) {
         stopPreAnalysis();
         const result = await sfAnalyze(newFen, 18, 1);
         if (engineLine && engineLine.activeAlt >= 0 && engineLine.alternatives[engineLine.activeAlt] === alt) {
-          const contMoves = parseSfContinuation(newFen, result);
+          const contMoves = parseSfContinuation(newFen, result, ENGINE_LINE_PLY - 1);
           alt.moves.push(...contMoves);
         }
       } catch (e) { /* ignore */ }
@@ -5990,6 +5994,7 @@ async function handleEngineLineBranch(source, target) {
     engineLine.currentIdx = idx + 1; // point to the new move
     renderEngineLine();
     goToLineMove(engineLine.currentIdx);
+    prepareEngineLineExtension();
     return undefined;
   }
 
@@ -6002,7 +6007,7 @@ async function handleEngineLineBranch(source, target) {
       stopPreAnalysis();
       const result = await sfAnalyze(newFen, 18, 1);
       if (engineLine) {
-        const contMoves = parseSfContinuation(newFen, result);
+        const contMoves = parseSfContinuation(newFen, result, ENGINE_LINE_PLY - 1);
         newAlt.moves.push(...contMoves);
       }
     } catch (e) { /* ignore */ }
@@ -6015,17 +6020,20 @@ async function handleEngineLineBranch(source, target) {
   engineLine.currentIdx = idx + 1; // point to the new move
   renderEngineLine();
   goToLineMove(engineLine.currentIdx);
+  prepareEngineLineExtension();
+  goToLineMove(engineLine.currentIdx);
   return undefined;
 }
 
 /** Parse SF analysis result into continuation move objects */
-function parseSfContinuation(fen, result) {
+function parseSfContinuation(fen, result, maxMoves = ENGINE_LINE_PLY) {
   const contUci = result?.pvs?.[0]?.moves || '';
   if (!contUci) return [];
   const chess = new Chess(fen);
   const moves = [];
   const uciMoves = contUci.trim().split(/\s+/).filter(Boolean);
   for (const uci of uciMoves) {
+    if (moves.length >= maxMoves) break;
     const from = uci.substring(0, 2);
     const to = uci.substring(2, 4);
     const promo = uci.length > 4 ? uci[4] : undefined;
@@ -6034,6 +6042,94 @@ function parseSfContinuation(fen, result) {
     moves.push({ san: r.san, uci, fen: chess.fen() });
   }
   return moves;
+}
+
+/** Pre-analyze the end of the active engine line path for seamless extension */
+function prepareEngineLineExtension() {
+  if (!engineLine || !sfReady) return;
+  const pathLen = getActivePathLength();
+  if (pathLen === 0) return;
+
+  // Get FEN at end of active path
+  const endFen = (engineLine.activeAlt >= 0)
+    ? engineLine.alternatives[engineLine.activeAlt].moves.at(-1)?.fen
+    : engineLine.moves.at(-1)?.fen;
+  if (!endFen) return;
+
+  // Check if game is over at end position
+  try { const c = new Chess(endFen); if (c.game_over()) return; } catch { return; }
+
+  // Don't re-analyze if we already have an extension for this FEN
+  if (engineLine.extension && engineLine.extension.fen === endFen) return;
+
+  const extensionPromise = (async () => {
+    try {
+      stopPreAnalysis();
+      const result = await sfAnalyze(endFen, 18, 1);
+      if (!engineLine || !result) return null;
+      return parseSfContinuation(endFen, result, ENGINE_LINE_PLY);
+    } catch { return null; }
+  })();
+
+  engineLine.extension = { fen: endFen, promise: extensionPromise, moves: null };
+  extensionPromise.then(moves => {
+    if (engineLine && engineLine.extension && engineLine.extension.fen === endFen) {
+      engineLine.extension.moves = moves;
+    }
+  });
+}
+
+/** Extend the active engine line path when user navigates past the end */
+let _extendingLine = false;
+async function extendEngineLine() {
+  if (!engineLine || _extendingLine) return;
+  _extendingLine = true;
+  try {
+    await _doExtendEngineLine();
+  } finally {
+    _extendingLine = false;
+  }
+}
+async function _doExtendEngineLine() {
+  if (!engineLine) return;
+  const pathLen = getActivePathLength();
+  const endFen = (engineLine.activeAlt >= 0)
+    ? engineLine.alternatives[engineLine.activeAlt].moves.at(-1)?.fen
+    : engineLine.moves.at(-1)?.fen;
+  if (!endFen) return;
+
+  // Check if game is over
+  try { const c = new Chess(endFen); if (c.game_over()) return; } catch { return; }
+
+  let extMoves = null;
+
+  // Use pre-analyzed extension if FEN matches and ready
+  if (engineLine.extension && engineLine.extension.fen === endFen && engineLine.extension.moves) {
+    extMoves = engineLine.extension.moves;
+  }
+
+  // Fallback: analyze on demand
+  if (!extMoves && sfReady) {
+    try {
+      stopPreAnalysis();
+      const result = await sfAnalyze(endFen, 18, 1);
+      if (!engineLine) return;
+      extMoves = parseSfContinuation(endFen, result, ENGINE_LINE_PLY);
+    } catch { return; }
+  }
+
+  if (!engineLine || !extMoves || extMoves.length === 0) return;
+
+  // Append moves to the active path
+  if (engineLine.activeAlt >= 0) {
+    engineLine.alternatives[engineLine.activeAlt].moves.push(...extMoves);
+  } else {
+    engineLine.moves.push(...extMoves);
+  }
+
+  // Advance to the first new move
+  goToLineMove(pathLen); // pathLen was the old length = index of first new move
+  prepareEngineLineExtension(); // pre-analyze the new end
 }
 
 function renderEngineLine() {
@@ -6185,7 +6281,12 @@ function lineStep(delta) {
   if (!engineLine) return;
   const newIdx = engineLine.currentIdx + delta;
   const pathLen = getActivePathLength();
-  if (newIdx < -1 || newIdx >= pathLen) return;
+  if (newIdx < -1) return;
+  // Navigating right past the end → extend the line
+  if (newIdx >= pathLen) {
+    if (delta > 0) extendEngineLine();
+    return;
+  }
   // Navigating left past the bad move → exit and let user retry
   if (newIdx === -1 && engineLine.wrongMove) {
     if (tacticMode) {
