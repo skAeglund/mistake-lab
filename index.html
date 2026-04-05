@@ -1008,7 +1008,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Show loading indicator before extraction with browser yield</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix FEN index: set game count after allGames is finalized</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3016,7 +3016,6 @@ function extractAllMistakes() {
   for (const [gid, fens] of Object.entries(fenData)) {
     gameFenIndex.set(gid, new Set(fens));
   }
-  fenIndexGameCount = allGames.length;
   fenIndexBuilding = false;
 
   // Restore game references
@@ -3098,6 +3097,9 @@ function extractAllMistakes() {
   // Discard games with zero positions (no mistakes and no tactics)
   const gamesWithPositions = new Set(allMistakes.map(m => m.gameId));
   allGames = allGames.filter(g => gamesWithPositions.has(g.id));
+
+  // Finalize FEN index count after allGames is settled
+  fenIndexGameCount = allGames.length;
 }
 
 function evalToCp(evalObj, perspective) {
