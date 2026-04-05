@@ -217,11 +217,12 @@
   }
 
   /* Opening explorer stats table */
-  .explorer-stats { width: 100%; margin-bottom: 12px; }
+  .explorer-stats { width: 100%; margin-bottom: 12px; max-height: 50vh; overflow-y: auto; }
   .explorer-stats-header {
     display: grid; grid-template-columns: minmax(50px,auto) 50px 1fr;
     gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--border);
     font-size: 11px; color: var(--text-muted); font-weight: 600;
+    position: sticky; top: 0; background: var(--bg-app);
   }
   .explorer-stats-row {
     display: grid; grid-template-columns: minmax(50px,auto) 50px 1fr;
@@ -251,11 +252,12 @@
     font-size: 12px; color: var(--text-muted); padding: 20px 0; text-align: center;
   }
 
-  /* Opening line display in left panel */
+  /* Opening line display in center panel */
   .opening-line-display {
     padding: 8px; margin-top: 6px; border-radius: 6px;
     background: var(--bg-card); border: 1px solid var(--border);
     font-size: 12px; line-height: 1.7;
+    width: 100%; max-width: 520px; box-sizing: border-box;
   }
   .opening-line-display .opening-name {
     font-size: 11px; color: var(--text-muted); margin-bottom: 4px;
@@ -1068,7 +1070,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix detectPlayerColor: validate _playerColor against actual player names</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Polish: scrollable stats table, sticky header, constrain line display width</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
