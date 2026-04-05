@@ -1008,7 +1008,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Opening filter: add flip board with color filter sync</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Opening filter: legal move dots and move highlighting</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3291,6 +3291,8 @@ function filterMakeMove(from, to) {
   filterMoveIdx = filterMoveHistory.length - 1;
 
   boardObj.position(filterChess.fen());
+  clearHighlights();
+  highlightSquaresWithColor(from, to, 'var(--accent)');
   applyOpeningFilterFromBoard();
   return move;
 }
@@ -3300,6 +3302,7 @@ function filterUndoMove() {
   filterMoveIdx--;
   filterChess.load(filterMoveHistory[filterMoveIdx]);
   boardObj.position(filterChess.fen());
+  clearHighlights();
   applyOpeningFilterFromBoard();
 }
 
@@ -3308,6 +3311,7 @@ function filterRedoMove() {
   filterMoveIdx++;
   filterChess.load(filterMoveHistory[filterMoveIdx]);
   boardObj.position(filterChess.fen());
+  clearHighlights();
   applyOpeningFilterFromBoard();
 }
 
@@ -3929,12 +3933,13 @@ function selectSquare(sq) {
   if (el) el.classList.add('square-selected');
 
   // Show legal move dots
-  if (gameEngine) {
-    const moves = gameEngine.moves({ square: sq, verbose: true });
+  const engine = openingFilterMode ? filterChess : gameEngine;
+  if (engine) {
+    const moves = engine.moves({ square: sq, verbose: true });
     for (const mv of moves) {
       const targetEl = document.querySelector(`.square-${mv.to}`);
       if (!targetEl) continue;
-      const targetPiece = gameEngine.get(mv.to);
+      const targetPiece = engine.get(mv.to);
       if (targetPiece || mv.flags.includes('e')) {
         targetEl.classList.add('square-legal-capture');
       } else {
