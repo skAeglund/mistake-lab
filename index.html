@@ -1070,7 +1070,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">detectPlayerColor: check all gist usernames for cross-platform support</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix mobile: switch to training layout before board init in filter mode</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3389,7 +3389,14 @@ function enterOpeningFilter() {
     filterMoveIdx = 0;
   }
 
-  // Initialize board if needed
+  // Switch to training mode on mobile BEFORE board init so panel-center is visible
+  closeDrawer();
+  if (document.body.classList.contains('mobile-browsing')) {
+    document.body.classList.remove('mobile-browsing');
+    document.body.classList.add('mobile-training');
+  }
+
+  // Initialize board if needed (must happen after mobile layout switch)
   if (!boardObj) { document.getElementById('board').offsetHeight; initBoard(); }
   boardObj.position(filterChess.fen());
   // Orient board to white for filter mode (standard view)
@@ -3400,13 +3407,6 @@ function enterOpeningFilter() {
   document.querySelectorAll('.filter-chip[data-filter="color"]').forEach(c => {
     c.classList.toggle('active', c.dataset.value === 'white');
   });
-
-  // Close drawer and switch to training mode on mobile so board is visible
-  closeDrawer();
-  if (document.body.classList.contains('mobile-browsing')) {
-    document.body.classList.remove('mobile-browsing');
-    document.body.classList.add('mobile-training');
-  }
 
   applyFilters();
   gameListDisplayLimit = 50;
