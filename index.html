@@ -1070,7 +1070,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix: block opponent piece interaction via click-to-move after line completes</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix: skip Next Line button when remaining alts have no unsolved user moves</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -4777,16 +4777,30 @@ async function evaluateTacticMove(from, to, move) {
       tacticSolvedLines.push([...tacticMoves]);
 
       // Check if there are unsolved alternative lines remaining
-      const nextAltIdx = tacticAltIdx + 1;
-      const hasMoreAlts = nextAltIdx < tacticAltLines.length;
+      // (an alt is "unsolved" only if it has user moves beyond the common prefix)
+      let unsolvedAltCount = 0;
+      for (let ai = tacticAltIdx + 1; ai < tacticAltLines.length; ai++) {
+        const alt = tacticAltLines[ai];
+        if (!alt || alt.length < 3) continue;
+        let commonLen = 0;
+        for (const solved of tacticSolvedLines) {
+          let len = 0;
+          for (let i = 0; i < Math.min(alt.length, solved.length); i++) {
+            if (alt[i].uci === solved[i].uci) len++; else break;
+          }
+          if (len > commonLen) commonLen = len;
+        }
+        const totalUser = alt.filter(tm => tm.isUser).length;
+        const solvedUser = alt.slice(0, commonLen).filter(tm => tm.isUser).length;
+        if (solvedUser < totalUser) unsolvedAltCount++;
+      }
 
-      if (hasMoreAlts) {
+      if (unsolvedAltCount > 0) {
         // ── Line complete, but alternatives remain ──
         const lineLabel = tacticAltIdx === -1 ? 'Main line' : `Alt line ${tacticAltIdx + 1}`;
-        const remaining = tacticAltLines.length - nextAltIdx;
         showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
           `${lineLabel} solved!`,
-          `<code>${escHtml(move.san)}</code> — opponent has ${remaining > 1 ? remaining + ' other responses' : 'another response'}` +
+          `<code>${escHtml(move.san)}</code> — opponent has ${unsolvedAltCount > 1 ? unsolvedAltCount + ' other responses' : 'another response'}` +
           `<div style="margin-top:8px"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="loadNextTacticAlt()">▶ Next line</button></div>`);
         tacticMode = false; // pause until user clicks
       } else {
