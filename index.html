@@ -1070,7 +1070,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Polish: scrollable stats table, sticky header, constrain line display width</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">detectPlayerColor: check all gist usernames for cross-platform support</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1268,6 +1268,7 @@ let isRightClicking = false;
 let lastTouchTime = 0; // prevents synthetic mousedown from double-firing after touch
 
 let currentUsername = '';
+let knownUsernames = new Set(); // all usernames from gist (lowercase), for cross-platform detection
 let allGames = [];           // raw game objects from Lichess
 let allMistakes = [];        // extracted mistake positions
 let filteredMistakes = [];   // after filter applied
@@ -2770,6 +2771,7 @@ function logout() {
 
   appShown = false;
   currentUsername = '';
+  knownUsernames.clear();
   localStorage.removeItem('mistakelab_username');
   allGames = []; allMistakes = []; filteredMistakes = [];
   currentMistakeIdx = -1; activeGameId = null;
@@ -2789,6 +2791,7 @@ async function fetchGames(autoUsername) {
   const username = autoUsername || input.value.trim();
   if (!username) return;
   currentUsername = username;
+  knownUsernames.add(username.toLowerCase());
   if (!autoUsername) input.value = username;
 
   const btn = document.getElementById('btnFetch');
@@ -2808,6 +2811,10 @@ async function fetchGames(autoUsername) {
         if (gistCache && Array.isArray(gistCache.games)) {
           games = gistCache.games.filter(g => g.analysis && g.analysis.length > 0);
           gistOk = true;
+          // Collect all known usernames from gist
+          if (Array.isArray(gistCache.usernames)) {
+            for (const u of gistCache.usernames) knownUsernames.add(u.toLowerCase());
+          }
         }
       } catch (e) {
         console.warn('[GameCache] Gist read failed, falling back to localStorage:', e.message);
@@ -2823,6 +2830,8 @@ async function fetchGames(autoUsername) {
             games = localGames;
             console.log('[GameCache] Using localStorage fallback');
           }
+          // Collect usernames from local cache
+          for (const u of cacheUsernames(cache)) knownUsernames.add(u.toLowerCase());
         }
       }
 
@@ -3251,19 +3260,18 @@ function fenPositionKey(fen) {
 }
 
 // Detect which color the current user played in a game
-// Validates _playerColor against actual player names to catch bad stamps
+// Checks all knownUsernames (from gist) to handle cross-platform accounts
 function detectPlayerColor(game) {
-  const u = currentUsername.toLowerCase();
   const wName = game.players?.white?.user?.name?.toLowerCase();
   const wId = game.players?.white?.user?.id?.toLowerCase();
   const bName = game.players?.black?.user?.name?.toLowerCase();
   const bId = game.players?.black?.user?.id?.toLowerCase();
-  const matchesWhite = wName === u || wId === u;
-  const matchesBlack = bName === u || bId === u;
+  const matchesWhite = knownUsernames.has(wName) || knownUsernames.has(wId);
+  const matchesBlack = knownUsernames.has(bName) || knownUsernames.has(bId);
   // If we can determine from player names, that's authoritative
   if (matchesWhite && !matchesBlack) return 'white';
   if (matchesBlack && !matchesWhite) return 'black';
-  // Fall back to _playerColor (e.g. when username doesn't match either side)
+  // Fall back to _playerColor (e.g. edge cases)
   if (game._playerColor) return game._playerColor;
   return 'white'; // shouldn't happen — fallback
 }
