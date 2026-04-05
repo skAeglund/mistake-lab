@@ -1070,7 +1070,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Simplify: replace Bad Tactic with Bad Line for all tactics</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Remove dead handleInvalidateTactic/confirmInvalidateTactic code</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -5229,61 +5229,6 @@ function tacticTryAgain() {
       hintBtn.style.borderColor = '';
       hintBtn.style.color = '';
     }
-  }
-}
-
-function handleInvalidateTactic() {
-  const m = filteredMistakes[currentMistakeIdx];
-  if (!m || m.type !== 'tactic') return;
-  const pid = posId(m);
-  const container = document.getElementById('feedbackContainer');
-
-  if (m.found === false) {
-    // User missed this tactic in the game — offer to convert to mistake
-    const div = document.createElement('div');
-    div.className = 'feedback-box';
-    div.style.cssText = 'background:rgba(255,193,7,0.08);border-left:3px solid var(--yellow);';
-    div.innerHTML = `
-      <div class="feedback-title" style="color:var(--yellow)">Remove this tactic?</div>
-      <div class="feedback-text">
-        You missed this in the game. Converting to a mistake will keep the first move as a single-move review.
-        <div style="margin-top:8px;display:flex;gap:8px;">
-          <button class="btn btn-ghost btn-sm" style="border-color:var(--yellow);color:var(--yellow);" onclick="confirmInvalidateTactic('${pid}', true)">Convert to mistake</button>
-          <button class="btn btn-ghost btn-sm" onclick="confirmInvalidateTactic('${pid}', false)">Just remove</button>
-        </div>
-      </div>
-    `;
-    container.insertBefore(div, container.firstChild);
-  } else {
-    // User found this tactic — fast remove (no re-extraction needed)
-    invalidateTactic(pid);
-    allMistakes = allMistakes.filter(mm => posId(mm) !== pid);
-    applyFilters();
-    renderGameList();
-    buildReviewQueue();
-    updateSessionProgress();
-    showFeedback('info', 'Tactic removed', 'This tactic won\'t appear in reviews.');
-  }
-}
-
-function confirmInvalidateTactic(pid, convertToMistake) {
-  invalidateTactic(pid);
-  if (convertToMistake) {
-    // Need full re-extraction to un-suppress the underlying mistake
-    extractAllMistakes();
-    applyFilters();
-    renderGameList();
-    buildReviewQueue();
-    updateSessionProgress();
-    showFeedback('info', 'Converted to mistake', 'The first move will now appear as a single-move review.');
-  } else {
-    // Just remove — fast path
-    allMistakes = allMistakes.filter(mm => posId(mm) !== pid);
-    applyFilters();
-    renderGameList();
-    buildReviewQueue();
-    updateSessionProgress();
-    showFeedback('info', 'Tactic removed', 'This tactic won\'t appear in reviews.');
   }
 }
 
