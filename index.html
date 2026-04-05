@@ -1070,7 +1070,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix: skip Next Line button when remaining alts have no unsolved user moves</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add per-line invalidation for tactics (Bad Line button)</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1563,6 +1563,33 @@ function invalidateTactic(pid) {
   const s = getInvalidatedTactics();
   s.add(pid);
   localStorage.setItem('invalidatedTactics', JSON.stringify([...s]));
+}
+
+// ─── Invalidated Tactic Lines ───
+function lineFingerprint(moves) {
+  return moves.map(m => m.uci).join(',');
+}
+function getInvalidatedLines(pid) {
+  if (!gistData?.positions?.[pid]?.invalidatedLines) return new Set();
+  return new Set(gistData.positions[pid].invalidatedLines);
+}
+function invalidateLine(pid, fingerprint) {
+  if (!gistData) gistData = { positions: {}, version: 1 };
+  if (!gistData.positions[pid]) gistData.positions[pid] = {};
+  const lines = gistData.positions[pid].invalidatedLines || [];
+  if (!lines.includes(fingerprint)) {
+    lines.push(fingerprint);
+    gistData.positions[pid].invalidatedLines = lines;
+    debounceSyncToGist();
+  }
+}
+function tacticHasValidLines(m) {
+  const pid = posId(m);
+  const inv = getInvalidatedLines(pid);
+  if (inv.size === 0) return true;
+  const mainValid = !inv.has(lineFingerprint(m.tacticMoves));
+  const altValid = (m.tacticAltLines || []).some(alt => !inv.has(lineFingerprint(alt)));
+  return mainValid || altValid;
 }
 
 function posId(m) {
@@ -3198,6 +3225,7 @@ function extractAllMistakes() {
   for (const m of allMistakes) {
     if (m.type !== 'tactic' || !m.tacticMoves) continue;
     if (invalidated.has(posId(m))) continue; // don't suppress mistakes for invalidated tactics
+    if (!tacticHasValidLines(m)) continue;   // all lines invalidated — same as fully invalidated
     // Position before the first user move
     tacticFens.add(`${m.gameId}_${m.fenBefore}`);
     // Position before each subsequent user move (= FEN after the preceding opponent move)
@@ -3208,8 +3236,9 @@ function extractAllMistakes() {
     }
   }
   allMistakes = allMistakes.filter(m => {
-    // Remove invalidated tactics
+    // Remove invalidated tactics (whole-tactic or all-lines-invalidated)
     if (m.type === 'tactic' && invalidated.has(posId(m))) return false;
+    if (m.type === 'tactic' && !tacticHasValidLines(m)) return false;
     // Remove mistakes suppressed by active tactics
     if (m.type !== 'tactic' && tacticFens.has(`${m.gameId}_${m.fenBefore}`)) return false;
     return true;
@@ -4562,14 +4591,24 @@ function loadPosition(globalIdx) {
   if (m.type === 'tactic') {
     // ── Tactic mode setup ──
     tacticMode = true;
-    tacticMoves = m.tacticMoves;
     tacticStepIdx = 0;
     tacticWrongAttempts = 0;
     tacticHintUsed = false;
-    tacticAltLines = m.tacticAltLines || [];
     tacticAltIdx = -1;
     tacticSolvedLines = [];
     tacticPrefixUserMoves = 0;
+
+    // Filter out invalidated lines
+    const invLines = getInvalidatedLines(posId(m));
+    let mainMoves = m.tacticMoves;
+    let alts = (m.tacticAltLines || []).filter(alt => !invLines.has(lineFingerprint(alt)));
+    if (invLines.has(lineFingerprint(mainMoves))) {
+      // Main line invalidated — promote first valid alt
+      mainMoves = alts.shift() || mainMoves; // fallback shouldn't happen (tacticHasValidLines guards)
+    }
+    tacticMoves = mainMoves;
+    tacticAltLines = alts;
+
     const userMoveCount = tacticMoves.filter(tm => tm.isUser).length;
     const altCount = tacticAltLines.length;
     document.getElementById('posInfoContent').innerHTML = `
@@ -4778,10 +4817,12 @@ async function evaluateTacticMove(from, to, move) {
 
       // Check if there are unsolved alternative lines remaining
       // (an alt is "unsolved" only if it has user moves beyond the common prefix)
+      const invLinesCheck = getInvalidatedLines(posId(m));
       let unsolvedAltCount = 0;
       for (let ai = tacticAltIdx + 1; ai < tacticAltLines.length; ai++) {
         const alt = tacticAltLines[ai];
         if (!alt || alt.length < 3) continue;
+        if (invLinesCheck.has(lineFingerprint(alt))) continue;
         let commonLen = 0;
         for (const solved of tacticSolvedLines) {
           let len = 0;
@@ -4798,10 +4839,11 @@ async function evaluateTacticMove(from, to, move) {
       if (unsolvedAltCount > 0) {
         // ── Line complete, but alternatives remain ──
         const lineLabel = tacticAltIdx === -1 ? 'Main line' : `Alt line ${tacticAltIdx + 1}`;
+        const badLineBtn = `<button class="btn btn-ghost btn-sm" style="font-size:10px;color:var(--text-muted);border-color:var(--border);" onclick="handleInvalidateLine()">✕ Bad line</button>`;
         showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
           `${lineLabel} solved!`,
           `<code>${escHtml(move.san)}</code> — opponent has ${unsolvedAltCount > 1 ? unsolvedAltCount + ' other responses' : 'another response'}` +
-          `<div style="margin-top:8px"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="loadNextTacticAlt()">▶ Next line</button></div>`);
+          `<div style="margin-top:8px;display:flex;gap:8px;align-items:center;"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="loadNextTacticAlt()">▶ Next line</button>${badLineBtn}</div>`);
         tacticMode = false; // pause until user clicks
       } else {
         // ── Tactic fully complete (all lines solved) ──
@@ -4934,7 +4976,10 @@ function finishTacticComplete(lastMoveSan) {
 
   const linesLabel = tacticAltLines.length > 0
     ? ` (${tacticAltLines.length + 1} lines)` : '';
-  const invalidateBtn = `<div style="margin-top:8px;"><button class="btn btn-ghost btn-sm" style="font-size:10px;color:var(--text-muted);border-color:var(--border);" onclick="handleInvalidateTactic()">✕ Bad tactic</button></div>`;
+  const isMultiLine = tacticAltLines.length > 0 || getInvalidatedLines(pid).size > 0;
+  const invalidateBtn = isMultiLine
+    ? `<div style="margin-top:8px;"><button class="btn btn-ghost btn-sm" style="font-size:10px;color:var(--text-muted);border-color:var(--border);" onclick="handleInvalidateLine()">✕ Bad line</button></div>`
+    : `<div style="margin-top:8px;"><button class="btn btn-ghost btn-sm" style="font-size:10px;color:var(--text-muted);border-color:var(--border);" onclick="handleInvalidateTactic()">✕ Bad tactic</button></div>`;
 
   const moveLabel = lastMoveSan ? `<code>${escHtml(lastMoveSan)}</code> — solved` : 'Solved';
   showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
@@ -4956,6 +5001,17 @@ function loadNextTacticAlt() {
   tacticAltIdx++;
   const altLine = tacticAltLines[tacticAltIdx];
   if (!altLine || altLine.length < 3) return;
+
+  // Skip invalidated lines
+  const invLines = getInvalidatedLines(posId(m));
+  if (invLines.has(lineFingerprint(altLine))) {
+    if (tacticAltIdx + 1 < tacticAltLines.length) {
+      loadNextTacticAlt();
+    } else {
+      finishTacticComplete();
+    }
+    return;
+  }
 
   // Find the longest common prefix with any previously solved line.
   // This tells us how many moves the user has already proven they know.
@@ -5231,6 +5287,57 @@ function confirmInvalidateTactic(pid, convertToMistake) {
     buildReviewQueue();
     updateSessionProgress();
     showFeedback('info', 'Tactic removed', 'This tactic won\'t appear in reviews.');
+  }
+}
+
+function handleInvalidateLine() {
+  const m = filteredMistakes[currentMistakeIdx];
+  if (!m || m.type !== 'tactic') return;
+  const pid = posId(m);
+  const fp = lineFingerprint(tacticMoves);
+  invalidateLine(pid, fp);
+
+  // Check if any valid lines remain for this tactic
+  if (!tacticHasValidLines(m)) {
+    // No valid lines left — remove the entire tactic
+    allMistakes = allMistakes.filter(mm => posId(mm) !== pid);
+    applyFilters();
+    renderGameList();
+    buildReviewQueue();
+    updateSessionProgress();
+    showFeedback('info', 'Tactic removed', 'All lines invalidated — tactic won\'t appear in reviews.');
+    return;
+  }
+
+  // Check for remaining unsolved alts (same look-ahead logic as line completion)
+  let hasUnsolved = false;
+  for (let ai = tacticAltIdx + 1; ai < tacticAltLines.length; ai++) {
+    const alt = tacticAltLines[ai];
+    if (!alt || alt.length < 3) continue;
+    // Skip if this alt was just invalidated too
+    if (getInvalidatedLines(pid).has(lineFingerprint(alt))) continue;
+    let commonLen = 0;
+    for (const solved of tacticSolvedLines) {
+      let len = 0;
+      for (let i = 0; i < Math.min(alt.length, solved.length); i++) {
+        if (alt[i].uci === solved[i].uci) len++; else break;
+      }
+      if (len > commonLen) commonLen = len;
+    }
+    const totalUser = alt.filter(tm => tm.isUser).length;
+    const solvedUser = alt.slice(0, commonLen).filter(tm => tm.isUser).length;
+    if (solvedUser < totalUser) { hasUnsolved = true; break; }
+  }
+
+  if (hasUnsolved) {
+    // Advance to next valid alt line
+    loadNextTacticAlt();
+  } else if (srsRecorded) {
+    // Tactic was already completed — just confirm removal
+    showFeedback('info', 'Line removed', 'This line won\'t appear next time.');
+  } else {
+    // No more unsolved lines — finish the tactic
+    finishTacticComplete();
   }
 }
 
