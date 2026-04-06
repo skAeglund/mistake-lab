@@ -1138,7 +1138,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">All filters unified as multi-select toggles, removed All buttons</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Filter toggle: clicking last selected option in 2-option filters swaps to the other</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3588,9 +3588,24 @@ function toggleFilter(el) {
   const value = el.dataset.value;
   const filterSet = filters[filterType];
   if (filterSet.has(value)) {
-    if (filterSet.size <= 1) return; // keep at least one selected
-    filterSet.delete(value);
-    el.classList.remove('active');
+    if (filterSet.size <= 1) {
+      // For 2-option filters: swap to the other option
+      const allChips = document.querySelectorAll(`.filter-chip[data-filter="${filterType}"]`);
+      if (allChips.length === 2) {
+        const other = [...allChips].find(c => c.dataset.value !== value);
+        if (other) {
+          filterSet.delete(value);
+          el.classList.remove('active');
+          filterSet.add(other.dataset.value);
+          other.classList.add('active');
+        }
+      }
+      // For 3+ option filters: do nothing (keep at least one)
+      else return;
+    } else {
+      filterSet.delete(value);
+      el.classList.remove('active');
+    }
   } else {
     filterSet.add(value);
     el.classList.add('active');
