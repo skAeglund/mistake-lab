@@ -1136,7 +1136,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix engine line auto-advance: use goToLineMove for consistent lastmove highlight</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Deferred lastmove highlight for auto-advance (survives board animation)</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -5260,7 +5260,7 @@ function tacticAutoPlayOpponent() {
 
   boardObj.position(gameEngine.fen(), true);
   clearHighlights();
-  showLastMoveHighlight(oppMove.uci.substring(0, 2), oppMove.uci.substring(2, 4));
+  showLastMoveHighlightDeferred(oppMove.uci.substring(0, 2), oppMove.uci.substring(2, 4));
   highlightSquaresWithColor(oppMove.uci.substring(0, 2), oppMove.uci.substring(2, 4), 'var(--text-muted)');
 
   // Add opponent move to tactic line
@@ -6212,6 +6212,11 @@ function buildEngineLine(baseFen, userMove, contUci, cpWhite) {
   const startIdx = moves.length >= 2 ? 1 : 0;
   engineLine = { baseFen, moves, currentIdx: -1, alternatives: [], activeAlt: -1, extension: null, cpWhite: cpWhite ?? null };
   goToLineMove(startIdx);
+  // Re-apply highlight after board animation settles (goToLineMove applies it immediately but animation can wipe it)
+  if (moves[startIdx]?.uci) {
+    const u = moves[startIdx].uci;
+    setTimeout(() => showLastMoveHighlight(u.substring(0, 2), u.substring(2, 4)), 250);
+  }
   prepareEngineLineExtension();
   updateLineNavBar();
 }
@@ -7014,7 +7019,7 @@ async function advanceContinuation(contUci) {
 
   // Animate the opponent's move
   boardObj.position(gameEngine.fen(), true);
-  showLastMoveHighlight(fromSq, toSq);
+  showLastMoveHighlightDeferred(fromSq, toSq);
 
   // Record opponent's move in continuation line
   contLineSubtitle = `Opponent played ${escHtml(result.san)} (${moveSource})`;
@@ -7247,6 +7252,12 @@ function showLastMoveHighlight(from, to) {
 }
 function clearLastMoveHighlight() {
   document.querySelectorAll('.square-lastmove').forEach(el => el.classList.remove('square-lastmove'));
+}
+/** Apply lastmove highlight now AND re-apply after board animation settles (250ms).
+ *  Needed because boardObj.position(fen, true) animation can wipe DOM classes on completion. */
+function showLastMoveHighlightDeferred(from, to) {
+  showLastMoveHighlight(from, to);
+  setTimeout(() => showLastMoveHighlight(from, to), 250);
 }
 
 /** Compute the previous move (opponent's move) that led to a mistake/tactic position */
