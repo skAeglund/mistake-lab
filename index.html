@@ -1143,7 +1143,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Tactics icon: blue circle with white ! (Great move style)</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Unified icons: orange ? for mistakes, blue ! for tactics across all UI</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1434,6 +1434,10 @@ let tacticPrefixUserMoves = 0;   // user moves auto-played in common prefix (for
 
 let gameListDisplayLimit = 50;
 let reviewListDisplayLimit = 50;
+
+// ─── Icon constants ───
+const ICON_MISTAKE = '<svg width="14" height="14" viewBox="0 0 40 40" style="vertical-align:-2px"><circle cx="20" cy="20" r="18" fill="#e8922d"/><text x="20" y="28" text-anchor="middle" fill="#fff" font-size="26" font-weight="700" font-family="sans-serif">?</text></svg>';
+const ICON_TACTIC = '<svg width="14" height="14" viewBox="0 0 40 40" style="vertical-align:-2px"><circle cx="20" cy="20" r="18" fill="#5b9bd5"/><text x="20" y="28" text-anchor="middle" fill="#fff" font-size="26" font-weight="700" font-family="sans-serif">!</text></svg>';
 
 const filters = { color: new Set(['white','black']), severity: new Set(['mistake','blunder']), platform: new Set(['lichess','chesscom']), type: new Set(['mistake','tactic']), speed: new Set(['bullet','blitz','rapid','classical']), rated: new Set(['rated','casual']) };
 
@@ -4460,7 +4464,7 @@ function renderGameList() {
     }
 
     const tacticBadge = tacticCount > 0
-      ? `<span class="game-mistakes-badge" style="background:rgba(255,193,7,0.12);color:#ffc107;border-color:rgba(255,193,7,0.3);">⚡${tacticCount}</span>`
+      ? `<span class="game-mistakes-badge" style="background:rgba(91,155,213,0.12);color:#5b9bd5;border-color:rgba(91,155,213,0.3);">${ICON_TACTIC} ${tacticCount}</span>`
       : '';
 
     // Always show progress on games with mistakes
@@ -4576,8 +4580,8 @@ function renderReviewList() {
     }
 
     const moveLabel = isTactic
-      ? `⚡ Move ${m.moveNumber}${m.playerColor==='white'?'.':'…'} <span style="color:var(--yellow)">+${Math.abs(m.wpSwing)}%</span>`
-      : `Move ${m.moveNumber}${m.playerColor==='white'?'.':'…'} <span class="loss ${lossClass}">−${m.wpDrop}%</span>`;
+      ? `${ICON_TACTIC} Move ${m.moveNumber}${m.playerColor==='white'?'.':'…'} <span style="color:var(--yellow)">+${Math.abs(m.wpSwing)}%</span>`
+      : `${ICON_MISTAKE} Move ${m.moveNumber}${m.playerColor==='white'?'.':'…'} <span class="loss ${lossClass}">−${m.wpDrop}%</span>`;
 
     item.innerHTML = `
       <div class="review-item-top">
@@ -5047,7 +5051,7 @@ function loadPosition(globalIdx) {
     const altCount = tacticAltLines.length;
     document.getElementById('posInfoContent').innerHTML = `
       <div style="font-size:13px;line-height:1.7">
-        <div>⚡ <strong>Tactic</strong> — ${userMoveCount} moves to find${altCount > 0 ? ` <span style="font-size:11px;color:var(--text-muted)">(+${altCount} alt line${altCount>1?'s':''})</span>` : ''}</div>
+        <div>${ICON_TACTIC} <strong>Tactic</strong> — ${userMoveCount} moves to find${altCount > 0 ? ` <span style="font-size:11px;color:var(--text-muted)">(+${altCount} alt line${altCount>1?'s':''})</span>` : ''}</div>
         <div style="color:var(--green)">Win% swing: +${Math.abs(m.wpSwing)}%</div>
         <div id="tacticProgress" style="font-size:12px;margin-top:2px;color:var(--text-muted)">Move 1 of ${userMoveCount}</div>
         ${m.found === false ? '<div style="font-size:11px;margin-top:2px;color:var(--yellow)">You missed this in the game</div>' : ''}
@@ -5460,7 +5464,7 @@ function finishTacticComplete(lastMoveSan) {
 
   const moveLabel = lastMoveSan ? `<code>${escHtml(lastMoveSan)}</code> — solved` : 'Solved';
   showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
-    '⚡ Tactic complete!',
+    ICON_TACTIC + ' Tactic complete!',
     `${moveLabel}${linesLabel}` +
     (tacticWrongAttempts > 0 ? ` (${tacticWrongAttempts} wrong attempt${tacticWrongAttempts>1?'s':''})` : '') +
     srsInfo + contBtns);
@@ -5562,7 +5566,7 @@ function loadNextTacticAlt() {
   infoCard.style.display = '';
   document.getElementById('posInfoContent').innerHTML = `
     <div style="font-size:13px;line-height:1.7">
-      <div>⚡ <strong>${altLabel}</strong> — ${remainingUserMoves} move${remainingUserMoves !== 1 ? 's' : ''} to find</div>
+      <div>${ICON_TACTIC} <strong>${altLabel}</strong> — ${remainingUserMoves} move${remainingUserMoves !== 1 ? 's' : ''} to find</div>
       <div style="font-size:11px;color:var(--text-muted)">${isMaia ? '🧠 Opponent plays a common human mistake' : 'Opponent plays differently'}</div>
       <div id="tacticProgress" style="font-size:12px;margin-top:2px;color:var(--text-muted)">Move 1 of ${remainingUserMoves}</div>
     </div>
