@@ -7144,16 +7144,13 @@ function showDeferredEngineLine() {
 }
 
 function startTacticContinuation() {
-  // Build contLine from tactic line moves
-  if (tacticLine && tacticLine.moves.length > 0) {
-    contLine = {
-      baseFen: tacticLine.baseFen,
-      moves: tacticLine.moves.map(m => ({ san: m.san, uci: m.uci, fen: m.fen, isUser: m.isUser })),
-      currentIdx: tacticLine.moves.length - 1,
-    };
-    contLineBrowsing = false;
-    renderContLine();
-  }
+  // Start continuation from the tactic's final position (tactic line stays visible for reference)
+  contLine = {
+    baseFen: gameEngine.fen(),
+    moves: [],
+    currentIdx: -1,
+  };
+  contLineBrowsing = false;
   continuationMode = true;
   showMaiaControls();
   updateEvalBar();
