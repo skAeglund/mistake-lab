@@ -1073,7 +1073,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Stability check: track mid-depth best move changes</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Auto-play opponent's first reply in engine lines</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -6001,7 +6001,10 @@ function buildEngineLine(baseFen, userMove, contUci) {
 
   if (moves.length <= 1) return; // no continuation to show
 
-  engineLine = { baseFen, moves, currentIdx: 0, alternatives: [], activeAlt: -1, extension: null }; // start highlighting user's move
+  // Auto-advance to opponent's first reply so user sees the refutation immediately
+  const startIdx = moves.length >= 2 ? 1 : 0;
+  engineLine = { baseFen, moves, currentIdx: startIdx, alternatives: [], activeAlt: -1, extension: null };
+  boardObj.position(moves[startIdx].fen, false);
   renderEngineLine();
   prepareEngineLineExtension();
 }
@@ -6129,7 +6132,9 @@ async function handleEngineLineBranch(source, target) {
 
     engineLine.currentIdx = idx + 1; // point to the new move
     renderEngineLine();
-    goToLineMove(engineLine.currentIdx);
+    // Auto-advance to opponent's reply if available
+    const replyIdx1 = idx + 2;
+    goToLineMove(replyIdx1 < getActivePathLength() ? replyIdx1 : idx + 1);
     prepareEngineLineExtension();
     return undefined;
   }
@@ -6160,9 +6165,10 @@ async function handleEngineLineBranch(source, target) {
   engineLine.activeAlt = engineLine.alternatives.length - 1;
   engineLine.currentIdx = idx + 1; // point to the new move
   renderEngineLine();
-  goToLineMove(engineLine.currentIdx);
+  // Auto-advance to opponent's reply if available
+  const replyIdx2 = idx + 2;
+  goToLineMove(replyIdx2 < getActivePathLength() ? replyIdx2 : idx + 1);
   prepareEngineLineExtension();
-  goToLineMove(engineLine.currentIdx);
   return undefined;
 }
 
