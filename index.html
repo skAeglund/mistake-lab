@@ -1073,7 +1073,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Eval bar updates during engine line browsing and branching</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Eval bar updates after any non-best move</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2442,8 +2442,8 @@ function updateEvalBar() {
   // preAnalysis.bestCp is from side-to-move's perspective
   // Determine side to move from the FEN being analyzed
   let cpWhite;
-  if (browsingLine && engineLine && engineLine.currentIdx >= 0 && afterMoveCpWhite !== null) {
-    // Browsing engine line past user's move — use after-move eval
+  if (afterMoveCpWhite !== null) {
+    // After user's move — use post-move eval (updated by handleEvalResult, goToLineMove, etc.)
     cpWhite = afterMoveCpWhite;
   } else if (preAnalysis) {
     const fen = preAnalysisFen || currentSolveFen || m.fenBefore;
