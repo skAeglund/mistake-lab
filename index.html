@@ -1136,7 +1136,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Circle UX: ghost preview on mousedown, thinner lines, disappears on drag</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Circle polish: ghost on existing circles, drag-back restores ghost, brighter ghost arrows</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1344,6 +1344,7 @@ let arrowStartSquare = null;
 let activeArrows = new Set(); // Stores strings like "e2e4"
 let activeCircles = new Set(); // Stores square strings like "e4" for right-click circles
 let ghostCircle = null; // square string for preview circle during right-click hold
+let ghostCircleWasActive = false; // true if ghostCircle replaced an existing permanent circle
 let ghostArrow = null; // { from: 'e2', to: 'e4' }
 let bestMoveArrow = null; // { from: 'e2', to: 'e4' } — shown for engine best move reveals
 let analysisArrow = null; // { from: 'e2', to: 'e4' } — temporary arrow during SF analysis
@@ -4582,6 +4583,9 @@ function onBoardClick(e) {
     if (sq) {
       arrowStartSquare = sq;
       ghostArrow = null;
+      // If square already has a circle, pull it into ghost state (preview removal)
+      ghostCircleWasActive = activeCircles.has(sq);
+      if (ghostCircleWasActive) activeCircles.delete(sq);
       ghostCircle = sq;
       renderArrows();
     }
@@ -7376,8 +7380,19 @@ function initArrowListeners() {
     
     const currentSq = getSquareFromMouseEvent(e);
     if (currentSq && currentSq !== arrowStartSquare) {
-      ghostCircle = null; // dragging away — cancel circle preview, arrow takes over
+      // Dragging away — cancel circle preview, arrow takes over
+      if (ghostCircle) {
+        ghostCircle = null;
+        // Restore permanent circle if it was active before mousedown
+        if (ghostCircleWasActive) activeCircles.add(arrowStartSquare);
+      }
       ghostArrow = { from: arrowStartSquare, to: currentSq };
+      renderArrows();
+    } else if (currentSq && currentSq === arrowStartSquare && ghostArrow) {
+      // Dragged back to start — cancel arrow, restore ghost circle
+      ghostArrow = null;
+      if (ghostCircleWasActive) activeCircles.delete(arrowStartSquare);
+      ghostCircle = arrowStartSquare;
       renderArrows();
     }
   });
@@ -7395,10 +7410,10 @@ function initArrowListeners() {
           activeArrows.add(arrowKey);
         }
       } else if (endSq && endSq === arrowStartSquare) {
-        // Same square — toggle circle (like Lichess)
-        if (activeCircles.has(endSq)) {
-          activeCircles.delete(endSq);
-        } else {
+        // Same square — toggle circle
+        // ghostCircleWasActive means it was removed on mousedown → confirm removal (don't re-add)
+        // !ghostCircleWasActive means it was a new circle → confirm addition
+        if (!ghostCircleWasActive) {
           activeCircles.add(endSq);
         }
       }
@@ -7437,6 +7452,7 @@ function clearArrows() {
   activeCircles.clear();
   ghostArrow = null;
   ghostCircle = null;
+  ghostCircleWasActive = false;
   bestMoveArrow = null;
   analysisArrow = null;
   renderArrows();
@@ -7518,7 +7534,7 @@ function renderArrows() {
     // User-drawn arrows
     activeArrows.forEach(key => drawOne(key.substring(0, 2), key.substring(2, 4), 'rgba(21, 120, 27, 0.6)', 1));
     // Ghost arrow while dragging
-    if (ghostArrow) drawOne(ghostArrow.from, ghostArrow.to, 'rgba(21, 120, 27, 0.6)', 0.3);
+    if (ghostArrow) drawOne(ghostArrow.from, ghostArrow.to, 'rgba(21, 120, 27, 0.6)', 0.45);
 
     // User-drawn circles (right-click on same square, Lichess-style)
     const circleStroke = sqSize * 0.056;
