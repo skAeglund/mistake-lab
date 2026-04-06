@@ -1073,7 +1073,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Analysis arrow only on instability + evaluating feedback</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Stability check: track mid-depth best move changes</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2090,7 +2090,8 @@ function sfAnalyzeAdaptive(fen, { minDepth = 16, maxDepth = 22, stableCount = 2,
 
     const collected = {};
     let lastBestMove = null;
-    let stableDepths = 0;
+    let lastDepthSeen = 0;
+    let stableTransitions = 0; // consecutive depth transitions with unchanged best move
     let resolved = false;
     let unstable = false; // true after best move changes at least once past minDepth
 
@@ -2119,22 +2120,29 @@ function sfAnalyzeAdaptive(fen, { minDepth = 16, maxDepth = 22, stableCount = 2,
           collected[1] = { cp, moves, depth: d, firstMove };
         }
 
-        // Check stability after minDepth
+        // Check stability on every info line after minDepth
         if (d >= minDepth && !resolved) {
-          if (firstMove === lastBestMove) {
-            stableDepths++;
-          } else {
-            if (lastBestMove !== null) unstable = true; // best move changed → position is complex
-            stableDepths = 1;
+          const isNewDepth = d > lastDepthSeen;
+
+          if (firstMove !== lastBestMove) {
+            // Best move changed (mid-depth or at transition) — reset stability
+            if (lastBestMove !== null) unstable = true;
+            stableTransitions = 0;
             lastBestMove = firstMove;
+          } else if (isNewDepth) {
+            // Same best move at a new depth transition — increment
+            stableTransitions++;
           }
 
-          // Show arrow only after instability detected (user will be waiting longer)
+          if (isNewDepth) lastDepthSeen = d;
+
+          // Show arrow only after instability detected
           if (onUpdate && firstMove && unstable) onUpdate(d, firstMove, cp, moves);
-          // Stable for stableCount+1 consecutive depths (first observation + N increases)
-          if (stableDepths >= stableCount + 1) {
+
+          // Stable for N consecutive depth transitions
+          if (stableTransitions >= stableCount) {
             resolved = true;
-            sfLog('sfAnalyzeAdaptive', `STABLE EXIT at depth ${d} bestMove=${firstMove} stableFor=${stableDepths}`);
+            sfLog('sfAnalyzeAdaptive', `STABLE EXIT at depth ${d} bestMove=${firstMove} stableTransitions=${stableTransitions}`);
             resolve({ bestMove: firstMove, pvs: [collected[1]], fen, earlyExit: true, exitDepth: d });
           }
         }
