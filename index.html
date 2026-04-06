@@ -5190,7 +5190,7 @@ function onDrop(source, target) {
     clearArrows();
     clearSelection();
     handleEngineLineBranch(source, target);
-    return 'snapback'; // handleEngineLineBranch positions the board directly
+    return undefined; // let chessboard.js accept the drop; handleEngineLineBranch syncs the board
   }
 
   deselectionPending = false; // real drag happened — suppress mouseup deselection
@@ -6442,13 +6442,13 @@ function getActiveMoveAt(idx) {
 
 /** Handle a move made while browsing an engine line — create or extend a branch */
 async function handleEngineLineBranch(source, target) {
-  if (!engineLine) return 'snapback';
+  if (!engineLine) { boardObj.position(getEngineLineFen() || 'start', false); return; }
   const currentFen = getEngineLineFen();
-  if (!currentFen) return 'snapback';
+  if (!currentFen) { boardObj.position('start', false); return; }
 
   const chess = new Chess(currentFen);
   const move = chess.move({ from: source, to: target, promotion: 'q' });
-  if (!move) return 'snapback';
+  if (!move) { boardObj.position(currentFen, false); return; }
 
   // Clear old feedback from previous moves (after validating the move is legal)
   document.getElementById('feedbackContainer').innerHTML = '';
@@ -6461,8 +6461,8 @@ async function handleEngineLineBranch(source, target) {
   const nextIdx = idx + 1;
   const nextMove = getActiveMoveAt(nextIdx);
   if (nextMove && nextMove.uci === uci) {
-    // Same move — advance, then auto-play opponent's reply if available
-    goToLineMove(nextIdx);
+    // Same move — advance without animation, then auto-play opponent's reply
+    goToLineMove(nextIdx, false);
     const replyIdx = nextIdx + 1;
     if (replyIdx < getActivePathLength()) {
       setTimeout(() => { if (engineLine && engineLine.currentIdx === nextIdx) goToLineMove(replyIdx); }, 400);
@@ -6476,7 +6476,7 @@ async function handleEngineLineBranch(source, target) {
     if (mainNext && mainNext.uci === uci) {
       // Switch back to main line and advance
       engineLine.activeAlt = -1;
-      goToLineMove(nextIdx);
+      goToLineMove(nextIdx, false);
       renderEngineLine();
       const replyIdx2 = nextIdx + 1;
       if (replyIdx2 < getActivePathLength()) {
@@ -6492,7 +6492,7 @@ async function handleEngineLineBranch(source, target) {
     if (alt.branchIdx === idx && alt.moves.length > 0 && alt.moves[0].uci === uci) {
       // Switch to this alt
       engineLine.activeAlt = ai;
-      goToLineMove(nextIdx);
+      goToLineMove(nextIdx, false);
       renderEngineLine();
       const replyIdx3 = nextIdx + 1;
       if (replyIdx3 < getActivePathLength()) {
@@ -6505,8 +6505,8 @@ async function handleEngineLineBranch(source, target) {
   // New branch — build it with SF analysis
   const userMove = { san: move.san, uci, fen: newFen };
 
-  // Show the move on the board with animation
-  boardObj.position(newFen, true);
+  // Show the move on the board without animation (piece is already there from the drop)
+  boardObj.position(newFen, false);
   clearHighlights();
 
   // Determine if we're inside an alt (depth 1) and past its branch point
@@ -6828,7 +6828,7 @@ function goToAltLineMove(altIdx, globalIdx) {
   goToLineMove(globalIdx); // goToLineMove already calls renderEngineLine
 }
 
-function goToLineMove(idx) {
+function goToLineMove(idx, animate = true) {
   if (!engineLine) return;
   const pathLen = getActivePathLength();
   if (idx < -1 || idx >= pathLen) return;
@@ -6836,10 +6836,10 @@ function goToLineMove(idx) {
   browsingLine = true;
 
   if (idx === -1) {
-    boardObj.position(engineLine.baseFen, true);
+    boardObj.position(engineLine.baseFen, animate);
   } else {
     const fen = getEngineLineFen();
-    if (fen) boardObj.position(fen, true);
+    if (fen) boardObj.position(fen, animate);
   }
   clearHighlights();
 
