@@ -1073,7 +1073,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Auto-play opponent's first reply in engine lines</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Animate piece movement in engine lines</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -6004,7 +6004,7 @@ function buildEngineLine(baseFen, userMove, contUci) {
   // Auto-advance to opponent's first reply so user sees the refutation immediately
   const startIdx = moves.length >= 2 ? 1 : 0;
   engineLine = { baseFen, moves, currentIdx: startIdx, alternatives: [], activeAlt: -1, extension: null };
-  boardObj.position(moves[startIdx].fen, false);
+  boardObj.position(moves[startIdx].fen, true);
   renderEngineLine();
   prepareEngineLineExtension();
 }
@@ -6097,8 +6097,8 @@ async function handleEngineLineBranch(source, target) {
   // New branch — build it with SF analysis
   const userMove = { san: move.san, uci, fen: newFen };
 
-  // Show the move on the board immediately
-  boardObj.position(newFen, false);
+  // Show the move on the board with animation
+  boardObj.position(newFen, true);
   clearHighlights();
 
   // Determine if we're inside an alt (depth 1) and past its branch point
@@ -6410,10 +6410,10 @@ function goToLineMove(idx) {
   browsingLine = true;
 
   if (idx === -1) {
-    boardObj.position(engineLine.baseFen, false);
+    boardObj.position(engineLine.baseFen, true);
   } else {
     const fen = getEngineLineFen();
-    if (fen) boardObj.position(fen, false);
+    if (fen) boardObj.position(fen, true);
   }
   clearHighlights();
 
