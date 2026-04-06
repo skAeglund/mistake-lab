@@ -675,7 +675,7 @@
     display: none;
     position: fixed; bottom: 0; left: 0; right: 0;
     z-index: 60;
-    height: 48px;
+    height: 120px;
     background: var(--bg-panel);
     border-top: 1px solid var(--border);
     -webkit-tap-highlight-color: transparent;
@@ -686,18 +686,21 @@
     flex: 1;
     display: flex; align-items: center; justify-content: center;
     background: transparent; border: none;
-    color: var(--text-secondary);
-    font-size: 26px; font-weight: 700;
+    color: var(--text-muted);
+    font-size: 56px; font-weight: 700;
     cursor: pointer;
     transition: background 0.1s, color 0.1s;
   }
   .line-nav-bar-btn:active { background: var(--bg-card); color: var(--text-primary); }
   .line-nav-bar-sep {
     width: 1px; align-self: stretch;
-    margin: 10px 0;
+    margin: 16px 0;
     background: var(--border);
   }
   @media (min-width: 769px) { .line-nav-bar { display: none !important; } }
+
+  /* Continuation line subtitle: hidden by default, shown on mobile via media query */
+  .cont-mobile-extra, .cont-mobile-subtitle { display: none; }
 
   /* ─── Mobile toolbar ─── */
   .mobile-toolbar {
@@ -843,7 +846,18 @@
     #contLineContainer { order: -1; }
 
     /* Bottom padding when line nav bar is visible */
-    body.line-nav-active .panel-right { padding-bottom: 56px; }
+    body.line-nav-active .panel-right { padding-bottom: 128px; }
+
+    /* Hide old inline ‹ › nav row when mobile bottom bar is active */
+    body.line-nav-active .engine-line-nav { display: none !important; }
+
+    /* Merged continuation header: "Continuation Practice · Opponent played X (Source)" */
+    .cont-line-header { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 8px; }
+    .cont-mobile-extra { display: inline; }
+    .cont-mobile-subtitle { font-size: 11px; font-weight: 400; color: var(--text-muted); margin-left: auto; }
+
+    /* Hide posInfoCard on mobile when continuation info is merged into line header */
+    body.cont-info-merged #posInfoCard { display: none !important; }
 
     /* Engine line: nav buttons above the move list on mobile */
     .engine-line {
@@ -1105,7 +1119,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Mobile line nav bar: full-width ‹ › tap zones at bottom</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Mobile: larger line nav bar, hide old nav row, merge continuation info into line header</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1340,6 +1354,7 @@ const ENGINE_LINE_PLY = 6;     // max ply per engine line segment (extended on d
 let browsingLine = false;       // true when stepping through engine line
 let contLine = null;            // { baseFen, moves: [{san,uci,fen,isUser}], currentIdx }
 let contLineBrowsing = false;   // true when navigating to a non-terminal contLine position
+let contLineSubtitle = '';     // "Opponent played Nf3 (Maia)" — shown in cont line header on mobile
 let afterMoveCpWhite = null;    // cp from white's POV after user's move (for eval bar during line browsing)
 let continuationMode = false;   // true when in continuation practice
 let continuationContUci = '';   // stored for deferred engine line display
@@ -4557,6 +4572,7 @@ function onBoardClick(e) {
           currentSolveFen = contLine.moves[contLine.currentIdx]?.fen || contLine.baseFen;
           evaluateMove(move.from, move.to, move);
         } else {
+          contLineSubtitle = `Opponent played ${escHtml(move.san)} (Manual)`;
           addContLineMove(move.san, uci, gameEngine.fen(), false);
           contLineBrowsing = false;
           continuationMode = true;
@@ -4769,6 +4785,7 @@ function loadPosition(globalIdx) {
   browsingLine = false;
   contLine = null;
   contLineBrowsing = false;
+  contLineSubtitle = '';
   updateLineNavBar();
   clearHighlights();
   clearHintHighlights();
@@ -4972,6 +4989,7 @@ function onDrop(source, target) {
       currentSolveFen = contLine.moves[contLine.currentIdx]?.fen || contLine.baseFen;
       evaluateMove(source, target, move);
     } else {
+      contLineSubtitle = `Opponent played ${escHtml(move.san)} (Manual)`;
       addContLineMove(move.san, uci, gameEngine.fen(), false);
       contLineBrowsing = false;
       // User changed opponent's move — now it's the user's turn
@@ -6619,8 +6637,12 @@ function renderContLine() {
     ? '<span class="hint">Make a move to branch</span>'
     : '<span class="hint">← → to step</span>';
 
+  const subtitleHtml = contLineSubtitle
+    ? `<span class="cont-mobile-extra"> Practice</span><span class="cont-mobile-subtitle">${contLineSubtitle}</span>`
+    : '';
+
   div.innerHTML = `
-    <h4>Continuation</h4>
+    <h4 class="cont-line-header">Continuation${subtitleHtml}</h4>
     <div class="engine-line-moves">${movesHtml}</div>
     <div class="engine-line-nav">
       <button class="btn btn-ghost btn-sm" onclick="contLineStep(-1)">‹</button>
@@ -6704,6 +6726,7 @@ function updateLineNavBar() {
   const active = !!(engineLine || tacticLine || contLine);
   bar.classList.toggle('visible', active);
   document.body.classList.toggle('line-nav-active', active);
+  document.body.classList.toggle('cont-info-merged', !!(contLineSubtitle && contLine));
 }
 
 // ─── Continuation Practice ───
@@ -6838,6 +6861,7 @@ async function advanceContinuation(contUci) {
   boardObj.position(gameEngine.fen(), true);
 
   // Record opponent's move in continuation line
+  contLineSubtitle = `Opponent played ${escHtml(result.san)} (${moveSource})`;
   addContLineMove(result.san, opponentUci, gameEngine.fen(), false);
 
   // Check if game is over after opponent's move
@@ -6994,6 +7018,7 @@ function retryPosition() {
   browsingLine = false;
   contLine = null;
   contLineBrowsing = false;
+  contLineSubtitle = '';
   updateLineNavBar();
   clearHighlights();
   clearHintHighlights();
