@@ -1188,11 +1188,30 @@
         <button class="filter-chip active" data-filter="type" data-value="mistake" onclick="toggleFilter(this)"><svg width="16" height="16" viewBox="0 0 40 40"><circle cx="20" cy="20" r="18" fill="#e8922d"/><text x="20" y="28" text-anchor="middle" fill="#fff" font-size="26" font-weight="700" font-family="sans-serif">?</text></svg> Mistakes</button>
         <button class="filter-chip active" data-filter="type" data-value="tactic" onclick="toggleFilter(this)"><svg width="16" height="16" viewBox="0 0 40 40"><circle cx="20" cy="20" r="18" fill="#5b9bd5"/><text x="20" y="28" text-anchor="middle" fill="#fff" font-size="26" font-weight="700" font-family="sans-serif">!</text></svg> Tactics</button>
       </div>
-      <div class="filter-row" style="margin-top:6px;">
+      <div class="filter-row" style="margin-top:6px;justify-content:space-between;">
+        <span style="display:flex;gap:4px;">
         <button class="filter-chip active" data-filter="speed" data-value="bullet" onclick="toggleFilter(this)" title="Bullet"><img src="https://www.chess.com/bundles/web/images/color-icons/time-bullet.svg" width="16" height="16" alt="Bullet" style="opacity:0.85"></button>
         <button class="filter-chip active" data-filter="speed" data-value="blitz" onclick="toggleFilter(this)" title="Blitz"><img src="https://www.chess.com/bundles/web/images/color-icons/time-blitz.svg" width="16" height="16" alt="Blitz" style="opacity:0.85"></button>
         <button class="filter-chip active" data-filter="speed" data-value="rapid" onclick="toggleFilter(this)" title="Rapid"><img src="https://www.chess.com/bundles/web/images/color-icons/time-rapid.svg" width="16" height="16" alt="Rapid" style="opacity:0.85"></button>
         <button class="filter-chip active" data-filter="speed" data-value="classical" onclick="toggleFilter(this)" title="Classical"><img src="https://www.chess.com/bundles/web/images/color-icons/time-daily.svg" width="16" height="16" alt="Classical" style="opacity:0.85"></button>
+        </span>
+        <button class="filter-chip" id="btnAdvancedFilters" onclick="toggleAdvancedFilters()" title="More filters" style="padding:4px 6px;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="8" cy="6" r="2" fill="currentColor"/><circle cx="16" cy="12" r="2" fill="currentColor"/><circle cx="10" cy="18" r="2" fill="currentColor"/></svg>
+        </button>
+      </div>
+      <div id="advancedFilters" style="display:none;">
+        <div class="filter-row" style="margin-top:6px;">
+          <button class="filter-chip active" data-filter="severity" data-value="mistake" onclick="toggleFilter(this)">Mistakes</button>
+          <button class="filter-chip active" data-filter="severity" data-value="blunder" onclick="toggleFilter(this)">Blunders</button>
+        </div>
+        <div class="filter-row" style="margin-top:6px;">
+          <button class="filter-chip active" data-filter="platform" data-value="lichess" onclick="toggleFilter(this)">Lichess</button>
+          <button class="filter-chip active" data-filter="platform" data-value="chesscom" onclick="toggleFilter(this)">Chess.com</button>
+        </div>
+        <div class="filter-row" style="margin-top:6px;">
+          <button class="filter-chip active" data-filter="rated" data-value="rated" onclick="toggleFilter(this)">Rated</button>
+          <button class="filter-chip active" data-filter="rated" data-value="casual" onclick="toggleFilter(this)">Casual</button>
+        </div>
       </div>
       <div class="filter-row" style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);" id="openingFilterRow">
         <button class="filter-chip" id="btnOpeningFilter" onclick="toggleOpeningFilter()">♟ Opening</button>
@@ -1204,18 +1223,6 @@
       <div class="filter-row" style="margin-top:6px;">
         <button class="filter-chip active" data-filter="color" data-value="white" onclick="toggleFilter(this)">White</button>
         <button class="filter-chip active" data-filter="color" data-value="black" onclick="toggleFilter(this)">Black</button>
-      </div>
-      <div class="filter-row" style="display:none;">
-        <button class="filter-chip active" data-filter="severity" data-value="mistake" onclick="toggleFilter(this)">Mistakes</button>
-        <button class="filter-chip active" data-filter="severity" data-value="blunder" onclick="toggleFilter(this)">Blunders</button>
-      </div>
-      <div class="filter-row" style="display:none;">
-        <button class="filter-chip active" data-filter="platform" data-value="lichess" onclick="toggleFilter(this)">Lichess</button>
-        <button class="filter-chip active" data-filter="platform" data-value="chesscom" onclick="toggleFilter(this)">Chess.com</button>
-      </div>
-      <div class="filter-row" style="display:none;">
-        <button class="filter-chip active" data-filter="rated" data-value="rated" onclick="toggleFilter(this)">Rated</button>
-        <button class="filter-chip active" data-filter="rated" data-value="casual" onclick="toggleFilter(this)">Casual</button>
       </div>
     </div>
     <div class="game-list" id="gameList"></div>
@@ -3623,6 +3630,14 @@ function toggleFilter(el) {
   gameListDisplayLimit = 50;
   renderGameList();
   if (activeGameId) selectGame(activeGameId);
+}
+
+function toggleAdvancedFilters() {
+  const container = document.getElementById('advancedFilters');
+  const btn = document.getElementById('btnAdvancedFilters');
+  const visible = container.style.display !== 'none';
+  container.style.display = visible ? 'none' : '';
+  btn.classList.toggle('active', !visible);
 }
 
 // ─── Opening filter ───
