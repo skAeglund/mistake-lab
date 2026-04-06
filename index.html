@@ -4392,6 +4392,17 @@ function updateSessionProgress() {
 }
 
 // ─── Game list rendering ───
+const SPEED_ICON_URLS = {
+  bullet: 'https://www.chess.com/bundles/web/images/color-icons/time-bullet.svg',
+  blitz: 'https://www.chess.com/bundles/web/images/color-icons/time-blitz.svg',
+  rapid: 'https://www.chess.com/bundles/web/images/color-icons/time-rapid.svg',
+  classical: 'https://www.chess.com/bundles/web/images/color-icons/time-daily.svg',
+};
+function speedIcon(speed) {
+  const url = SPEED_ICON_URLS[speed];
+  return url ? `<img src="${url}" width="12" height="12" alt="" style="vertical-align:-1px;margin-right:2px;">` : '';
+}
+
 function renderGameList() {
   const list = document.getElementById('gameList');
   list.innerHTML = '';
@@ -4481,7 +4492,7 @@ function renderGameList() {
         <span class="game-color-dot ${color}"></span>
         <span>${date}</span>
         <span>·</span>
-        <span>${game.speed || ''}${progressText}</span>
+        <span>${speedIcon(game.speed)}${game.speed || ''}${progressText}</span>
       </div>
     `;
     list.appendChild(card);
