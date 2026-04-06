@@ -1136,7 +1136,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Circle polish: ghost on existing circles, drag-back restores ghost, brighter ghost arrows</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix: load gist data before extractAllMistakes so invalidations are applied on startup</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3170,9 +3170,9 @@ async function fetchGames(autoUsername) {
 
       btn.textContent = `Analyzing ${allGames.length} games…`;
       await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+      await loadFromGist(); // Load SRS progress + invalidations before extraction
       extractAllMistakes();
       applyFilters();
-      await loadFromGist(); // Load SRS progress
       showMainApp();
     } else {
       // ══ Standalone path (no Gist) — fetch from Lichess ══
