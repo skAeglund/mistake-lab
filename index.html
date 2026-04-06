@@ -1136,7 +1136,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix buildEngineLine lastmove highlight; remove feedback highlights before auto-advance</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix engine line auto-advance: use goToLineMove for consistent lastmove highlight</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -6210,13 +6210,8 @@ function buildEngineLine(baseFen, userMove, contUci, cpWhite) {
 
   // Auto-advance to opponent's first reply so user sees the refutation immediately
   const startIdx = moves.length >= 2 ? 1 : 0;
-  engineLine = { baseFen, moves, currentIdx: startIdx, alternatives: [], activeAlt: -1, extension: null, cpWhite: cpWhite ?? null };
-  boardObj.position(moves[startIdx].fen, true);
-  // Show previous-move highlight for the auto-advanced move
-  if (moves[startIdx].uci) {
-    showLastMoveHighlight(moves[startIdx].uci.substring(0, 2), moves[startIdx].uci.substring(2, 4));
-  }
-  renderEngineLine();
+  engineLine = { baseFen, moves, currentIdx: -1, alternatives: [], activeAlt: -1, extension: null, cpWhite: cpWhite ?? null };
+  goToLineMove(startIdx);
   prepareEngineLineExtension();
   updateLineNavBar();
 }
