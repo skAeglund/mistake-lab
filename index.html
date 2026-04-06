@@ -4383,6 +4383,9 @@ function showMainApp() {
   updateSessionProgress();
   initStockfish();
   initMaia(); // loads in background — non-blocking
+
+  // Start with the opening explorer open
+  enterOpeningFilter();
 }
 
 function updateSessionProgress() {
