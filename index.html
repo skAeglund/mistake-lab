@@ -1073,7 +1073,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix engine line branching: legal dots + click-to-move</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Analysis arrow only on instability + evaluating feedback</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2092,6 +2092,7 @@ function sfAnalyzeAdaptive(fen, { minDepth = 16, maxDepth = 22, stableCount = 2,
     let lastBestMove = null;
     let stableDepths = 0;
     let resolved = false;
+    let unstable = false; // true after best move changes at least once past minDepth
 
     sfWorker.postMessage('setoption name MultiPV value 1');
     sfWorker.postMessage(`position fen ${fen}`);
@@ -2118,16 +2119,18 @@ function sfAnalyzeAdaptive(fen, { minDepth = 16, maxDepth = 22, stableCount = 2,
           collected[1] = { cp, moves, depth: d, firstMove };
         }
 
-        if (onUpdate && firstMove && d >= minDepth) onUpdate(d, firstMove, cp, moves);
-
         // Check stability after minDepth
         if (d >= minDepth && !resolved) {
           if (firstMove === lastBestMove) {
             stableDepths++;
           } else {
+            if (lastBestMove !== null) unstable = true; // best move changed → position is complex
             stableDepths = 1;
             lastBestMove = firstMove;
           }
+
+          // Show arrow only after instability detected (user will be waiting longer)
+          if (onUpdate && firstMove && unstable) onUpdate(d, firstMove, cp, moves);
           // Stable for stableCount+1 consecutive depths (first observation + N increases)
           if (stableDepths >= stableCount + 1) {
             resolved = true;
@@ -2164,6 +2167,21 @@ function showAnalysisArrow(uci) {
 }
 function clearAnalysisArrow() {
   if (analysisArrow) { analysisArrow = null; renderArrows(); }
+}
+
+/** Show "Evaluating…" feedback box while waiting for SF analysis */
+function showEvaluatingFeedback() {
+  if (document.getElementById('engineLineEvalLoading')) return;
+  const container = document.getElementById('feedbackContainer');
+  const div = document.createElement('div');
+  div.id = 'engineLineEvalLoading';
+  div.className = 'feedback-box info';
+  div.innerHTML = '<div class="feedback-title">Evaluating…</div><div class="feedback-text"><div class="spinner" style="margin:8px 0"></div></div>';
+  container.insertBefore(div, container.firstChild);
+}
+function hideEvaluatingFeedback() {
+  const el = document.getElementById('engineLineEvalLoading');
+  if (el) el.remove();
 }
 
 // ─── Streaming pre-analysis (runs up to depth 30 while user thinks) ───
@@ -4705,6 +4723,7 @@ function loadPosition(globalIdx) {
   clearHighlights();
   clearHintHighlights();
   hideArrow();
+  hideEvaluatingFeedback();
 
   // Set up chess engine at the mistake position
   gameEngine = new Chess(m.fenBefore);
@@ -6087,10 +6106,12 @@ async function handleEngineLineBranch(source, target) {
     if (sfReady) {
       try {
         stopPreAnalysis();
+        showEvaluatingFeedback();
         const result = await sfAnalyzeAdaptive(newFen, {
           onUpdate: (d, uci) => { if (engineLine) showAnalysisArrow(uci); }
         });
         clearAnalysisArrow();
+        hideEvaluatingFeedback();
         if (engineLine && engineLine.activeAlt >= 0 && engineLine.alternatives[engineLine.activeAlt] === alt) {
           const contMoves = parseSfContinuation(newFen, result, ENGINE_LINE_PLY - 1);
           alt.moves.push(...contMoves);
@@ -6112,10 +6133,12 @@ async function handleEngineLineBranch(source, target) {
   if (sfReady) {
     try {
       stopPreAnalysis();
+      showEvaluatingFeedback();
       const result = await sfAnalyzeAdaptive(newFen, {
         onUpdate: (d, uci) => { if (engineLine) showAnalysisArrow(uci); }
       });
       clearAnalysisArrow();
+      hideEvaluatingFeedback();
       if (engineLine) {
         const contMoves = parseSfContinuation(newFen, result, ENGINE_LINE_PLY - 1);
         newAlt.moves.push(...contMoves);
@@ -6222,10 +6245,12 @@ async function _doExtendEngineLine() {
   if (!extMoves && sfReady) {
     try {
       stopPreAnalysis();
+      showEvaluatingFeedback();
       const result = await sfAnalyzeAdaptive(endFen, {
         onUpdate: (d, uci) => { if (engineLine) showAnalysisArrow(uci); }
       });
       clearAnalysisArrow();
+      hideEvaluatingFeedback();
       if (!engineLine) return;
       extMoves = parseSfContinuation(endFen, result, ENGINE_LINE_PLY);
     } catch { return; }
@@ -6427,6 +6452,7 @@ function exitEngineLine() {
   engineLine = null;
   const box = document.getElementById('engineLineBox');
   if (box) box.remove();
+  hideEvaluatingFeedback();
   clearHighlights();
   updateEvalBar();
 }
