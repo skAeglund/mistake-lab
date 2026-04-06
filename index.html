@@ -1073,7 +1073,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Animate piece movement in engine lines</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Eval bar updates during engine line browsing and branching</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2426,7 +2426,8 @@ function updateEvalBar() {
   const bar = document.getElementById('evalBar');
   if (!bar) return;
 
-  const shouldShow = evalBarEnabled && evalBarRevealed && !continuationMode && preAnalysis && currentMistakeIdx >= 0;
+  const hasEngineLineEval = browsingLine && engineLine && afterMoveCpWhite !== null;
+  const shouldShow = evalBarEnabled && evalBarRevealed && !continuationMode && currentMistakeIdx >= 0 && (preAnalysis || hasEngineLineEval);
   const wasVisible = bar.classList.contains('visible');
   bar.classList.toggle('visible', !!shouldShow);
   if (wasVisible !== !!shouldShow && boardObj) {
@@ -2444,10 +2445,12 @@ function updateEvalBar() {
   if (browsingLine && engineLine && engineLine.currentIdx >= 0 && afterMoveCpWhite !== null) {
     // Browsing engine line past user's move — use after-move eval
     cpWhite = afterMoveCpWhite;
-  } else {
+  } else if (preAnalysis) {
     const fen = preAnalysisFen || currentSolveFen || m.fenBefore;
     const sideToMove = fen.split(' ')[1]; // 'w' or 'b'
     cpWhite = sideToMove === 'w' ? preAnalysis.bestCp : -preAnalysis.bestCp;
+  } else {
+    return; // no eval data available
   }
 
   // Win probability from white's perspective (0-100)
@@ -5086,7 +5089,10 @@ async function evaluateTacticMove(from, to, move) {
         // Check if user already retried or navigated away
         if (!tacticMode || currentSolveFen !== snapshotSolveFen || currentAttempts !== snapshotAttempts) return;
         const contUci = afterResult?.pvs?.[0]?.moves || '';
-        buildEngineLine(snapshotSolveFen, move, contUci);
+        const afterCp = afterResult?.pvs?.[0]?.cp || 0;
+        const afterSide = afterFen.split(' ')[1]; // side to move AFTER user's move
+        const lineCpWhite = afterSide === 'w' ? afterCp : -afterCp;
+        buildEngineLine(snapshotSolveFen, move, contUci, lineCpWhite);
         if (engineLine) {
           engineLine.wrongMove = true;
           gameEngine.undo();
@@ -5869,7 +5875,7 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
       document.getElementById('btnHint').classList.add('hidden');
       clearHintHighlights();
     }
-    buildEngineLine(currentSolveFen, move, contUci || '');
+    buildEngineLine(currentSolveFen, move, contUci || '', afterMoveCpWhite);
 
     // For wrong moves (< 3 attempts): board stays at post-move position (engineLine idx 0).
     // Undo from gameEngine only so exitEngineLine restores the pre-move position correctly.
@@ -5965,7 +5971,7 @@ function uciToSan(fen, uci) {
 }
 
 // ─── Engine Line Browser ───
-function buildEngineLine(baseFen, userMove, contUci) {
+function buildEngineLine(baseFen, userMove, contUci, cpWhite) {
   // Build a sequence: user's move + engine continuation
   const chess = new Chess(baseFen);
   const moves = [];
@@ -6003,7 +6009,7 @@ function buildEngineLine(baseFen, userMove, contUci) {
 
   // Auto-advance to opponent's first reply so user sees the refutation immediately
   const startIdx = moves.length >= 2 ? 1 : 0;
-  engineLine = { baseFen, moves, currentIdx: startIdx, alternatives: [], activeAlt: -1, extension: null };
+  engineLine = { baseFen, moves, currentIdx: startIdx, alternatives: [], activeAlt: -1, extension: null, cpWhite: cpWhite ?? null };
   boardObj.position(moves[startIdx].fen, true);
   renderEngineLine();
   prepareEngineLineExtension();
@@ -6126,6 +6132,9 @@ async function handleEngineLineBranch(source, target) {
         if (engineLine && engineLine.activeAlt >= 0 && engineLine.alternatives[engineLine.activeAlt] === alt) {
           const contMoves = parseSfContinuation(newFen, result, ENGINE_LINE_PLY - 1);
           alt.moves.push(...contMoves);
+          const cp = result?.pvs?.[0]?.cp || 0;
+          const side = newFen.split(' ')[1];
+          alt.cpWhite = side === 'w' ? cp : -cp;
         }
       } catch (e) { /* ignore */ }
     }
@@ -6155,6 +6164,9 @@ async function handleEngineLineBranch(source, target) {
       if (engineLine) {
         const contMoves = parseSfContinuation(newFen, result, ENGINE_LINE_PLY - 1);
         newAlt.moves.push(...contMoves);
+        const cp = result?.pvs?.[0]?.cp || 0;
+        const side = newFen.split(' ')[1];
+        newAlt.cpWhite = side === 'w' ? cp : -cp;
       }
     } catch (e) { /* ignore */ }
   }
@@ -6214,14 +6226,19 @@ function prepareEngineLineExtension() {
       stopPreAnalysis();
       const result = await sfAnalyze(endFen, 22, 1);
       if (!engineLine || !result) return null;
-      return parseSfContinuation(endFen, result, ENGINE_LINE_PLY);
+      const moves = parseSfContinuation(endFen, result, ENGINE_LINE_PLY);
+      const cp = result?.pvs?.[0]?.cp || 0;
+      const side = endFen.split(' ')[1];
+      const cpW = side === 'w' ? cp : -cp;
+      return { moves, cpWhite: cpW };
     } catch { return null; }
   })();
 
-  engineLine.extension = { fen: endFen, promise: extensionPromise, moves: null };
-  extensionPromise.then(moves => {
-    if (engineLine && engineLine.extension && engineLine.extension.fen === endFen) {
-      engineLine.extension.moves = moves;
+  engineLine.extension = { fen: endFen, promise: extensionPromise, moves: null, cpWhite: null };
+  extensionPromise.then(data => {
+    if (engineLine && engineLine.extension && engineLine.extension.fen === endFen && data) {
+      engineLine.extension.moves = data.moves;
+      engineLine.extension.cpWhite = data.cpWhite;
     }
   });
 }
@@ -6249,10 +6266,12 @@ async function _doExtendEngineLine() {
   try { const c = new Chess(endFen); if (c.game_over()) return; } catch { return; }
 
   let extMoves = null;
+  let extCpWhite = null;
 
   // Use pre-analyzed extension if FEN matches and ready
   if (engineLine.extension && engineLine.extension.fen === endFen && engineLine.extension.moves) {
     extMoves = engineLine.extension.moves;
+    extCpWhite = engineLine.extension.cpWhite;
   }
 
   // Fallback: analyze on demand
@@ -6267,16 +6286,21 @@ async function _doExtendEngineLine() {
       hideEvaluatingFeedback();
       if (!engineLine) return;
       extMoves = parseSfContinuation(endFen, result, ENGINE_LINE_PLY);
+      const cp = result?.pvs?.[0]?.cp || 0;
+      const side = endFen.split(' ')[1];
+      extCpWhite = side === 'w' ? cp : -cp;
     } catch { return; }
   }
 
   if (!engineLine || !extMoves || extMoves.length === 0) return;
 
-  // Append moves to the active path
+  // Append moves and update eval on the active path
   if (engineLine.activeAlt >= 0) {
     engineLine.alternatives[engineLine.activeAlt].moves.push(...extMoves);
+    if (extCpWhite != null) engineLine.alternatives[engineLine.activeAlt].cpWhite = extCpWhite;
   } else {
     engineLine.moves.push(...extMoves);
+    if (extCpWhite != null) engineLine.cpWhite = extCpWhite;
   }
 
   // Advance to the first new move
@@ -6419,6 +6443,14 @@ function goToLineMove(idx) {
 
   // Re-render move list to update active highlights
   renderEngineLine();
+
+  // Update eval bar with the active path's evaluation
+  if (engineLine.activeAlt >= 0) {
+    const alt = engineLine.alternatives[engineLine.activeAlt];
+    if (alt && alt.cpWhite != null) afterMoveCpWhite = alt.cpWhite;
+  } else if (engineLine.cpWhite != null) {
+    afterMoveCpWhite = engineLine.cpWhite;
+  }
   updateEvalBar();
 }
 
@@ -6591,7 +6623,7 @@ function contLineGoToEnd() {
 function showContinuationOptions(m, move, contUci) {
   continuationContUci = contUci;
   // Store data for deferred engine line display
-  window._deferredEngineLine = { baseFen: currentSolveFen, move, contUci };
+  window._deferredEngineLine = { baseFen: currentSolveFen, move, contUci, cpWhite: afterMoveCpWhite };
 
   const container = document.getElementById('feedbackContainer');
   const div = document.createElement('div');
@@ -6616,7 +6648,7 @@ function showDeferredEngineLine() {
 
   const data = window._deferredEngineLine;
   if (data) {
-    buildEngineLine(data.baseFen, data.move, data.contUci);
+    buildEngineLine(data.baseFen, data.move, data.contUci, data.cpWhite);
   }
 }
 
