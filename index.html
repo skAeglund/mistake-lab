@@ -6206,7 +6206,7 @@ function prepareEngineLineExtension() {
   const extensionPromise = (async () => {
     try {
       stopPreAnalysis();
-      const result = await sfAnalyzeAdaptive(endFen);
+      const result = await sfAnalyze(endFen, 22, 1);
       if (!engineLine || !result) return null;
       return parseSfContinuation(endFen, result, ENGINE_LINE_PLY);
     } catch { return null; }
