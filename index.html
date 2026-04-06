@@ -1073,7 +1073,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Adaptive engine analysis: stability-based early exit + live arrow</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix engine line branching: legal dots + click-to-move</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -4413,14 +4413,15 @@ function onBoardClick(e) {
 
     if (selectedSquare) {
       if (sq === selectedSquare) { deselectionPending = true; return; }
-      if (piece && piece.color === turn) { clearSelection(); selectSquare(sq); return; }
+      if (piece && piece.color === turn) { clearSelection(); selectSquare(sq, chess); return; }
       e.stopPropagation(); e.preventDefault();
+      const fromSq = selectedSquare;
       clearSelection();
       clearArrows();
-      handleEngineLineBranch(selectedSquare, sq);
+      handleEngineLineBranch(fromSq, sq);
       return;
     } else {
-      if (piece && piece.color === turn) selectSquare(sq);
+      if (piece && piece.color === turn) selectSquare(sq, chess);
     }
     return;
   }
@@ -4542,13 +4543,13 @@ function onBoardMouseUp(e) {
   if (selectedSquare) clearSelection();
 }
 
-function selectSquare(sq) {
+function selectSquare(sq, overrideEngine) {
   selectedSquare = sq;
   const el = document.querySelector(`.square-${sq}`);
   if (el) el.classList.add('square-selected');
 
   // Show legal move dots
-  const engine = openingFilterMode ? filterChess : gameEngine;
+  const engine = overrideEngine || (openingFilterMode ? filterChess : gameEngine);
   if (engine) {
     const moves = engine.moves({ square: sq, verbose: true });
     for (const mv of moves) {
@@ -4818,7 +4819,8 @@ function onDragStart(source, piece) {
     if ((turn === 'w' && piece.search(/^b/) !== -1) ||
         (turn === 'b' && piece.search(/^w/) !== -1)) return false;
     if (selectedSquare !== source) clearSelection();
-    selectSquare(source);
+    const chess = new Chess(fen);
+    selectSquare(source, chess);
     return true;
   }
   if (!gameEngine || browsingLine) return false;
