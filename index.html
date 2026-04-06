@@ -1136,7 +1136,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add time control/rated filters, continuation refutation lines, engine line auto-advance, tactic continuation, drag-drop fix, explorer board bar</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Multi-select speed filter with icons, game-level speed/rated filtering, opening filter to bottom, animation teleport fix</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1196,24 +1196,23 @@
         <button class="filter-chip" data-filter="platform" data-value="lichess" onclick="setFilter(this)">Lichess</button>
         <button class="filter-chip" data-filter="platform" data-value="chesscom" onclick="setFilter(this)">Chess.com</button>
       </div>
-      <div class="filter-row" style="margin-top:6px;" id="openingFilterRow">
-        <button class="filter-chip" id="btnOpeningFilter" onclick="toggleOpeningFilter()">♟ Opening</button>
-        <span id="openingFilterChip" class="opening-filter-chip" style="display:none;" onclick="enterOpeningFilter()">
-          <span class="chip-text" id="openingFilterChipText"></span>
-          <button class="chip-close" onclick="event.stopPropagation();clearOpeningFilter()" title="Clear opening filter">✕</button>
-        </span>
-      </div>
       <div class="filter-row" style="margin-top:6px;">
-        <button class="filter-chip active" data-filter="speed" data-value="all" onclick="setFilter(this)">All speeds</button>
-        <button class="filter-chip" data-filter="speed" data-value="bullet" onclick="setFilter(this)">Bullet</button>
-        <button class="filter-chip" data-filter="speed" data-value="blitz" onclick="setFilter(this)">Blitz</button>
-        <button class="filter-chip" data-filter="speed" data-value="rapid" onclick="setFilter(this)">Rapid</button>
-        <button class="filter-chip" data-filter="speed" data-value="classical" onclick="setFilter(this)">Classical</button>
+        <button class="filter-chip active" data-filter="speed" data-value="bullet" onclick="toggleSpeedFilter(this)" title="Bullet">● Bullet</button>
+        <button class="filter-chip active" data-filter="speed" data-value="blitz" onclick="toggleSpeedFilter(this)" title="Blitz">⚡ Blitz</button>
+        <button class="filter-chip active" data-filter="speed" data-value="rapid" onclick="toggleSpeedFilter(this)" title="Rapid">⏱ Rapid</button>
+        <button class="filter-chip active" data-filter="speed" data-value="classical" onclick="toggleSpeedFilter(this)" title="Classical">♚ Classical</button>
       </div>
       <div class="filter-row" style="margin-top:6px;">
         <button class="filter-chip active" data-filter="rated" data-value="all" onclick="setFilter(this)">All games</button>
         <button class="filter-chip" data-filter="rated" data-value="rated" onclick="setFilter(this)">Rated</button>
         <button class="filter-chip" data-filter="rated" data-value="casual" onclick="setFilter(this)">Casual</button>
+      </div>
+      <div class="filter-row" style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);" id="openingFilterRow">
+        <button class="filter-chip" id="btnOpeningFilter" onclick="toggleOpeningFilter()">♟ Opening</button>
+        <span id="openingFilterChip" class="opening-filter-chip" style="display:none;" onclick="enterOpeningFilter()">
+          <span class="chip-text" id="openingFilterChipText"></span>
+          <button class="chip-close" onclick="event.stopPropagation();clearOpeningFilter()" title="Clear opening filter">✕</button>
+        </span>
       </div>
     </div>
     <div class="game-list" id="gameList"></div>
@@ -1433,7 +1432,7 @@ let tacticPrefixUserMoves = 0;   // user moves auto-played in common prefix (for
 let gameListDisplayLimit = 50;
 let reviewListDisplayLimit = 50;
 
-const filters = { color: 'both', severity: 'all', platform: 'all', type: 'all', speed: 'all', rated: 'all' };
+const filters = { color: 'both', severity: 'all', platform: 'all', type: 'all', speed: new Set(['bullet','blitz','rapid','classical']), rated: 'all' };
 
 // ─── Opening filter state ───
 let openingFilterMode = false;   // true when the board is in filter-input mode
@@ -3601,6 +3600,23 @@ function setFilter(el) {
   if (activeGameId) selectGame(activeGameId);
 }
 
+function toggleSpeedFilter(el) {
+  const value = el.dataset.value;
+  if (filters.speed.has(value)) {
+    // Don't allow deselecting all — keep at least one
+    if (filters.speed.size <= 1) return;
+    filters.speed.delete(value);
+    el.classList.remove('active');
+  } else {
+    filters.speed.add(value);
+    el.classList.add('active');
+  }
+  applyFilters();
+  gameListDisplayLimit = 50;
+  renderGameList();
+  if (activeGameId) selectGame(activeGameId);
+}
+
 // ─── Opening filter ───
 
 function fenPositionKey(fen) {
@@ -4300,9 +4316,9 @@ function applyFilters() {
       if (filters.platform === 'chesscom' && !isChesscom) return false;
       if (filters.platform === 'lichess' && isChesscom) return false;
     }
-    if (filters.speed !== 'all') {
+    if (filters.speed.size < 4) {
       const speed = m.game?.speed || '';
-      if (speed !== filters.speed) return false;
+      if (!filters.speed.has(speed)) return false;
     }
     if (filters.rated !== 'all') {
       const isRated = m.game?.rated !== false;
@@ -4376,6 +4392,17 @@ function renderGameList() {
     }
     let color = detectPlayerColor(g);
     if (filters.color !== 'both' && color !== filters.color) continue;
+    // Speed filter
+    if (filters.speed.size < 4) {
+      const speed = g.speed || '';
+      if (!filters.speed.has(speed)) continue;
+    }
+    // Rated filter
+    if (filters.rated !== 'all') {
+      const isRated = g.rated !== false;
+      if (filters.rated === 'rated' && !isRated) continue;
+      if (filters.rated === 'casual' && isRated) continue;
+    }
     // Opening filter
     if (openingFilterFen && !gameMatchesOpeningFen(g.id)) continue;
 
@@ -5136,7 +5163,6 @@ function onDrop(source, target) {
   if (move === null) { clearSelection(); return 'snapback'; }
 
   clearSelection();
-  boardObj.position(gameEngine.fen(), false); // sync board immediately — prevents snap animation teleport
   showLastMoveHighlight(source, target);
 
   // Making a move while browsing the continuation line — truncate and branch
@@ -5205,9 +5231,11 @@ function onDrop(source, target) {
 }
 
 function onSnapEnd() {
-  if (openingFilterMode) { if (filterChess) boardObj.position(filterChess.fen()); return; }
-  if (browsingLine && engineLine) { const f = getEngineLineFen(); if (f) boardObj.position(f); return; }
-  if (gameEngine) boardObj.position(gameEngine.fen());
+  // Always use false (no animation) — onSnapEnd is a cleanup step after drag;
+  // any intentional animation is handled explicitly by the move processing code.
+  if (openingFilterMode) { if (filterChess) boardObj.position(filterChess.fen(), false); return; }
+  if (browsingLine && engineLine) { const f = getEngineLineFen(); if (f) boardObj.position(f, false); return; }
+  if (gameEngine) boardObj.position(gameEngine.fen(), false);
 }
 
 // ─── Evaluate a move in tactic-solving mode ───
