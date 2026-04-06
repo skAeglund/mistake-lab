@@ -1073,7 +1073,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Eval bar updates after any non-best move</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix PC deselection, hint mid-line in continuation, redundant best-move button on retry</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -4874,14 +4874,20 @@ function onDragStart(source, piece) {
 function onDrop(source, target) {
   // Opening filter mode — route to filterMakeMove
   if (openingFilterMode) {
-    if (source === target) return 'snapback';
+    if (source === target) {
+      if (deselectionPending) { deselectionPending = false; clearSelection(); }
+      return 'snapback';
+    }
     clearSelection();
     const move = filterMakeMove(source, target, false);
     return move ? undefined : 'snapback';
   }
   if (!gameEngine) return 'snapback';
-  // If piece was dropped back on same square, it was a click — keep selection
-  if (source === target) return 'snapback';
+  // If piece was dropped back on same square, it was a click — deselect if pending
+  if (source === target) {
+    if (deselectionPending) { deselectionPending = false; clearSelection(); }
+    return 'snapback';
+  }
 
   // Engine line browsing — route to branch handler (don't touch gameEngine)
   if (browsingLine && engineLine) {
@@ -5770,7 +5776,7 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
       } else if (wpDrop <= 2) {
         title = firstAttemptFailed ? 'Got it on retry' : 'Excellent!';
         body = `<code>${escHtml(move.san)}</code> ` + (isExactBest ? `is the engine's top choice.` : `is nearly as good as the best move (−${wpStr}% win).`) +
-          bestMoveButton(revealId, bestMoveSan, bestMoveUci, m);
+          (isExactBest ? '' : bestMoveButton(revealId, bestMoveSan, bestMoveUci, m));
       } else {
         title = firstAttemptFailed ? 'Got it on retry' : 'Good enough!';
         body = `<code>${escHtml(move.san)}</code> is a reasonable alternative (−${wpStr}% win, −${Math.round(cpLoss)}cp).` +
@@ -6600,6 +6606,29 @@ function goToContLineMove(idx) {
   if (wasBrowsing && !contLineBrowsing && continuationMode) {
     currentSolveFen = fen;
     startPreAnalysis(currentSolveFen);
+  }
+
+  // When browsing mid-line, update currentSolveFen so hints analyse the right position
+  if (contLineBrowsing && continuationMode) {
+    const m = filteredMistakes[currentMistakeIdx];
+    const fenTurn = fen.split(' ')[1];
+    const isUserTurn = m && ((m.playerColor === 'white' && fenTurn === 'w') ||
+                              (m.playerColor === 'black' && fenTurn === 'b'));
+    const hintBtn = document.getElementById('btnHint');
+    if (isUserTurn) {
+      // Reset hint state and start pre-analysis for this position
+      currentSolveFen = fen;
+      hintLevel = 0;
+      hintMove = null;
+      hintArrow = null;
+      clearHintHighlights();
+      if (hintBtn) { hintBtn.classList.remove('hidden'); hintBtn.disabled = false; hintBtn.textContent = '💡 Hint'; hintBtn.style.borderColor = ''; hintBtn.style.color = ''; }
+      startPreAnalysis(currentSolveFen);
+    } else {
+      // Opponent's turn — hide hint
+      if (hintBtn) hintBtn.classList.add('hidden');
+      clearHintHighlights();
+    }
   }
 
   renderContLine();
