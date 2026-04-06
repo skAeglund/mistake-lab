@@ -1136,7 +1136,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Move invalidated tactics/mistakes to Gist progress data (cloud-synced)</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Circle UX: ghost preview on mousedown, thinner lines, disappears on drag</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1343,6 +1343,7 @@
 let arrowStartSquare = null;
 let activeArrows = new Set(); // Stores strings like "e2e4"
 let activeCircles = new Set(); // Stores square strings like "e4" for right-click circles
+let ghostCircle = null; // square string for preview circle during right-click hold
 let ghostArrow = null; // { from: 'e2', to: 'e4' }
 let bestMoveArrow = null; // { from: 'e2', to: 'e4' } — shown for engine best move reveals
 let analysisArrow = null; // { from: 'e2', to: 'e4' } — temporary arrow during SF analysis
@@ -4581,6 +4582,8 @@ function onBoardClick(e) {
     if (sq) {
       arrowStartSquare = sq;
       ghostArrow = null;
+      ghostCircle = sq;
+      renderArrows();
     }
     return;
   }
@@ -7373,6 +7376,7 @@ function initArrowListeners() {
     
     const currentSq = getSquareFromMouseEvent(e);
     if (currentSq && currentSq !== arrowStartSquare) {
+      ghostCircle = null; // dragging away — cancel circle preview, arrow takes over
       ghostArrow = { from: arrowStartSquare, to: currentSq };
       renderArrows();
     }
@@ -7401,6 +7405,7 @@ function initArrowListeners() {
       
       arrowStartSquare = null;
       ghostArrow = null;
+      ghostCircle = null;
       isRightClicking = false;
       renderArrows();
     }
@@ -7431,6 +7436,7 @@ function clearArrows() {
   activeArrows.clear();
   activeCircles.clear();
   ghostArrow = null;
+  ghostCircle = null;
   bestMoveArrow = null;
   analysisArrow = null;
   renderArrows();
@@ -7441,7 +7447,7 @@ function renderArrows() {
     const boardEl = document.querySelector('#board [class^="board-"]');
     if (!boardEl) return;
 
-    const hasSomething = activeArrows.size > 0 || activeCircles.size > 0 || ghostArrow || bestMoveArrow || analysisArrow || hintArrow || filterArrows.length > 0;
+    const hasSomething = activeArrows.size > 0 || activeCircles.size > 0 || ghostCircle || ghostArrow || bestMoveArrow || analysisArrow || hintArrow || filterArrows.length > 0;
     svg.classList.toggle('hidden', !hasSomething);
     if (!hasSomething) { svg.innerHTML = ''; return; }
 
@@ -7515,12 +7521,21 @@ function renderArrows() {
     if (ghostArrow) drawOne(ghostArrow.from, ghostArrow.to, 'rgba(21, 120, 27, 0.6)', 0.3);
 
     // User-drawn circles (right-click on same square, Lichess-style)
+    const circleStroke = sqSize * 0.056;
     activeCircles.forEach(sq => {
       const center = sqCenter(sq);
       if (!center) return;
       const r = sqSize * 0.46;
-      html += `<circle cx="${center.x}" cy="${center.y}" r="${r}" fill="none" stroke="rgba(21, 120, 27, 0.75)" stroke-width="${sqSize * 0.08}" opacity="0.9" />`;
+      html += `<circle cx="${center.x}" cy="${center.y}" r="${r}" fill="none" stroke="rgba(21, 120, 27, 0.75)" stroke-width="${circleStroke}" opacity="0.9" />`;
     });
+    // Ghost circle (preview while right-click held, before drag)
+    if (ghostCircle) {
+      const center = sqCenter(ghostCircle);
+      if (center) {
+        const r = sqSize * 0.46;
+        html += `<circle cx="${center.x}" cy="${center.y}" r="${r}" fill="none" stroke="rgba(21, 120, 27, 0.6)" stroke-width="${circleStroke * 0.7}" opacity="0.5" />`;
+      }
+    }
 
     svg.innerHTML = html;
 }
