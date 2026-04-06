@@ -1136,7 +1136,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Clear lastmove highlight on retryPosition</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Move invalidated tactics/mistakes to Gist progress data (cloud-synced)</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1642,24 +1642,71 @@ function markCompleted(pid) {
 
 // ─── Invalidated Tactics ───
 function getInvalidatedTactics() {
-  try { return new Set(JSON.parse(localStorage.getItem('invalidatedTactics') || '[]')); }
-  catch { return new Set(); }
+  const s = new Set();
+  if (!gistData?.positions) return s;
+  for (const [pid, data] of Object.entries(gistData.positions)) {
+    if (pid.includes('_t') && data.invalidated) s.add(pid);
+  }
+  return s;
 }
 function invalidateTactic(pid) {
-  const s = getInvalidatedTactics();
-  s.add(pid);
-  localStorage.setItem('invalidatedTactics', JSON.stringify([...s]));
+  if (!gistData) gistData = { positions: {}, version: 1 };
+  if (!gistData.positions[pid]) gistData.positions[pid] = {};
+  gistData.positions[pid].invalidated = true;
+  debounceSyncToGist();
 }
 
 // ─── Invalidated Mistakes ───
 function getInvalidatedMistakes() {
-  try { return new Set(JSON.parse(localStorage.getItem('invalidatedMistakes') || '[]')); }
-  catch { return new Set(); }
+  const s = new Set();
+  if (!gistData?.positions) return s;
+  for (const [pid, data] of Object.entries(gistData.positions)) {
+    if (!pid.includes('_t') && data.invalidated) s.add(pid);
+  }
+  return s;
 }
 function invalidateMistake(pid) {
-  const s = getInvalidatedMistakes();
-  s.add(pid);
-  localStorage.setItem('invalidatedMistakes', JSON.stringify([...s]));
+  if (!gistData) gistData = { positions: {}, version: 1 };
+  if (!gistData.positions[pid]) gistData.positions[pid] = {};
+  gistData.positions[pid].invalidated = true;
+  debounceSyncToGist();
+}
+
+/** Migrate legacy localStorage invalidations into gistData (one-time) */
+function migrateInvalidationsToGist() {
+  if (!gistData) return;
+  let dirty = false;
+  // Migrate invalidated tactics
+  try {
+    const raw = localStorage.getItem('invalidatedTactics');
+    if (raw) {
+      const pids = JSON.parse(raw);
+      for (const pid of pids) {
+        if (!gistData.positions[pid]) gistData.positions[pid] = {};
+        if (!gistData.positions[pid].invalidated) {
+          gistData.positions[pid].invalidated = true;
+          dirty = true;
+        }
+      }
+      localStorage.removeItem('invalidatedTactics');
+    }
+  } catch { /* ignore */ }
+  // Migrate invalidated mistakes
+  try {
+    const raw = localStorage.getItem('invalidatedMistakes');
+    if (raw) {
+      const pids = JSON.parse(raw);
+      for (const pid of pids) {
+        if (!gistData.positions[pid]) gistData.positions[pid] = {};
+        if (!gistData.positions[pid].invalidated) {
+          gistData.positions[pid].invalidated = true;
+          dirty = true;
+        }
+      }
+      localStorage.removeItem('invalidatedMistakes');
+    }
+  } catch { /* ignore */ }
+  if (dirty) debounceSyncToGist();
 }
 
 // ─── Invalidated Tactic Lines ───
@@ -1781,6 +1828,8 @@ async function loadFromGist() {
   setSyncStatus('syncing', 'Loading…');
   try {
     gistData = await gistRead();
+    // Migrate invalidated tactics/mistakes from localStorage to gistData
+    migrateInvalidationsToGist();
     // Merge into localStorage
     if (gistData?.positions && currentUsername) {
       const s = getCompletedSet();
