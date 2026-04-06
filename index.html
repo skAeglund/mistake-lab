@@ -588,7 +588,17 @@
    */
   .square-55d63 { isolation: isolate; }
 
-  /* Square highlight overlay via ::before */
+  /* Previous-move highlight (persistent, no fade — Lichess-style) */
+  .square-lastmove::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: rgba(155, 199, 0, 0.41);
+    pointer-events: none;
+    z-index: -1;
+  }
+
+  /* Square highlight overlay via ::before (wins over lastmove via cascade order) */
   .square-hl::before {
     content: '';
     position: absolute;
@@ -1126,7 +1136,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hint button: show grayed-out instead of hiding to prevent layout shifts</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Previous move highlights, right-click circles, bad mistake removal, mobile depth offset, opening filter Done opens panel</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1299,6 +1309,14 @@
     <input type="text" id="settingsGistId" placeholder="Auto-created if empty">
     <div class="hint">The ID from your Gist URL. Leave empty to create a new one.</div>
     <div id="settingsMsg" style="font-size:12px;margin-top:12px;min-height:18px;"></div>
+    <div id="mobileDepthSetting" style="display:none;margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
+      <label style="margin-top:0;">Mobile Depth Offset</label>
+      <div class="hint">Reduce engine search depth on mobile to save battery and speed up analysis.</div>
+      <div style="display:flex;align-items:center;gap:10px;margin-top:6px;">
+        <input type="range" id="settingsDepthOffset" min="0" max="6" step="1" value="1" style="flex:1;">
+        <span id="settingsDepthOffsetValue" style="font-size:13px;font-weight:600;min-width:20px;text-align:center;">1</span>
+      </div>
+    </div>
     <div class="modal-actions">
       <button class="btn btn-ghost btn-sm" onclick="disconnectGist()">Disconnect</button>
       <button class="btn btn-ghost btn-sm" onclick="closeSettings()">Cancel</button>
@@ -1324,6 +1342,7 @@
 // ─── Arrow drawing ───
 let arrowStartSquare = null;
 let activeArrows = new Set(); // Stores strings like "e2e4"
+let activeCircles = new Set(); // Stores square strings like "e4" for right-click circles
 let ghostArrow = null; // { from: 'e2', to: 'e4' }
 let bestMoveArrow = null; // { from: 'e2', to: 'e4' } — shown for engine best move reveals
 let analysisArrow = null; // { from: 'e2', to: 'e4' } — temporary arrow during SF analysis
@@ -1369,6 +1388,7 @@ let currentSolveFen = null;     // FEN the user is solving (differs from m.fenBe
 let firstAttemptFailed = false;  // tracks if first try on current position was wrong
 let srsRecorded = false;         // true after SRS grade is recorded; prevents retry from re-grading
 let evalBarEnabled = localStorage.getItem('evalBarEnabled') !== 'false'; // user toggle (default on)
+let mobileDepthOffset = parseInt(localStorage.getItem('mobileDepthOffset') || '1', 10); // reduce depth on mobile
 let evalBarRevealed = false;     // true after first attempt on current position
 let hintLevel = 0;               // 0=no hint, 1=piece shown, 2=full move shown
 let hintUsed = false;            // true if hint was used this position (forces SRS Again)
@@ -1629,6 +1649,17 @@ function invalidateTactic(pid) {
   const s = getInvalidatedTactics();
   s.add(pid);
   localStorage.setItem('invalidatedTactics', JSON.stringify([...s]));
+}
+
+// ─── Invalidated Mistakes ───
+function getInvalidatedMistakes() {
+  try { return new Set(JSON.parse(localStorage.getItem('invalidatedMistakes') || '[]')); }
+  catch { return new Set(); }
+}
+function invalidateMistake(pid) {
+  const s = getInvalidatedMistakes();
+  s.add(pid);
+  localStorage.setItem('invalidatedMistakes', JSON.stringify([...s]));
 }
 
 // ─── Invalidated Tactic Lines ───
@@ -1941,6 +1972,21 @@ function openSettings() {
   document.getElementById('settingsToken').value = gistToken;
   document.getElementById('settingsGistId').value = gistId;
   document.getElementById('settingsMsg').textContent = '';
+  // Show mobile depth offset setting only on mobile
+  const depthSetting = document.getElementById('mobileDepthSetting');
+  if (isMobileView()) {
+    depthSetting.style.display = '';
+    const slider = document.getElementById('settingsDepthOffset');
+    slider.value = mobileDepthOffset;
+    document.getElementById('settingsDepthOffsetValue').textContent = mobileDepthOffset;
+    slider.oninput = function() {
+      document.getElementById('settingsDepthOffsetValue').textContent = this.value;
+      mobileDepthOffset = parseInt(this.value, 10);
+      localStorage.setItem('mobileDepthOffset', mobileDepthOffset);
+    };
+  } else {
+    depthSetting.style.display = 'none';
+  }
   document.getElementById('settingsModal').classList.remove('hidden');
 }
 
@@ -2072,6 +2118,11 @@ function handleSfCrash(err) {
   }
 }
 
+/** Adjust depth for mobile — reduces by mobileDepthOffset on small screens */
+function depthAdj(d) {
+  return isMobileView() ? Math.max(8, d - mobileDepthOffset) : d;
+}
+
 function sfAnalyze(fen, depth = 16, multiPv = 1) {
   return new Promise(async (resolve) => {
     if (sfSearchActive) {
@@ -2093,7 +2144,7 @@ function sfAnalyze(fen, depth = 16, multiPv = 1) {
 
     sfWorker.postMessage(`setoption name MultiPV value ${multiPv}`);
     sfWorker.postMessage(`position fen ${fen}`);
-    sfWorker.postMessage(`go depth ${depth}`);
+    sfWorker.postMessage(`go depth ${depthAdj(depth)}`);
     sfSearchActive = true;
 
     function handler(e) {
@@ -2133,6 +2184,9 @@ function sfAnalyze(fen, depth = 16, multiPv = 1) {
 
 // ─── Adaptive analysis with stability-based early exit ───
 function sfAnalyzeAdaptive(fen, { minDepth = 16, maxDepth = 22, stableCount = 2, onUpdate = null } = {}) {
+  // Apply mobile depth offset
+  minDepth = depthAdj(minDepth);
+  maxDepth = depthAdj(maxDepth);
   return new Promise(async (resolve) => {
     if (sfSearchActive) {
       sfLog('sfAnalyzeAdaptive', `terminating worker (search was active)`);
@@ -2318,12 +2372,12 @@ function startPreAnalysis(fen) {
 }
 
 function launchPreAnalysisSearch(fen, session) {
-  sfLog('startPreAnalysis', `session=${session} BEGIN SEARCH: go depth 30 for fen=${fen.split(' ').slice(0,2).join(' ')}…`);
+  sfLog('startPreAnalysis', `session=${session} BEGIN SEARCH: go depth ${depthAdj(30)} for fen=${fen.split(' ').slice(0,2).join(' ')}…`);
   const collected = {};
 
   sfWorker.postMessage('setoption name MultiPV value 3');
   sfWorker.postMessage(`position fen ${fen}`);
-  sfWorker.postMessage('go depth 30');
+  sfWorker.postMessage(`go depth ${depthAdj(30)}`);
   sfSearchActive = true;
 
   function handler(e) {
@@ -2426,6 +2480,7 @@ function resolveWaiters() {
 }
 
 function waitForPreAnalysis(minDepth = 16) {
+  minDepth = depthAdj(minDepth);
   return new Promise((resolve) => {
     if (preAnalysis && (preAnalysisDepth >= minDepth || preAnalysisComplete)) {
       sfLog('waitForPreAnalysis', `IMMEDIATE resolve: depth=${preAnalysisDepth} complete=${preAnalysisComplete} bestMove=${preAnalysis?.bestMove} session=${preAnalysisSession} fen=${preAnalysisFen?.split(' ').slice(0,2).join(' ')}…`);
@@ -3411,6 +3466,7 @@ function extractAllMistakes() {
   // a mistake if the game actually reached that position (user found the 1st move).
   // Invalidated tactics don't suppress mistakes — the mistake comes back.
   const invalidated = getInvalidatedTactics();
+  const invalidatedMistakes = getInvalidatedMistakes();
   const tacticFens = new Set();
   for (const m of allMistakes) {
     if (m.type !== 'tactic' || !m.tacticMoves) continue;
@@ -3429,6 +3485,8 @@ function extractAllMistakes() {
     // Remove invalidated tactics (whole-tactic or all-lines-invalidated)
     if (m.type === 'tactic' && invalidated.has(posId(m))) return false;
     if (m.type === 'tactic' && !tacticHasValidLines(m)) return false;
+    // Remove invalidated mistakes
+    if (m.type === 'mistake' && invalidatedMistakes.has(posId(m))) return false;
     // Remove mistakes suppressed by active tactics
     if (m.type !== 'tactic' && tacticFens.has(`${m.gameId}_${m.fenBefore}`)) return false;
     return true;
@@ -3619,6 +3677,7 @@ function enterOpeningFilter() {
   // Initialize board if needed (must happen after mobile layout switch)
   if (!boardObj) { document.getElementById('board').offsetHeight; initBoard(); }
   boardObj.position(filterChess.fen());
+  clearLastMoveHighlight();
 
   // Restore saved filter orientation, or default to white on first entry
   const filterOrientation = savedFilterOrientation || 'white';
@@ -3684,6 +3743,16 @@ function exitOpeningFilter(clearFilter) {
   else renderGameList();
   updateSessionProgress();
   updateOpeningFilterUI();
+
+  // On mobile, open the left panel so user can select a game or start review
+  if (isMobileView() && !clearFilter) {
+    if (currentMistakeIdx >= 0) {
+      document.body.classList.add('drawer-open');
+    } else {
+      document.body.classList.remove('mobile-training');
+      document.body.classList.add('mobile-browsing');
+    }
+  }
 }
 
 function clearOpeningFilter() {
@@ -4557,7 +4626,9 @@ function onBoardClick(e) {
 
     clearSelection();
     if (move) {
+      clearArrows();
       boardObj.position(gameEngine.fen());
+      showLastMoveHighlight(move.from, move.to);
 
       // Making a move while browsing the continuation line
       if (contLine && contLineBrowsing) {
@@ -4807,6 +4878,11 @@ function loadPosition(globalIdx) {
   boardObj.orientation(m.playerColor);
   boardObj.position(m.fenBefore, true);
 
+  // Show previous move highlight (the opponent's move that led to this position)
+  clearLastMoveHighlight();
+  const prevSq = getPrevMoveSquares(m);
+  if (prevSq) showLastMoveHighlight(prevSq.from, prevSq.to);
+
   // Resize after layout settles (important on first load when container may have just become visible)
   requestAnimationFrame(() => { if (boardObj) { boardObj.resize(); renderArrows(); } });
 
@@ -4972,6 +5048,7 @@ function onDrop(source, target) {
   if (move === null) { clearSelection(); return 'snapback'; }
 
   clearSelection();
+  showLastMoveHighlight(source, target);
 
   // Making a move while browsing the continuation line — truncate and branch
   if (contLine && contLineBrowsing) {
@@ -5184,6 +5261,7 @@ function tacticAutoPlayOpponent() {
 
   boardObj.position(gameEngine.fen(), true);
   clearHighlights();
+  showLastMoveHighlight(oppMove.uci.substring(0, 2), oppMove.uci.substring(2, 4));
   highlightSquaresWithColor(oppMove.uci.substring(0, 2), oppMove.uci.substring(2, 4), 'var(--text-muted)');
 
   // Add opponent move to tactic line
@@ -5448,8 +5526,11 @@ function goToTacticLineMove(idx) {
     const uci = tacticLine.moves[idx].uci;
     const from = uci.substring(0, 2);
     const to = uci.substring(2, 4);
+    showLastMoveHighlight(from, to);
     const color = tacticLine.moves[idx].isUser ? '#3ecc6f' : 'var(--text-muted)';
     highlightSquaresWithColor(from, to, color);
+  } else {
+    clearLastMoveHighlight();
   }
 
   // Update active class in the move list
@@ -5482,6 +5563,7 @@ function tacticTryAgain() {
   document.getElementById('feedbackContainer').innerHTML = '';
   renderTacticLine(); // re-render to restore tactic line state
   clearHighlights();
+  clearLastMoveHighlight();
   // Reset hint for this step (keep hint highlight if 3+ wrong)
   hintLevel = 0;
   hintArrow = null;
@@ -5610,6 +5692,50 @@ function confirmInvalidateLine(convertToMistake) {
     showFeedback('info', 'Line removed', 'This line won\'t appear next time.');
   } else {
     finishTacticComplete();
+  }
+}
+
+// ─── Invalidate mistake (remove from review) ───
+function handleBadMistake() {
+  const m = filteredMistakes[currentMistakeIdx];
+  if (!m || m.type !== 'mistake') return;
+  const container = document.getElementById('feedbackContainer');
+  const div = document.createElement('div');
+  div.className = 'feedback-box';
+  div.style.cssText = 'background:rgba(255,193,7,0.08);border-left:3px solid var(--yellow);';
+  div.innerHTML = `
+    <div class="feedback-title" style="color:var(--yellow)">Remove this mistake?</div>
+    <div class="feedback-text">
+      This position won't appear in reviews.
+      <div style="margin-top:8px;display:flex;gap:8px;">
+        <button class="btn btn-ghost btn-sm" style="border-color:var(--yellow);color:var(--yellow);" onclick="confirmRemoveMistake()">Remove mistake</button>
+        <button class="btn btn-ghost btn-sm" onclick="this.closest('.feedback-box').remove()">Cancel</button>
+      </div>
+    </div>
+  `;
+  container.insertBefore(div, container.firstChild);
+}
+
+function confirmRemoveMistake() {
+  const m = filteredMistakes[currentMistakeIdx];
+  if (!m || m.type !== 'mistake') return;
+  const pid = posId(m);
+  invalidateMistake(pid);
+  allMistakes = allMistakes.filter(mm => posId(mm) !== pid);
+  applyFilters();
+  renderGameList();
+  buildReviewQueue();
+  updateSessionProgress();
+  showFeedback('info', 'Mistake removed', "This position won't appear in reviews.");
+  // Navigate to next position or show empty state
+  if (filteredMistakes.length === 0) {
+    currentMistakeIdx = -1;
+    boardObj.position('start');
+    clearLastMoveHighlight();
+    document.getElementById('emptyMsg').classList.remove('hidden');
+    document.getElementById('posInfoCard').style.display = 'none';
+  } else {
+    loadPosition(Math.min(currentMistakeIdx, filteredMistakes.length - 1));
   }
 }
 
@@ -5854,7 +5980,8 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
         srsRecorded = true;
         srsInfo = srsTag(gradeLabel, srsCard);
       }
-      showColorFeedback(color, colorDim, title, body + srsInfo);
+      showColorFeedback(color, colorDim, title, body + srsInfo +
+        (!tacticMode ? '<div style="margin-top:6px;"><button class="btn btn-ghost btn-sm" style="font-size:10px;color:var(--text-muted);border-color:var(--border);" onclick="handleBadMistake()">✕ Bad mistake</button></div>' : ''));
       updateSessionProgress();
       renderQueue();
     }
@@ -5885,7 +6012,8 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
         `<code>${escHtml(move.san)}</code> loses ${wpStr}% winning chances (−${Math.round(cpLoss)}cp).` +
         bestMoveButton(revealId, bestMoveSan, bestMoveUci, m) +
         `<div class="attempts-indicator">${renderAttemptDots()}</div>` +
-        srsInfo2);
+        srsInfo2 +
+        '<div style="margin-top:6px;"><button class="btn btn-ghost btn-sm" style="font-size:10px;color:var(--text-muted);border-color:var(--border);" onclick="handleBadMistake()">✕ Bad mistake</button></div>');
       updateSessionProgress();
       renderQueue();
     }
@@ -5919,6 +6047,7 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
           srsRecorded = true;
           showFeedback('info', 'SRS: Again', `Next review: ${srsCard.due}`);
         }
+        showFeedback('info', '', '<button class="btn btn-ghost btn-sm" style="font-size:10px;color:var(--text-muted);border-color:var(--border);" onclick="handleBadMistake()">✕ Bad mistake</button>');
         updateSessionProgress();
         renderQueue();
       }
@@ -6011,6 +6140,7 @@ function revealBestMove(bestMoveUci, m) {
   const fromSq = bestMoveUci.substring(0, 2);
   const toSq = bestMoveUci.substring(2, 4);
   clearHighlights();
+  clearLastMoveHighlight();
   highlightSquaresWithColor(fromSq, toSq, 'rgb(62,207,142)');
   drawArrow(fromSq, toSq);
   showFeedback('info', 'Best move revealed',
@@ -6514,6 +6644,16 @@ function goToLineMove(idx) {
   }
   clearHighlights();
 
+  // Previous-move highlight for current line move
+  if (idx >= 0) {
+    const lineMove = getActiveMoveAt(idx);
+    if (lineMove && lineMove.uci) {
+      showLastMoveHighlight(lineMove.uci.substring(0, 2), lineMove.uci.substring(2, 4));
+    }
+  } else {
+    clearLastMoveHighlight();
+  }
+
   // Re-render move list to update active highlights
   renderEngineLine();
 
@@ -6573,6 +6713,7 @@ function exitEngineLine() {
   if (box) box.remove();
   hideEvaluatingFeedback();
   clearHighlights();
+  clearLastMoveHighlight();
   updateEvalBar();
   updateLineNavBar();
 }
@@ -6674,6 +6815,14 @@ function goToContLineMove(idx) {
   const fen = idx === -1 ? contLine.baseFen : contLine.moves[idx].fen;
   boardObj.position(fen, false);
   gameEngine.load(fen);
+
+  // Previous-move highlight for current cont line move
+  if (idx >= 0 && contLine.moves[idx].uci) {
+    const uci = contLine.moves[idx].uci;
+    showLastMoveHighlight(uci.substring(0, 2), uci.substring(2, 4));
+  } else {
+    clearLastMoveHighlight();
+  }
 
   // When returning to the live end, restore pre-analysis
   if (wasBrowsing && !contLineBrowsing && continuationMode) {
@@ -6867,6 +7016,7 @@ async function advanceContinuation(contUci) {
 
   // Animate the opponent's move
   boardObj.position(gameEngine.fen(), true);
+  showLastMoveHighlight(fromSq, toSq);
 
   // Record opponent's move in continuation line
   contLineSubtitle = `Opponent played ${escHtml(result.san)} (${moveSource})`;
@@ -7088,6 +7238,37 @@ function clearBoard() {
   document.getElementById('posCounter').textContent = '—';
 }
 
+// ─── Previous-move highlights (persistent, Lichess-style) ───
+function showLastMoveHighlight(from, to) {
+  clearLastMoveHighlight();
+  if (!from || !to) return;
+  const fromEl = document.querySelector(`.square-${from}`);
+  const toEl = document.querySelector(`.square-${to}`);
+  if (fromEl) fromEl.classList.add('square-lastmove');
+  if (toEl) toEl.classList.add('square-lastmove');
+}
+function clearLastMoveHighlight() {
+  document.querySelectorAll('.square-lastmove').forEach(el => el.classList.remove('square-lastmove'));
+}
+
+/** Compute the previous move (opponent's move) that led to a mistake/tactic position */
+function getPrevMoveSquares(m) {
+  const game = allGames.find(g => g.id === m.gameId);
+  if (!game || !game.moves) return null;
+  const moves = game.moves.split(' ');
+  const targetPly = m.movePly; // 1-based; fenBefore is the position BEFORE move at this ply
+  // The move that created fenBefore is at index targetPly - 2 (0-based)
+  const prevIdx = targetPly - 2;
+  if (prevIdx < 0) return null;
+  const chess = new Chess(game.initialFen || undefined);
+  for (let i = 0; i <= prevIdx; i++) {
+    const result = chess.move(moves[i], { sloppy: true });
+    if (!result) return null;
+    if (i === prevIdx) return { from: result.from, to: result.to };
+  }
+  return null;
+}
+
 function clearHighlights() {
   document.querySelectorAll('.square-hl').forEach(el => {
     el.classList.remove('square-hl');
@@ -7150,6 +7331,13 @@ function initArrowListeners() {
         } else {
           activeArrows.add(arrowKey);
         }
+      } else if (endSq && endSq === arrowStartSquare) {
+        // Same square — toggle circle (like Lichess)
+        if (activeCircles.has(endSq)) {
+          activeCircles.delete(endSq);
+        } else {
+          activeCircles.add(endSq);
+        }
       }
       
       arrowStartSquare = null;
@@ -7182,6 +7370,7 @@ function getSquareFromMouseEvent(e) {
 
 function clearArrows() {
   activeArrows.clear();
+  activeCircles.clear();
   ghostArrow = null;
   bestMoveArrow = null;
   analysisArrow = null;
@@ -7193,7 +7382,7 @@ function renderArrows() {
     const boardEl = document.querySelector('#board [class^="board-"]');
     if (!boardEl) return;
 
-    const hasSomething = activeArrows.size > 0 || ghostArrow || bestMoveArrow || analysisArrow || hintArrow || filterArrows.length > 0;
+    const hasSomething = activeArrows.size > 0 || activeCircles.size > 0 || ghostArrow || bestMoveArrow || analysisArrow || hintArrow || filterArrows.length > 0;
     svg.classList.toggle('hidden', !hasSomething);
     if (!hasSomething) { svg.innerHTML = ''; return; }
 
@@ -7265,6 +7454,14 @@ function renderArrows() {
     activeArrows.forEach(key => drawOne(key.substring(0, 2), key.substring(2, 4), 'rgba(21, 120, 27, 0.6)', 1));
     // Ghost arrow while dragging
     if (ghostArrow) drawOne(ghostArrow.from, ghostArrow.to, 'rgba(21, 120, 27, 0.6)', 0.3);
+
+    // User-drawn circles (right-click on same square, Lichess-style)
+    activeCircles.forEach(sq => {
+      const center = sqCenter(sq);
+      if (!center) return;
+      const r = sqSize * 0.46;
+      html += `<circle cx="${center.x}" cy="${center.y}" r="${r}" fill="none" stroke="rgba(21, 120, 27, 0.75)" stroke-width="${sqSize * 0.08}" opacity="0.9" />`;
+    });
 
     svg.innerHTML = html;
 }
