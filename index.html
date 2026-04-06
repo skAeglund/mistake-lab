@@ -1136,7 +1136,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Deferred lastmove highlight for auto-advance (survives board animation)</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Clear lastmove highlight on retryPosition</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -7182,6 +7182,7 @@ function retryPosition() {
   contLineSubtitle = '';
   updateLineNavBar();
   clearHighlights();
+  clearLastMoveHighlight();
   clearHintHighlights();
   hideArrow();
 
