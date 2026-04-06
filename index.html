@@ -1136,7 +1136,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Previous move highlights, right-click circles, bad mistake removal, mobile depth offset, opening filter Done opens panel</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix buildEngineLine lastmove highlight; remove feedback highlights before auto-advance</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -5205,7 +5205,6 @@ async function evaluateTacticMove(from, to, move) {
     if (currentAttempts === 1) firstAttemptFailed = true;
     const color = '#e05757';
     const colorDim = 'rgba(224,87,87,0.08)';
-    highlightSquaresWithColor(from, to, color);
 
     // After 3 total wrong guesses, highlight the hint button
     if (tacticWrongAttempts >= 3) {
@@ -5986,7 +5985,8 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
       renderQueue();
     }
   } else if (wpDrop <= 10) {
-    highlightSquaresWithColor(from, to, color);
+    // No feedback highlight — engine line (normal) or opponent auto-play (continuation)
+    // will immediately change the board position, making it irrelevant.
 
     if (continuationMode) {
       // Continuation mode: inaccurate still counts as good enough to continue
@@ -6029,7 +6029,6 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
       boardObj.position(gameEngine.fen());
     } else {
       // Normal mode: keep bad move on board, engine line will show why it's bad
-      highlightSquaresWithColor(from, to, color);
       const tryAgainBtn = currentAttempts < 3
         ? `<button class="btn btn-ghost btn-sm" style="margin-top:6px;border-color:var(--accent);color:var(--accent);" onclick="tryAgainFromLine()">↺ Try again</button>`
         : '';
@@ -6213,6 +6212,10 @@ function buildEngineLine(baseFen, userMove, contUci, cpWhite) {
   const startIdx = moves.length >= 2 ? 1 : 0;
   engineLine = { baseFen, moves, currentIdx: startIdx, alternatives: [], activeAlt: -1, extension: null, cpWhite: cpWhite ?? null };
   boardObj.position(moves[startIdx].fen, true);
+  // Show previous-move highlight for the auto-advanced move
+  if (moves[startIdx].uci) {
+    showLastMoveHighlight(moves[startIdx].uci.substring(0, 2), moves[startIdx].uci.substring(2, 4));
+  }
   renderEngineLine();
   prepareEngineLineExtension();
   updateLineNavBar();
