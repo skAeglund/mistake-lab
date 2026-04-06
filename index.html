@@ -1136,7 +1136,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix: load gist data before extractAllMistakes so invalidations are applied on startup</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add time control/rated filters, continuation refutation lines, engine line auto-advance, tactic continuation, drag-drop fix, explorer board bar</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1203,6 +1203,18 @@
           <button class="chip-close" onclick="event.stopPropagation();clearOpeningFilter()" title="Clear opening filter">✕</button>
         </span>
       </div>
+      <div class="filter-row" style="margin-top:6px;">
+        <button class="filter-chip active" data-filter="speed" data-value="all" onclick="setFilter(this)">All speeds</button>
+        <button class="filter-chip" data-filter="speed" data-value="bullet" onclick="setFilter(this)">Bullet</button>
+        <button class="filter-chip" data-filter="speed" data-value="blitz" onclick="setFilter(this)">Blitz</button>
+        <button class="filter-chip" data-filter="speed" data-value="rapid" onclick="setFilter(this)">Rapid</button>
+        <button class="filter-chip" data-filter="speed" data-value="classical" onclick="setFilter(this)">Classical</button>
+      </div>
+      <div class="filter-row" style="margin-top:6px;">
+        <button class="filter-chip active" data-filter="rated" data-value="all" onclick="setFilter(this)">All games</button>
+        <button class="filter-chip" data-filter="rated" data-value="rated" onclick="setFilter(this)">Rated</button>
+        <button class="filter-chip" data-filter="rated" data-value="casual" onclick="setFilter(this)">Casual</button>
+      </div>
     </div>
     <div class="game-list" id="gameList"></div>
   </div>
@@ -1226,6 +1238,12 @@
       </button>
       <div id="board" style="width:100%"></div>
       <svg class="hidden" id="arrowSvg"></svg>
+    </div>
+    <div class="position-nav hidden" id="filterBoardBar" style="justify-content:center;">
+      <button class="btn btn-ghost btn-sm" onclick="filterFlipBoard()" title="Flip board">⇅ Flip</button>
+      <button class="btn btn-ghost btn-sm" onclick="filterUndoMove()" title="Undo move">← Undo</button>
+      <button class="btn btn-ghost btn-sm" onclick="filterRedoMove()" title="Redo move">Redo →</button>
+      <button class="btn btn-ghost btn-sm" onclick="filterReset()" title="Reset to starting position">↺ Reset</button>
     </div>
     <div class="position-nav" id="positionNav">
       <span class="position-nav-arrows">
@@ -1385,6 +1403,7 @@ let contLineBrowsing = false;   // true when navigating to a non-terminal contLi
 let contLineSubtitle = '';     // "Opponent played Nf3 (Maia)" — shown in cont line header on mobile
 let afterMoveCpWhite = null;    // cp from white's POV after user's move (for eval bar during line browsing)
 let continuationMode = false;   // true when in continuation practice
+let contWrongMovePending = false; // true when showing refutation engine line during continuation
 let continuationContUci = '';   // stored for deferred engine line display
 let currentSolveFen = null;     // FEN the user is solving (differs from m.fenBefore in continuation)
 let firstAttemptFailed = false;  // tracks if first try on current position was wrong
@@ -1414,7 +1433,7 @@ let tacticPrefixUserMoves = 0;   // user moves auto-played in common prefix (for
 let gameListDisplayLimit = 50;
 let reviewListDisplayLimit = 50;
 
-const filters = { color: 'both', severity: 'all', platform: 'all', type: 'all' };
+const filters = { color: 'both', severity: 'all', platform: 'all', type: 'all', speed: 'all', rated: 'all' };
 
 // ─── Opening filter state ───
 let openingFilterMode = false;   // true when the board is in filter-input mode
@@ -3929,12 +3948,14 @@ function updateOpeningFilterUI() {
   const evalBar = document.getElementById('evalBar');
   const evalBtn = document.getElementById('btnEvalBar');
   const lineDisplay = document.getElementById('openingLineDisplay');
+  const filterBar = document.getElementById('filterBoardBar');
 
   if (openingFilterMode) {
     // Show filter panel, hide training UI
     panel.classList.remove('hidden');
     feedbackArea.classList.add('hidden');
     posNav.style.display = 'none';
+    if (filterBar) filterBar.classList.remove('hidden');
     emptyMsg.classList.add('hidden');
     if (evalBar) evalBar.style.display = 'none';
     if (evalBtn) evalBtn.style.display = 'none';
@@ -3964,6 +3985,7 @@ function updateOpeningFilterUI() {
     panel.classList.add('hidden');
     feedbackArea.classList.remove('hidden');
     posNav.style.display = '';
+    if (filterBar) filterBar.classList.add('hidden');
     if (evalBar) evalBar.style.display = '';
     if (evalBtn) evalBtn.style.display = '';
     btn.classList.remove('active');
@@ -4277,6 +4299,15 @@ function applyFilters() {
       const isChesscom = m.game?._source === 'chesscom' || m.gameId.startsWith('chesscom_');
       if (filters.platform === 'chesscom' && !isChesscom) return false;
       if (filters.platform === 'lichess' && isChesscom) return false;
+    }
+    if (filters.speed !== 'all') {
+      const speed = m.game?.speed || '';
+      if (speed !== filters.speed) return false;
+    }
+    if (filters.rated !== 'all') {
+      const isRated = m.game?.rated !== false;
+      if (filters.rated === 'rated' && !isRated) return false;
+      if (filters.rated === 'casual' && isRated) return false;
     }
     if (openingFilterFen && !gameMatchesOpeningFen(m.gameId)) return false;
     return true;
@@ -4904,6 +4935,7 @@ function loadPosition(globalIdx) {
   closeMobileFeedback();
   preAnalysisPaused = false;
   continuationMode = false;
+  contWrongMovePending = false;
   tacticMode = false;
   tacticStepIdx = 0;
   tacticMoves = [];
@@ -5104,6 +5136,7 @@ function onDrop(source, target) {
   if (move === null) { clearSelection(); return 'snapback'; }
 
   clearSelection();
+  boardObj.position(gameEngine.fen(), false); // sync board immediately — prevents snap animation teleport
   showLastMoveHighlight(source, target);
 
   // Making a move while browsing the continuation line — truncate and branch
@@ -5238,7 +5271,10 @@ async function evaluateTacticMove(from, to, move) {
         showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
           `${lineLabel} solved!`,
           `<code>${escHtml(move.san)}</code> — opponent has ${unsolvedAltCount > 1 ? unsolvedAltCount + ' other responses' : 'another response'}` +
-          `<div style="margin-top:8px;display:flex;gap:8px;align-items:center;"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="loadNextTacticAlt()">▶ Next line</button>${badLineBtn}</div>`);
+          `<div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="loadNextTacticAlt()">▶ Next line</button>` +
+          `<button class="btn btn-ghost btn-sm" style="font-size:12px;" onclick="startTacticContinuation()">▶ Play Continuation</button>` +
+          `<button class="btn btn-ghost btn-sm" style="font-size:12px;" onclick="showTacticEngineLine()">Show engine line</button>` +
+          `${badLineBtn}</div>`);
         tacticMode = false; // pause until user clicks
       } else {
         // ── Tactic fully complete (all lines solved) ──
@@ -5377,14 +5413,18 @@ function finishTacticComplete(lastMoveSan) {
 
   const linesLabel = tacticAltLines.length > 0
     ? ` (${tacticAltLines.length + 1} lines)` : '';
-  const invalidateBtn = `<div style="margin-top:8px;"><button class="btn btn-ghost btn-sm" style="font-size:10px;color:var(--text-muted);border-color:var(--border);" onclick="handleInvalidateLine()">✕ Bad line</button></div>`;
+  const invalidateBtn = `<button class="btn btn-ghost btn-sm" style="font-size:10px;color:var(--text-muted);border-color:var(--border);" onclick="handleInvalidateLine()">✕ Bad line</button>`;
+  const contBtns = `<div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">` +
+    `<button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="startTacticContinuation()">▶ Play Continuation</button>` +
+    `<button class="btn btn-ghost btn-sm" style="font-size:12px;" onclick="showTacticEngineLine()">Show engine line</button>` +
+    `${invalidateBtn}</div>`;
 
   const moveLabel = lastMoveSan ? `<code>${escHtml(lastMoveSan)}</code> — solved` : 'Solved';
   showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
     '⚡ Tactic complete!',
     `${moveLabel}${linesLabel}` +
     (tacticWrongAttempts > 0 ? ` (${tacticWrongAttempts} wrong attempt${tacticWrongAttempts>1?'s':''})` : '') +
-    srsInfo + invalidateBtn);
+    srsInfo + contBtns);
   updateSessionProgress();
   renderQueue();
   tacticMode = false;
@@ -6078,11 +6118,13 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
     if (currentAttempts === 1) firstAttemptFailed = true;
 
     if (continuationMode) {
-      // Continuation mode: simpler feedback, undo immediately so user retries
-      showColorFeedback(color, colorDim, 'Try again',
-        `<code>${escHtml(move.san)}</code> loses ${wpStr}% winning chances (−${Math.round(cpLoss)}cp).`);
-      gameEngine.undo();
-      boardObj.position(gameEngine.fen());
+      // Continuation mode: show refutation engine line (like normal mode)
+      contWrongMovePending = true;
+      continuationMode = false; // pause continuation so engine line browsing/branching works
+      const tryAgainBtn = `<button class="btn btn-ghost btn-sm" style="margin-top:6px;border-color:var(--accent);color:var(--accent);" onclick="tryAgainFromContinuationLine()">↺ Try again</button>`;
+      showColorFeedback(color, colorDim, 'Not quite',
+        `<code>${escHtml(move.san)}</code> loses ${wpStr}% winning chances (−${Math.round(cpLoss)}cp).` +
+        bestMoveButton(revealId, bestMoveSan, bestMoveUci, m) + tryAgainBtn);
     } else {
       // Normal mode: keep bad move on board, engine line will show why it's bad
       const tryAgainBtn = currentAttempts < 3
@@ -6110,11 +6152,25 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
   }
 
   if (continuationMode) {
-    // In continuation: good move (≤10%) advances, bad move (>10%) was already undone — user retries
+    // In continuation: good move (≤10%) advances, bad move (>10%) now handled by contWrongMovePending
     if (wpDrop <= 10) {
       // Record user's move in the continuation line
       addContLineMove(move.san, from + to + (move.promotion || ''), gameEngine.fen(), true);
       setTimeout(() => advanceContinuation(contUci), 500);
+    }
+  } else if (contWrongMovePending) {
+    // Continuation wrong move — show engine line with refutation and allow branching
+    document.getElementById('btnHint').classList.add('hidden');
+    clearHintHighlights();
+    hideMaiaControls();
+    buildEngineLine(currentSolveFen, move, contUci || '', afterMoveCpWhite);
+    if (engineLine) {
+      engineLine.wrongMove = true;
+      gameEngine.undo();
+      browsingLine = true;
+    } else {
+      gameEngine.undo();
+      boardObj.position(gameEngine.fen(), false);
     }
   } else if (wpDrop <= 5) {
     // Good move in normal mode — show buttons instead of auto engine line
@@ -6325,6 +6381,9 @@ async function handleEngineLineBranch(source, target) {
   const move = chess.move({ from: source, to: target, promotion: 'q' });
   if (!move) return 'snapback';
 
+  // Clear old feedback from previous moves (after validating the move is legal)
+  document.getElementById('feedbackContainer').innerHTML = '';
+
   const uci = source + target + (move.promotion || '');
   const newFen = chess.fen();
   const idx = engineLine.currentIdx;
@@ -6333,8 +6392,12 @@ async function handleEngineLineBranch(source, target) {
   const nextIdx = idx + 1;
   const nextMove = getActiveMoveAt(nextIdx);
   if (nextMove && nextMove.uci === uci) {
-    // Same move — just advance
+    // Same move — advance, then auto-play opponent's reply if available
     goToLineMove(nextIdx);
+    const replyIdx = nextIdx + 1;
+    if (replyIdx < getActivePathLength()) {
+      setTimeout(() => { if (engineLine && engineLine.currentIdx === nextIdx) goToLineMove(replyIdx); }, 400);
+    }
     return undefined;
   }
 
@@ -6346,6 +6409,10 @@ async function handleEngineLineBranch(source, target) {
       engineLine.activeAlt = -1;
       goToLineMove(nextIdx);
       renderEngineLine();
+      const replyIdx2 = nextIdx + 1;
+      if (replyIdx2 < getActivePathLength()) {
+        setTimeout(() => { if (engineLine && engineLine.currentIdx === nextIdx) goToLineMove(replyIdx2); }, 400);
+      }
       return undefined;
     }
   }
@@ -6358,6 +6425,10 @@ async function handleEngineLineBranch(source, target) {
       engineLine.activeAlt = ai;
       goToLineMove(nextIdx);
       renderEngineLine();
+      const replyIdx3 = nextIdx + 1;
+      if (replyIdx3 < getActivePathLength()) {
+        setTimeout(() => { if (engineLine && engineLine.currentIdx === nextIdx) goToLineMove(replyIdx3); }, 400);
+      }
       return undefined;
     }
   }
@@ -6798,6 +6869,29 @@ function tryAgainFromLine() {
   startPreAnalysis(currentSolveFen);
 }
 
+function tryAgainFromContinuationLine() {
+  exitEngineLine();
+  contWrongMovePending = false;
+  continuationMode = true;
+  // Clear feedback and engine line UI
+  document.getElementById('feedbackContainer').innerHTML = '';
+  // Restore hint button
+  const hintBtn = document.getElementById('btnHint');
+  hintBtn.classList.remove('hidden');
+  hintBtn.disabled = false;
+  hintBtn.textContent = '💡 Hint';
+  hintBtn.style.borderColor = '';
+  hintBtn.style.color = '';
+  hintLevel = 0;
+  hintMove = null;
+  clearHintHighlights();
+  showMaiaControls();
+  currentAttempts = 0;
+  // Restore the continuation position and restart analysis
+  startPreAnalysis(currentSolveFen);
+  renderContLine();
+}
+
 // ─── Continuation Line ───
 function addContLineMove(san, uci, fen, isUser) {
   if (!contLine) return;
@@ -6867,6 +6961,7 @@ function renderContLine() {
 
 function goToContLineMove(idx) {
   if (!contLine || idx < -1 || idx >= contLine.moves.length) return;
+  if (engineLine) return; // engine line takes priority — don't navigate contLine while engine line is showing
   contLine.currentIdx = idx;
   const wasBrowsing = contLineBrowsing;
   contLineBrowsing = idx < contLine.moves.length - 1;
@@ -6975,6 +7070,62 @@ function showDeferredEngineLine() {
   const data = window._deferredEngineLine;
   if (data) {
     buildEngineLine(data.baseFen, data.move, data.contUci, data.cpWhite);
+  }
+}
+
+function startTacticContinuation() {
+  // Build contLine from tactic line moves
+  if (tacticLine && tacticLine.moves.length > 0) {
+    contLine = {
+      baseFen: tacticLine.baseFen,
+      moves: tacticLine.moves.map(m => ({ san: m.san, uci: m.uci, fen: m.fen, isUser: m.isUser })),
+      currentIdx: tacticLine.moves.length - 1,
+    };
+    contLineBrowsing = false;
+    renderContLine();
+  }
+  continuationMode = true;
+  showMaiaControls();
+  updateEvalBar();
+  document.getElementById('feedbackContainer').innerHTML = '';
+  // gameEngine is at the final tactic position — let Maia/SF pick opponent's response
+  advanceContinuation('');
+}
+
+async function showTacticEngineLine() {
+  document.getElementById('feedbackContainer').innerHTML = '';
+  // Build engine line from current position using Stockfish
+  const fen = gameEngine.fen();
+  if (!sfReady) return;
+  stopPreAnalysis();
+  showEvaluatingFeedback();
+  try {
+    const result = await sfAnalyzeAdaptive(fen, {
+      onUpdate: (d, uci) => { showAnalysisArrow(uci); }
+    });
+    clearAnalysisArrow();
+    hideEvaluatingFeedback();
+    if (!result || !result.pvs || !result.pvs[0]) return;
+    const pv = result.pvs[0];
+    const contUci = pv.moves || '';
+    const cp = pv.cp || 0;
+    const side = fen.split(' ')[1];
+    const cpWhite = side === 'w' ? cp : -cp;
+    // Build engine line showing best continuation from here
+    // Create a synthetic "move" from the first PV move
+    const uciMoves = contUci.trim().split(/\s+/).filter(Boolean);
+    if (uciMoves.length === 0) return;
+    const firstUci = uciMoves[0];
+    const chess = new Chess(fen);
+    const firstMove = chess.move({ from: firstUci.substring(0,2), to: firstUci.substring(2,4), promotion: firstUci.length > 4 ? firstUci[4] : undefined });
+    if (!firstMove) return;
+    // Apply the first move to gameEngine too
+    gameEngine.move({ from: firstUci.substring(0,2), to: firstUci.substring(2,4), promotion: firstUci.length > 4 ? firstUci[4] : undefined });
+    const restUci = uciMoves.slice(1).join(' ');
+    buildEngineLine(fen, firstMove, restUci, cpWhite);
+  } catch (e) {
+    hideEvaluatingFeedback();
+    clearAnalysisArrow();
   }
 }
 
@@ -7222,6 +7373,7 @@ function retryPosition() {
   hintLevel = 0;
   hintMove = null;
   continuationMode = false;
+  contWrongMovePending = false;
   hideMaiaControls();
   closeMobileFeedback();
   document.getElementById('btnRetry').classList.add('hidden');
