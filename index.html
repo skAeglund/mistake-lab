@@ -1119,7 +1119,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Mobile: larger line nav bar, hide old nav row, merge continuation info into line header</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Show only latest feedback, clear previous feedback boxes</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -6012,12 +6012,13 @@ function revealBestMove(bestMoveUci, m) {
 
 function showColorFeedback(borderColor, bgColor, title, text) {
   const container = document.getElementById('feedbackContainer');
+  // Remove previous feedback boxes so only the latest is visible
+  container.querySelectorAll('.feedback-box').forEach(el => el.remove());
   const div = document.createElement('div');
   div.className = 'feedback-box';
   div.style.cssText = `background:${bgColor};border-left:3px solid ${borderColor};`;
   div.innerHTML = `<div class="feedback-title" style="color:${borderColor}">${title}</div><div class="feedback-text">${text}</div>`;
   container.insertBefore(div, container.firstChild);
-  while (container.children.length > 5) container.removeChild(container.lastChild);
 }
 
 // ─── UCI to SAN conversion ───
