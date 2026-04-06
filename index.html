@@ -670,6 +670,35 @@
     .panel-right { max-height: 300px; border-left: none; border-top: 1px solid var(--border); }
   }
 
+  /* ─── Mobile line nav bar (full-width ‹ › at bottom) ─── */
+  .line-nav-bar {
+    display: none;
+    position: fixed; bottom: 0; left: 0; right: 0;
+    z-index: 60;
+    height: 48px;
+    background: var(--bg-panel);
+    border-top: 1px solid var(--border);
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+  }
+  .line-nav-bar.visible { display: flex; }
+  .line-nav-bar-btn {
+    flex: 1;
+    display: flex; align-items: center; justify-content: center;
+    background: transparent; border: none;
+    color: var(--text-secondary);
+    font-size: 26px; font-weight: 700;
+    cursor: pointer;
+    transition: background 0.1s, color 0.1s;
+  }
+  .line-nav-bar-btn:active { background: var(--bg-card); color: var(--text-primary); }
+  .line-nav-bar-sep {
+    width: 1px; align-self: stretch;
+    margin: 10px 0;
+    background: var(--border);
+  }
+  @media (min-width: 769px) { .line-nav-bar { display: none !important; } }
+
   /* ─── Mobile toolbar ─── */
   .mobile-toolbar {
     display: none; /* shown only via media query */
@@ -812,6 +841,9 @@
     /* Feedback & engine lines float above "Current Position" on mobile */
     #feedbackContainer { order: -1; }
     #contLineContainer { order: -1; }
+
+    /* Bottom padding when line nav bar is visible */
+    body.line-nav-active .panel-right { padding-bottom: 56px; }
 
     /* Engine line: nav buttons above the move list on mobile */
     .engine-line {
@@ -1073,7 +1105,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix PC deselection, hint mid-line in continuation, redundant best-move button on retry</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Mobile line nav bar: full-width ‹ › tap zones at bottom</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1094,6 +1126,12 @@
       </div>
     </div>
     <button class="mobile-toolbar-btn" onclick="openSettings()" aria-label="Settings">⚙</button>
+  </div>
+
+  <div class="line-nav-bar" id="lineNavBar">
+    <button class="line-nav-bar-btn" onclick="lineNavStep(-1)" aria-label="Previous move">‹</button>
+    <div class="line-nav-bar-sep"></div>
+    <button class="line-nav-bar-btn" onclick="lineNavStep(1)" aria-label="Next move">›</button>
   </div>
 
   <!-- Left panel: Game list -->
@@ -4731,6 +4769,7 @@ function loadPosition(globalIdx) {
   browsingLine = false;
   contLine = null;
   contLineBrowsing = false;
+  updateLineNavBar();
   clearHighlights();
   clearHintHighlights();
   hideArrow();
@@ -5361,6 +5400,7 @@ function renderTacticLine() {
   `;
 
   container.insertBefore(div, container.firstChild);
+  updateLineNavBar();
 }
 
 function goToTacticLineMove(idx) {
@@ -6019,6 +6059,7 @@ function buildEngineLine(baseFen, userMove, contUci, cpWhite) {
   boardObj.position(moves[startIdx].fen, true);
   renderEngineLine();
   prepareEngineLineExtension();
+  updateLineNavBar();
 }
 
 // ─── Engine Line Branching Helpers ───
@@ -6507,6 +6548,7 @@ function exitEngineLine() {
   hideEvaluatingFeedback();
   clearHighlights();
   updateEvalBar();
+  updateLineNavBar();
 }
 
 function tryAgainFromLine() {
@@ -6590,6 +6632,7 @@ function renderContLine() {
 
   // Insert at end of container (after any feedback boxes)
   container.appendChild(div);
+  updateLineNavBar();
 }
 
 function goToContLineMove(idx) {
@@ -6646,6 +6689,21 @@ function contLineStep(delta) {
 function contLineGoToEnd() {
   if (!contLine) return;
   goToContLineMove(contLine.moves.length - 1);
+}
+
+// ─── Mobile line nav bar ───
+function lineNavStep(delta) {
+  if (engineLine) lineStep(delta);
+  else if (tacticLine) tacticLineStep(delta);
+  else if (contLine) contLineStep(delta);
+}
+
+function updateLineNavBar() {
+  const bar = document.getElementById('lineNavBar');
+  if (!bar) return;
+  const active = !!(engineLine || tacticLine || contLine);
+  bar.classList.toggle('visible', active);
+  document.body.classList.toggle('line-nav-active', active);
 }
 
 // ─── Continuation Practice ───
@@ -6936,6 +6994,7 @@ function retryPosition() {
   browsingLine = false;
   contLine = null;
   contLineBrowsing = false;
+  updateLineNavBar();
   clearHighlights();
   clearHintHighlights();
   hideArrow();
