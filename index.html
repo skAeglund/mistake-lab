@@ -126,6 +126,14 @@
   }
   .btn-ghost:hover { border-color: var(--border-active); color: var(--text-primary); }
   .btn-sm { padding: 6px 14px; font-size: 12px; }
+
+  /* Hint button: show as grayed-out when hidden (instead of disappearing) to avoid layout shifts */
+  #btnHint.hidden {
+    display: inline-block !important;
+    opacity: 0.2;
+    pointer-events: none;
+    cursor: default;
+  }
   .btn-inline {
     background: none; border: 1px solid var(--border); color: var(--text-secondary);
     font-family: 'DM Sans', sans-serif; font-size: 10px; font-weight: 600;
@@ -1118,7 +1126,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Remove distracting fade animation from line boxes on re-render</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hint button: show grayed-out instead of hiding to prevent layout shifts</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -7425,7 +7433,7 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.key === 's' || e.key === 'S') skipPosition();
   if (e.key === 'r' || e.key === 'R') { if (!document.getElementById('btnRetry').classList.contains('hidden')) retryPosition(); }
-  if (e.key === 'h' || e.key === 'H') { if (!document.getElementById('btnHint').classList.contains('hidden')) showHint(); }
+  if (e.key === 'h' || e.key === 'H') { const hb = document.getElementById('btnHint'); if (hb && !hb.classList.contains('hidden') && !hb.disabled) showHint(); }
   if (e.key === 'e' || e.key === 'E') toggleEvalBar();
 });
 
