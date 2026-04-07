@@ -1143,7 +1143,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Unified icons: orange ? for mistakes, blue ! for tactics across all UI</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix review count not updating when toggling filter chips</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3628,7 +3628,7 @@ function toggleFilter(el) {
   }
   applyFilters();
   gameListDisplayLimit = 50;
-  renderGameList();
+  updateSessionProgress();
   if (activeGameId) selectGame(activeGameId);
 }
 
