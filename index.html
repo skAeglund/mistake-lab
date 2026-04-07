@@ -987,6 +987,13 @@
     padding: 4px 10px; border-radius: 6px; transition: background 0.15s;
   }
   .sync-status:hover { background: var(--bg-card); }
+  .btn-settings {
+    background: none; border: none; cursor: pointer; padding: 5px;
+    border-radius: 6px; color: var(--text-muted); display: flex;
+    align-items: center; justify-content: center; transition: background 0.15s, color 0.15s;
+  }
+  .btn-settings:hover { background: var(--bg-card); color: var(--text-primary); }
+  @media (max-width: 768px) { .btn-settings { display: none; } }
   .sync-dot {
     width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
     transition: background 0.3s;
@@ -1113,6 +1120,9 @@
       <span class="sync-dot off" id="syncDot"></span>
       <span id="syncLabel">Not synced</span>
     </div>
+    <button class="btn-settings" id="btnSettings" onclick="openSettings()" title="Settings" aria-label="Settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    </button>
     <button class="btn btn-ghost btn-sm hidden" id="btnLogout" onclick="logout()">Change user</button>
   </div>
 </div>
@@ -1143,7 +1153,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add engine hash size setting (applies on next page load)</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add settings gear button in header, restructure settings modal</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1328,7 +1338,8 @@
 <!-- Settings modal -->
 <div class="modal-backdrop hidden" id="settingsModal" onclick="if(event.target===this)closeSettings()">
   <div class="modal">
-    <h3>☁ Cloud Sync Settings</h3>
+    <h3>⚙ Settings</h3>
+    <label style="font-size:13px;font-weight:600;color:var(--text-primary);margin-bottom:2px;">☁ Cloud Sync</label>
     <label>GitHub Token</label>
     <input type="password" id="settingsToken" placeholder="ghp_...">
     <div class="hint">Personal access token with <code>gist</code> scope only.</div>
@@ -1337,7 +1348,8 @@
     <div class="hint">The ID from your Gist URL. Leave empty to create a new one.</div>
     <div id="settingsMsg" style="font-size:12px;margin-top:12px;min-height:18px;"></div>
     <div id="mobileDepthSetting" style="display:none;margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
-      <label style="margin-top:0;">Mobile Depth Offset</label>
+      <label style="font-size:13px;font-weight:600;color:var(--text-primary);margin-top:0;margin-bottom:2px;">Engine</label>
+      <label style="margin-top:8px;">Search Depth Offset</label>
       <div class="hint">Reduce engine search depth on mobile to save battery and speed up analysis.</div>
       <div style="display:flex;align-items:center;gap:10px;margin-top:6px;">
         <input type="range" id="settingsDepthOffset" min="0" max="6" step="1" value="1" style="flex:1;">
@@ -1345,8 +1357,9 @@
       </div>
     </div>
     <div id="hashSetting" style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
-      <label style="margin-top:0;">Engine Hash Size</label>
-      <div class="hint">Memory for the engine hash table. Higher values improve analysis quality at deeper depths. Eval bar worker uses ¼ of this. <em>Applies on next page load.</em></div>
+      <label id="hashSectionHeader" style="font-size:13px;font-weight:600;color:var(--text-primary);margin-top:0;margin-bottom:2px;">Engine</label>
+      <label style="margin-top:8px;">Hash Size</label>
+      <div class="hint">Memory for the engine hash table. Higher values improve analysis at deeper depths. Eval bar worker uses ¼ of this. <em>Applies on next page load.</em></div>
       <div style="display:flex;align-items:center;gap:10px;margin-top:6px;">
         <input type="range" id="settingsHash" min="5" max="10" step="1" value="9" style="flex:1;">
         <span id="settingsHashValue" style="font-size:13px;font-weight:600;min-width:56px;text-align:center;">512 MB</span>
@@ -2090,6 +2103,20 @@ function openSettings() {
     };
   } else {
     depthSetting.style.display = 'none';
+  }
+  // On mobile, the Engine header is in the depth section — hide it in the hash section and remove border
+  const hashSectionHeader = document.getElementById('hashSectionHeader');
+  const hashSetting = document.getElementById('hashSetting');
+  if (isMobileView()) {
+    hashSectionHeader.style.display = 'none';
+    hashSetting.style.borderTop = 'none';
+    hashSetting.style.paddingTop = '0';
+    hashSetting.style.marginTop = '12px';
+  } else {
+    hashSectionHeader.style.display = '';
+    hashSetting.style.borderTop = '';
+    hashSetting.style.paddingTop = '';
+    hashSetting.style.marginTop = '';
   }
   // Engine hash slider — range depends on device
   const hashSlider = document.getElementById('settingsHash');
