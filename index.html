@@ -1167,7 +1167,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix icon alignment, near-best feedback text, multi-color arrows</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Darken blue/red arrows, increase ghost arrow opacity</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -8032,8 +8032,8 @@ function getSquareFromMouseEvent(e) {
 
 const DRAW_COLOR_MAP = {
   green: { arrow: 'rgba(21, 120, 27, 0.6)', circle: 'rgba(21, 120, 27, 0.75)', ghost: 'rgba(21, 120, 27, 0.6)' },
-  red:   { arrow: 'rgba(200, 40, 40, 0.6)', circle: 'rgba(200, 40, 40, 0.75)', ghost: 'rgba(200, 40, 40, 0.6)' },
-  blue:  { arrow: 'rgba(66, 133, 244, 0.6)', circle: 'rgba(66, 133, 244, 0.75)', ghost: 'rgba(66, 133, 244, 0.6)' },
+  red:   { arrow: 'rgba(175, 30, 30, 0.65)', circle: 'rgba(175, 30, 30, 0.8)', ghost: 'rgba(175, 30, 30, 0.65)' },
+  blue:  { arrow: 'rgba(40, 100, 220, 0.65)', circle: 'rgba(40, 100, 220, 0.8)', ghost: 'rgba(40, 100, 220, 0.65)' },
 };
 function getDrawColor(e) {
   if (e.altKey) return 'blue';
@@ -8128,7 +8128,7 @@ function renderArrows() {
     // User-drawn arrows
     activeArrows.forEach((color, key) => drawOne(key.substring(0, 2), key.substring(2, 4), DRAW_COLOR_MAP[color].arrow, 1));
     // Ghost arrow while dragging
-    if (ghostArrow) drawOne(ghostArrow.from, ghostArrow.to, DRAW_COLOR_MAP[currentDrawColor].arrow, 0.45);
+    if (ghostArrow) drawOne(ghostArrow.from, ghostArrow.to, DRAW_COLOR_MAP[currentDrawColor].arrow, 0.6);
 
     // User-drawn circles (right-click on same square, Lichess-style)
     const circleStroke = sqSize * 0.056;
