@@ -1167,7 +1167,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Time trouble UI indicators in position info, review list, and game list</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add Advantage Capitalization mode — detect blown advantages and drill conversion</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1211,6 +1211,7 @@
       <div class="filter-row">
         <button class="filter-chip active" data-filter="type" data-value="mistake" onclick="toggleFilter(this)"><svg width="16" height="16" viewBox="0 0 40 40"><circle cx="20" cy="20" r="18" fill="#e8922d"/><text x="20" y="28" text-anchor="middle" fill="#fff" font-size="26" font-weight="700" font-family="sans-serif">?</text></svg> Mistakes</button>
         <button class="filter-chip active" data-filter="type" data-value="tactic" onclick="toggleFilter(this)"><svg width="16" height="16" viewBox="0 0 40 40"><circle cx="20" cy="20" r="18" fill="#5b9bd5"/><text x="20" y="28" text-anchor="middle" fill="#fff" font-size="26" font-weight="700" font-family="sans-serif">!</text></svg> Tactics</button>
+        <button class="filter-chip active" data-filter="type" data-value="advantage" onclick="toggleFilter(this)"><svg width="16" height="16" viewBox="0 0 40 40"><circle cx="20" cy="20" r="18" fill="#4caf50"/><text x="20" y="28" text-anchor="middle" fill="#fff" font-size="22" font-weight="700" font-family="sans-serif">♛</text></svg> Convert</button>
       </div>
       <div class="filter-row" style="margin-top:6px;justify-content:space-between;">
         <span style="display:flex;gap:4px;">
@@ -1501,14 +1502,20 @@ let tacticAltIdx = -1;           // -1 = main line, 0+ = which alternative we're
 let tacticSolvedLines = [];      // completed lines (for skipping common prefixes in alt lines)
 let tacticPrefixUserMoves = 0;   // user moves auto-played in common prefix (for progress display)
 
+// ─── Advantage capitalization state ───
+let advantageMode = false;              // true when drilling an advantage item
+let advantageMinCpReached = null;       // lowest user-perspective cp seen during advantage continuation
+let advantageConsecutiveAbove1000 = 0;  // consecutive user moves where eval ≥ +1000cp
+
 let gameListDisplayLimit = 50;
 let reviewListDisplayLimit = 50;
 
 // ─── Icon constants ───
 const ICON_MISTAKE = '<svg width="14" height="14" viewBox="0 0 40 40" style="vertical-align:-2px"><circle cx="20" cy="20" r="18" fill="#e8922d"/><text x="20" y="28" text-anchor="middle" fill="#fff" font-size="26" font-weight="700" font-family="sans-serif">?</text></svg>';
 const ICON_TACTIC = '<svg width="14" height="14" viewBox="0 0 40 40" style="vertical-align:-2px"><circle cx="20" cy="20" r="18" fill="#5b9bd5"/><text x="20" y="28" text-anchor="middle" fill="#fff" font-size="26" font-weight="700" font-family="sans-serif">!</text></svg>';
+const ICON_ADVANTAGE = '<svg width="14" height="14" viewBox="0 0 40 40" style="vertical-align:-2px"><circle cx="20" cy="20" r="18" fill="#4caf50"/><text x="20" y="28" text-anchor="middle" fill="#fff" font-size="22" font-weight="700" font-family="sans-serif">♛</text></svg>';
 
-const filters = { color: new Set(['white','black']), severity: new Set(['mistake','blunder']), platform: new Set(['lichess','chesscom']), type: new Set(['mistake','tactic']), speed: new Set(['bullet','blitz','rapid','classical']), rated: new Set(['rated','casual']) };
+const filters = { color: new Set(['white','black']), severity: new Set(['mistake','blunder']), platform: new Set(['lichess','chesscom']), type: new Set(['mistake','tactic','advantage']), speed: new Set(['bullet','blitz','rapid','classical']), rated: new Set(['rated','casual']) };
 let hideTimeTrouble = false;
 
 // ─── Opening filter state ───
@@ -1689,7 +1696,7 @@ let appShown = false; // guard to prevent double showMainApp()
 const GIST_FILENAME = 'mistakelab_progress.json';
 const GIST_GAMES_FILENAME = 'mistakelab_games.json';
 const MISTAKES_CACHE_VERSION = 5;
-const MISTAKES_CACHE_PARAMS = { wpDropThreshold: 10 };
+const MISTAKES_CACHE_PARAMS = { wpDropThreshold: 10, advantageThreshold: 300, advantageMinMoves: 2, advantageOverlapThreshold: 15 };
 
 // Populate login fields from saved config + auto-load
 document.addEventListener('DOMContentLoaded', () => {
@@ -1835,7 +1842,7 @@ function tacticHasValidLines(m) {
 }
 
 function posId(m) {
-  const prefix = m.type === 'tactic' ? 't' : '';
+  const prefix = m.type === 'tactic' ? 't' : m.type === 'advantage' ? 'a' : '';
   return `${m.gameId}_${prefix}${m.movePly}`;
 }
 
@@ -2050,7 +2057,7 @@ function loadMistakesCache() {
   } catch { return null; }
 }
 
-function saveMistakesCache(rawMistakes, gameFingerprints, fenData, moveStatsData) {
+function saveMistakesCache(rawMistakes, gameFingerprints, fenData, moveStatsData, advantageCandidates) {
   try {
     const serialized = rawMistakes.map(m => {
       const obj = { ...m };
@@ -2064,13 +2071,14 @@ function saveMistakesCache(rawMistakes, gameFingerprints, fenData, moveStatsData
       mistakes: serialized,
       fenIndex: fenData || {},
       moveStatsIndex: moveStatsData || {},
+      advantageCandidates: advantageCandidates || {},
     };
     localStorage.setItem(getMistakesCacheKey(), JSON.stringify(cache));
   } catch (e) {
     // If quota exceeded, retry without FEN index and moveStats
     if (e.name === 'QuotaExceededError' && (fenData || moveStatsData)) {
       console.warn('[MistakesCache] Quota exceeded — saving without FEN/moveStats index');
-      saveMistakesCache(rawMistakes, gameFingerprints, null, null);
+      saveMistakesCache(rawMistakes, gameFingerprints, null, null, advantageCandidates);
     } else {
       console.warn('[MistakesCache] Save failed:', e.message);
     }
@@ -3646,6 +3654,12 @@ function extractMistakesForGame(game) {
   const chess = new Chess(game.initialFen || undefined);
   const fens = [fenPositionKey(chess.fen())]; // collect all position keys for opening filter index
   const moveStats = []; // collect {posKey, moveUci, moveSan} for opening explorer
+
+  // Advantage capitalization tracking
+  let peakCp = -Infinity, peakFen = null, peakPly = 0;
+  let consecutiveUserMovesAboveThreshold = 0;
+  let heldAdvantage = false;
+
   for (let i = 0; i < moves.length; i++) {
     const fenBefore = chess.fen();
     const posKey = fenPositionKey(fenBefore);
@@ -3702,6 +3716,23 @@ function extractMistakesForGame(game) {
         timeTrouble,
       });
     }
+
+    // Advantage capitalization tracking (only after opening, ply > 15)
+    if (ply > 15) {
+      if (cpBefore >= MISTAKES_CACHE_PARAMS.advantageThreshold) {
+        consecutiveUserMovesAboveThreshold++;
+        if (consecutiveUserMovesAboveThreshold >= MISTAKES_CACHE_PARAMS.advantageMinMoves) {
+          heldAdvantage = true;
+        }
+        if (cpBefore > peakCp) {
+          peakCp = cpBefore;
+          peakFen = fenBefore;
+          peakPly = ply;
+        }
+      } else {
+        consecutiveUserMovesAboveThreshold = 0;
+      }
+    }
   }
 
   // Extract tactics from analyzer output
@@ -3727,7 +3758,8 @@ function extractMistakesForGame(game) {
       });
     }
   }
-  return { mistakes, fens, moveStats };
+  const advantageCandidate = heldAdvantage && peakFen ? { peakCp, peakFen, peakPly } : null;
+  return { mistakes, fens, moveStats, advantageCandidate };
 }
 
 function extractAllMistakes() {
@@ -3830,6 +3862,15 @@ function extractAllMistakes() {
   }
 
   // Extract mistakes from games that need it
+  const advantageCandidates = {}; // gameId → { peakCp, peakFen, peakPly } or null
+  // Restore cached advantage candidates for unchanged games
+  if (cache && cache.advantageCandidates) {
+    for (const gid of currentGameIds) {
+      if (!needsExtraction.has(gid) && cache.advantageCandidates[gid] !== undefined) {
+        advantageCandidates[gid] = cache.advantageCandidates[gid];
+      }
+    }
+  }
   for (const gameId of needsExtraction) {
     const game = gamesById.get(gameId);
     if (!game) continue;
@@ -3837,11 +3878,12 @@ function extractAllMistakes() {
     rawMistakes.push(...result.mistakes);
     fenData[gameId] = result.fens;
     moveStatsData[gameId] = result.moveStats;
+    advantageCandidates[gameId] = result.advantageCandidate;
   }
 
   // Save cache (raw mistakes before tactic suppression/sorting)
   if (!cacheHit || needsExtraction.size > 0) {
-    saveMistakesCache(rawMistakes, currentFingerprints, fenData, moveStatsData);
+    saveMistakesCache(rawMistakes, currentFingerprints, fenData, moveStatsData, advantageCandidates);
   }
 
   // Build gameFenIndex from collected FEN data
@@ -3889,6 +3931,69 @@ function extractAllMistakes() {
     }
   }
   console.log(`[OpeningExplorer] Built positionMoveIndex with ${positionMoveIndex.size} positions`);
+
+  // ── Advantage capitalization: filter candidates and push valid items ──
+  const advantageItemCount = { checked: 0, added: 0 };
+  for (const game of allGames) {
+    const cand = advantageCandidates[game.id];
+    if (!cand) continue;
+    advantageItemCount.checked++;
+    const playerColor = detectPlayerColor(game);
+    const { winner } = getGameResultInfo(game);
+    const userWon = winner === playerColor;
+    if (userWon) continue; // must be draw or loss
+
+    // Time loss check: exclude only if user lost on time AND was still winning
+    const isTimeLoss = game.status === 'outoftime' ||
+      (game.pgn && /\[Termination\s+"[^"]*on time[^"]*"\]/i.test(game.pgn));
+    if (isTimeLoss) {
+      const analysis = game.analysis || [];
+      if (analysis.length > 0) {
+        const lastEval = analysis[analysis.length - 1];
+        const finalCp = evalToCp(lastEval, playerColor);
+        if (finalCp >= 0) continue; // still winning/equal when flagged — exclude
+      }
+      // If no analysis or eval negative — include (advantage blown OTB)
+    }
+
+    // No significant mistakes: none with wpDrop > advantageOverlapThreshold
+    const gameMistakes = rawMistakes.filter(m => m.gameId === game.id && m.type === 'mistake');
+    const hasSignificant = gameMistakes.some(m => m.wpDrop > MISTAKES_CACHE_PARAMS.advantageOverlapThreshold);
+    if (hasSignificant) continue;
+
+    // Replace mistakes at or after the peak ply with the advantage item
+    const replacedPids = new Set();
+    for (const m of gameMistakes) {
+      if (m.movePly >= cand.peakPly) {
+        replacedPids.add(`${m.gameId}_${m.movePly}`); // matches posId for type:'mistake' (no prefix)
+      }
+    }
+
+    // Remove replaced mistakes from rawMistakes
+    if (replacedPids.size > 0) {
+      rawMistakes = rawMistakes.filter(m =>
+        !(m.gameId === game.id && m.type === 'mistake' && replacedPids.has(`${m.gameId}_${m.movePly}`))
+      );
+    }
+
+    rawMistakes.push({
+      type: 'advantage',
+      gameId: game.id,
+      movePly: cand.peakPly,
+      fenBefore: cand.peakFen,
+      playerColor: playerColor,
+      moveNumber: Math.ceil(cand.peakPly / 2),
+      peakCp: cand.peakCp,
+      wpDrop: Math.round(cpToWinPct(cand.peakCp) - 50), // approximate "advantage" magnitude for sorting
+    });
+    advantageItemCount.added++;
+    if (replacedPids.size > 0) {
+      console.log(`[Advantage] Game ${game.id}: replaced ${replacedPids.size} mistake(s) at/after ply ${cand.peakPly}`);
+    }
+  }
+  if (advantageItemCount.checked > 0) {
+    console.log(`[Advantage] Checked ${advantageItemCount.checked} candidates, added ${advantageItemCount.added} items`);
+  }
 
   // Restore game references
   allMistakes = rawMistakes.map(m => ({ ...m, game: gamesById.get(m.gameId) }));
@@ -3962,8 +4067,8 @@ function extractAllMistakes() {
     // Remove invalidated tactics (whole-tactic or all-lines-invalidated)
     if (m.type === 'tactic' && invalidated.has(posId(m))) return false;
     if (m.type === 'tactic' && !tacticHasValidLines(m)) return false;
-    // Remove invalidated mistakes
-    if (m.type === 'mistake' && invalidatedMistakes.has(posId(m))) return false;
+    // Remove invalidated mistakes and advantage items
+    if ((m.type === 'mistake' || m.type === 'advantage') && invalidatedMistakes.has(posId(m))) return false;
     // Remove mistakes suppressed by active tactics
     if (m.type !== 'tactic' && tacticFens.has(`${m.gameId}_${m.fenBefore}`)) return false;
     return true;
@@ -4736,7 +4841,7 @@ function escapeHtml(str) {
 function applyFilters() {
   filteredMistakes = allMistakes.filter(m => {
     if (filters.color.size < 2 && !filters.color.has(m.playerColor)) return false;
-    if (filters.severity.size < 2 && m.type !== 'tactic') {
+    if (filters.severity.size < 2 && m.type !== 'tactic' && m.type !== 'advantage') {
       const isBlunder = m.wpDrop >= 15;
       if (isBlunder && !filters.severity.has('blunder')) return false;
       if (!isBlunder && !filters.severity.has('mistake')) return false;
@@ -4877,9 +4982,10 @@ function renderGameList() {
 
     const opening = game.opening?.name || game.pgn?.match(/\[Opening "([^"]+)"\]/)?.[1] || 'Unknown opening';
     const date = game.createdAt ? new Date(game.createdAt).toLocaleDateString() : '';
-    const blunders = mistakes.filter(m => m.wpDrop >= 15 && m.type !== 'tactic').length;
-    const mistakeCount = mistakes.filter(m => m.type !== 'tactic').length;
+    const blunders = mistakes.filter(m => m.wpDrop >= 15 && m.type !== 'tactic' && m.type !== 'advantage').length;
+    const mistakeCount = mistakes.filter(m => m.type !== 'tactic' && m.type !== 'advantage').length;
     const tacticCount = mistakes.filter(m => m.type === 'tactic').length;
+    const advantageCount = mistakes.filter(m => m.type === 'advantage').length;
 
     let badgeClass, badgeText;
     if (allDone) {
@@ -4902,6 +5008,9 @@ function renderGameList() {
     const tacticBadge = tacticCount > 0
       ? `<span class="game-mistakes-badge" style="background:rgba(91,155,213,0.12);color:#5b9bd5;border-color:rgba(91,155,213,0.3);">${ICON_TACTIC} ${tacticCount}</span>`
       : '';
+    const advantageBadge = advantageCount > 0
+      ? `<span class="game-mistakes-badge" style="background:rgba(76,175,80,0.12);color:#4caf50;border-color:rgba(76,175,80,0.3);">${ICON_ADVANTAGE} ${advantageCount}</span>`
+      : '';
 
     // Always show progress on games with mistakes
     const progressText = mistakes.length > 0
@@ -4911,7 +5020,7 @@ function renderGameList() {
     card.innerHTML = `
       <div class="game-card-top">
         <div class="game-opening">${escHtml(opening)}</div>
-        <span class="game-mistakes-badge ${badgeClass}">${badgeText}</span>${tacticBadge}
+        <span class="game-mistakes-badge ${badgeClass}">${badgeText}</span>${tacticBadge}${advantageBadge}
       </div>
       <div class="game-meta">
         <span class="game-color-dot ${color}"></span>
@@ -5002,7 +5111,8 @@ function renderReviewList() {
 
     const opening = m.game?.opening?.name || 'Unknown';
     const isTactic = m.type === 'tactic';
-    const lossClass = isTactic ? '' : (m.wpDrop >= 15 ? 'loss-blunder' : 'loss-mistake');
+    const isAdvantage = m.type === 'advantage';
+    const lossClass = (isTactic || isAdvantage) ? '' : (m.wpDrop >= 15 ? 'loss-blunder' : 'loss-mistake');
     const isNew = card.state === FSRS_STATE.new;
     const isOverdue = !isNew && card.due && card.due < today;
 
@@ -5015,7 +5125,9 @@ function renderReviewList() {
       statusText = '<span style="color:var(--yellow)">Due</span>';
     }
 
-    const moveLabel = isTactic
+    const moveLabel = isAdvantage
+      ? `${ICON_ADVANTAGE} Move ${m.moveNumber}${m.playerColor==='white'?'.':'…'} <span style="color:#4caf50">+${(m.peakCp/100).toFixed(1)}</span>`
+      : isTactic
       ? `${ICON_TACTIC} Move ${m.moveNumber}${m.playerColor==='white'?'.':'…'} <span style="color:var(--yellow)">+${Math.abs(m.wpSwing)}%</span>`
       : `${ICON_MISTAKE} Move ${m.moveNumber}${m.playerColor==='white'?'.':'…'} <span class="loss ${lossClass}">−${m.wpDrop}%</span>${m.timeTrouble ? ' <span style="color:var(--text-muted);font-size:11px" title="Time trouble">⏱</span>' : ''}`;
 
@@ -5362,9 +5474,17 @@ function renderQueue() {
     item.onclick = () => loadPosition(globalIdx);
 
     const lossClass = m.wpDrop >= 15 ? 'loss-blunder' : 'loss-mistake';
+    let queueLabel;
+    if (m.type === 'advantage') {
+      queueLabel = `<span style="color:#4caf50">♛ +${(m.peakCp/100).toFixed(1)}</span>`;
+    } else if (m.type === 'tactic') {
+      queueLabel = `<span style="color:var(--yellow)">+${Math.abs(m.wpSwing)}%</span>`;
+    } else {
+      queueLabel = `<span class="loss ${lossClass}">−${m.wpDrop}%${m.timeTrouble ? ' <span style="color:var(--text-muted)" title="Time trouble">⏱</span>' : ''}</span>`;
+    }
     item.innerHTML = `
       <span><span class="ply">${m.moveNumber}${m.playerColor==='white'?'.':'…'}</span> ???</span>
-      <span class="loss ${lossClass}">−${m.wpDrop}%${m.timeTrouble ? ' <span style="color:var(--text-muted)" title="Time trouble">⏱</span>' : ''}</span>
+      ${queueLabel}
     `;
     list.appendChild(item);
   }
@@ -5426,6 +5546,9 @@ function loadPosition(globalIdx) {
   tacticAltIdx = -1;
   tacticSolvedLines = [];
   tacticPrefixUserMoves = 0;
+  advantageMode = false;
+  advantageMinCpReached = null;
+  advantageConsecutiveAbove1000 = 0;
   hideMaiaControls();
   engineLine = null;
   browsingLine = false;
@@ -5511,6 +5634,29 @@ function loadPosition(globalIdx) {
     document.getElementById('contLineContainer').innerHTML = '';
     renderQueue();
     updateSessionProgress();
+  } else if (m.type === 'advantage') {
+    // ── Advantage capitalization mode setup ──
+    advantageMode = true;
+    advantageMinCpReached = m.peakCp; // starts at peak
+    advantageConsecutiveAbove1000 = 0;
+
+    const evalDisplay = (m.peakCp / 100).toFixed(1);
+    document.getElementById('posInfoContent').innerHTML = `
+      <div style="font-size:13px;line-height:1.7">
+        <div>${ICON_ADVANTAGE} <strong>Convert the Advantage</strong></div>
+        <div>You were winning here: <span style="color:#4caf50;font-weight:600">+${evalDisplay}</span></div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:2px">You drew or lost this game without a single big mistake — the advantage slipped away gradually.</div>
+        <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Starting continuation…</div>
+      </div>
+    `;
+
+    document.getElementById('feedbackContainer').innerHTML = '';
+    document.getElementById('contLineContainer').innerHTML = '';
+    renderQueue();
+    updateSessionProgress();
+
+    // Enter continuation mode immediately
+    startAdvantageContinuation(m);
   } else {
     // ── Mistake mode setup ──
     const clockInfo = m.clockRemaining != null
@@ -6279,17 +6425,18 @@ function confirmInvalidateLine(convertToMistake) {
 // ─── Invalidate mistake (remove from review) ───
 function handleBadMistake() {
   const m = filteredMistakes[currentMistakeIdx];
-  if (!m || m.type !== 'mistake') return;
+  if (!m || (m.type !== 'mistake' && m.type !== 'advantage')) return;
+  const label = m.type === 'advantage' ? 'position' : 'mistake';
   const container = document.getElementById('feedbackContainer');
   const div = document.createElement('div');
   div.className = 'feedback-box';
   div.style.cssText = 'background:rgba(255,193,7,0.08);border-left:3px solid var(--yellow);';
   div.innerHTML = `
-    <div class="feedback-title" style="color:var(--yellow)">Remove this mistake?</div>
+    <div class="feedback-title" style="color:var(--yellow)">Remove this ${label}?</div>
     <div class="feedback-text">
       This position won't appear in reviews.
       <div style="margin-top:8px;display:flex;gap:8px;">
-        <button class="btn btn-ghost btn-sm" style="border-color:var(--yellow);color:var(--yellow);" onclick="confirmRemoveMistake()">Remove mistake</button>
+        <button class="btn btn-ghost btn-sm" style="border-color:var(--yellow);color:var(--yellow);" onclick="confirmRemoveMistake()">Remove ${label}</button>
         <button class="btn btn-ghost btn-sm" onclick="this.closest('.feedback-box').remove()">Cancel</button>
       </div>
     </div>
@@ -6299,7 +6446,7 @@ function handleBadMistake() {
 
 function confirmRemoveMistake() {
   const m = filteredMistakes[currentMistakeIdx];
-  if (!m || m.type !== 'mistake') return;
+  if (!m || (m.type !== 'mistake' && m.type !== 'advantage')) return;
   const pid = posId(m);
   invalidateMistake(pid);
   allMistakes = allMistakes.filter(mm => posId(mm) !== pid);
@@ -6503,6 +6650,7 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
   const afterCpPlayer = bestCp - cpLoss;
   afterMoveCpWhite = m.playerColor === 'white' ? afterCpPlayer : -afterCpPlayer;
   updateEvalBar();
+
   const wpBefore = cpToWinPct(bestCp);
   const wpAfter = cpToWinPct(bestCp - cpLoss);
   const wpDrop = wpBefore - wpAfter;
@@ -6609,7 +6757,13 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
     // Wrong move — mark first attempt as failed
     if (currentAttempts === 1) firstAttemptFailed = true;
 
-    if (continuationMode) {
+    if (continuationMode && advantageMode && afterCpPlayer <= 100) {
+      // Advantage mode: eval collapsed — end drill immediately
+      gameEngine.undo(); // undo the wrong move
+      boardObj.position(gameEngine.fen(), false);
+      finishAdvantage('collapse');
+      return;
+    } else if (continuationMode) {
       // Continuation mode: show refutation engine line (like normal mode)
       contWrongMovePending = true;
       continuationMode = false; // pause continuation so engine line browsing/branching works
@@ -6646,6 +6800,11 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
   if (continuationMode) {
     // In continuation: good move (≤10%) advances, bad move (>10%) now handled by contWrongMovePending
     if (wpDrop <= 10) {
+      // Advantage mode: track eval progression after each good user move
+      if (advantageMode) {
+        updateAdvantageTracking(afterCpPlayer);
+        if (!advantageMode) return; // finishAdvantage was called (collapse)
+      }
       // Record user's move in the continuation line
       addContLineMove(move.san, from + to + (move.promotion || ''), gameEngine.fen(), true);
       setTimeout(() => advanceContinuation(contUci), 500);
@@ -7572,6 +7731,130 @@ function showDeferredEngineLine() {
   }
 }
 
+function startAdvantageContinuation(m) {
+  contLine = {
+    baseFen: gameEngine.fen(),
+    moves: [],
+    currentIdx: -1,
+  };
+  contLineBrowsing = false;
+  continuationMode = true;
+  showMaiaControls();
+  updateEvalBar();
+  // gameEngine is at the peak advantage position — let Maia/SF pick opponent's response
+  advanceContinuation('');
+}
+
+function updateAdvantageTracking(afterCpPlayer) {
+  // Track the minimum eval reached during the advantage continuation
+  if (advantageMinCpReached === null || afterCpPlayer < advantageMinCpReached) {
+    advantageMinCpReached = afterCpPlayer;
+  }
+
+  // Check for eval collapse — user lost the advantage
+  if (afterCpPlayer <= 100) {
+    finishAdvantage('collapse');
+    return;
+  }
+
+  // Track consecutive user moves at ≥ +1000cp
+  if (afterCpPlayer >= 1000) {
+    advantageConsecutiveAbove1000++;
+  } else {
+    advantageConsecutiveAbove1000 = 0;
+  }
+
+  // Show "Claim Victory" button when threshold met
+  if (advantageConsecutiveAbove1000 >= 3) {
+    showAdvantageClaimButton();
+  }
+}
+
+function showAdvantageClaimButton() {
+  const existing = document.getElementById('advantageClaimBtn');
+  if (existing) return;
+  const infoContent = document.getElementById('posInfoContent');
+  if (!infoContent) return;
+  const btn = document.createElement('div');
+  btn.id = 'advantageClaimBtn';
+  btn.style.cssText = 'margin-top:6px;';
+  btn.innerHTML = `<button class="btn btn-primary btn-sm" style="font-size:13px;background:#4caf50;border-color:#4caf50;" onclick="claimAdvantageVictory()">✓ Claim Victory</button>`;
+  infoContent.appendChild(btn);
+}
+
+function claimAdvantageVictory() {
+  finishAdvantage('victory');
+}
+
+function finishAdvantage(outcome) {
+  // outcome: 'victory' (claim or checkmate), 'collapse' (eval ≤ 100cp), 'draw'
+  if (!advantageMode) return;
+  advantageMode = false;
+  continuationMode = false;
+  hideMaiaControls();
+  stopPreAnalysis();
+
+  const m = filteredMistakes[currentMistakeIdx];
+  if (!m) return;
+  const pid = posId(m);
+
+  let grade, gradeLabel, title, body;
+  const dippedBelow200 = advantageMinCpReached !== null && advantageMinCpReached < 200;
+
+  if (outcome === 'victory') {
+    if (hintUsed) {
+      grade = FSRS_GRADE.hard;
+      gradeLabel = 'Hard (hint)';
+    } else if (!dippedBelow200) {
+      grade = FSRS_GRADE.easy;
+      gradeLabel = 'Easy';
+    } else {
+      grade = FSRS_GRADE.good;
+      gradeLabel = 'Good';
+    }
+    title = ICON_ADVANTAGE + ' Advantage converted!';
+    body = dippedBelow200
+      ? 'You won, but the eval dipped below +2.0 at one point. Tighten up the conversion!'
+      : 'Clean conversion — you maintained your advantage throughout.';
+  } else if (outcome === 'draw') {
+    grade = FSRS_GRADE.again;
+    gradeLabel = 'Again';
+    title = ICON_ADVANTAGE + ' Draw — advantage lost';
+    body = 'The position ended in a draw. You needed to push harder to convert the win.';
+  } else {
+    // collapse
+    grade = FSRS_GRADE.again;
+    gradeLabel = 'Again';
+    title = ICON_ADVANTAGE + ' Advantage lost';
+    body = 'Your eval dropped to near-equal — the same thing that happened in the game.';
+  }
+
+  let srsInfo = '';
+  if (!srsRecorded) {
+    const srsCard = recordReview(pid, grade);
+    srsRecorded = true;
+    srsInfo = srsTag(gradeLabel, srsCard);
+  }
+
+  // Remove claim button if present
+  const claimBtn = document.getElementById('advantageClaimBtn');
+  if (claimBtn) claimBtn.remove();
+
+  const invalidateBtn = `<div style="margin-top:6px;"><button class="btn btn-ghost btn-sm" style="font-size:10px;color:var(--text-muted);border-color:var(--border);" onclick="handleBadMistake()">✕ Bad position</button></div>`;
+
+  showColorFeedback(
+    outcome === 'victory' ? '#4caf50' : '#ef5f5f',
+    outcome === 'victory' ? 'rgba(76,175,80,0.08)' : 'rgba(239,95,95,0.08)',
+    title, body + srsInfo + invalidateBtn
+  );
+
+  document.getElementById('btnRetry').classList.remove('hidden');
+  document.getElementById('btnHint').classList.add('hidden');
+  clearHintHighlights();
+  updateSessionProgress();
+  renderQueue();
+}
+
 function startTacticContinuation() {
   // Start continuation from the tactic's final position (tactic line stays visible for reference)
   contLine = {
@@ -7657,6 +7940,14 @@ function startContinuationMode() {
 async function advanceContinuation(contUci) {
   // Check if game is already over (user's move was checkmate/draw)
   if (gameEngine.game_over()) {
+    if (advantageMode) {
+      if (gameEngine.in_checkmate()) {
+        finishAdvantage('victory');
+      } else {
+        finishAdvantage('draw');
+      }
+      return;
+    }
     continuationMode = false;
     hideMaiaControls();
     if (gameEngine.in_checkmate()) {
@@ -7730,6 +8021,14 @@ async function advanceContinuation(contUci) {
 
   // Check if game is over after opponent's move
   if (gameEngine.game_over()) {
+    if (advantageMode) {
+      if (gameEngine.in_checkmate()) {
+        finishAdvantage('collapse');
+      } else {
+        finishAdvantage('draw');
+      }
+      return;
+    }
     continuationMode = false;
     hideMaiaControls();
     const m = filteredMistakes[currentMistakeIdx];
@@ -7772,14 +8071,29 @@ async function advanceContinuation(contUci) {
   document.getElementById('feedbackContainer').innerHTML = '';
   const infoCard = document.getElementById('posInfoCard');
   infoCard.style.display = '';
-  document.getElementById('posInfoContent').innerHTML = `
-    <div style="font-size:13px;line-height:1.7">
-      <div style="color:var(--blue);font-weight:600;">Continuation Practice</div>
-      <div>Opponent played <code class="mono">${escHtml(result.san)}</code> <span style="font-size:10px;color:var(--text-muted)">(${moveSource})</span></div>
-      <div>Find the best move!</div>
-      <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
-    </div>
-  `;
+  if (advantageMode) {
+    const om = filteredMistakes[currentMistakeIdx];
+    const evalDisplay = om?.peakCp ? (om.peakCp / 100).toFixed(1) : '?';
+    document.getElementById('posInfoContent').innerHTML = `
+      <div style="font-size:13px;line-height:1.7">
+        <div style="color:#4caf50;font-weight:600;">${ICON_ADVANTAGE} Convert the Advantage (+${evalDisplay})</div>
+        <div>Opponent played <code class="mono">${escHtml(result.san)}</code> <span style="font-size:10px;color:var(--text-muted)">(${moveSource})</span></div>
+        <div>Find the best move!</div>
+        <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
+      </div>
+    `;
+    // Re-show claim button if threshold was already met
+    if (advantageConsecutiveAbove1000 >= 3) showAdvantageClaimButton();
+  } else {
+    document.getElementById('posInfoContent').innerHTML = `
+      <div style="font-size:13px;line-height:1.7">
+        <div style="color:var(--blue);font-weight:600;">Continuation Practice</div>
+        <div>Opponent played <code class="mono">${escHtml(result.san)}</code> <span style="font-size:10px;color:var(--text-muted)">(${moveSource})</span></div>
+        <div>Find the best move!</div>
+        <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
+      </div>
+    `;
+  }
 }
 
 // ─── Navigation ───
