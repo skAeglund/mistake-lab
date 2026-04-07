@@ -1167,7 +1167,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Darken blue/red arrows, increase ghost arrow opacity</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Time trouble detection: clock data extraction + hide filter</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1235,6 +1235,9 @@
         <div class="filter-row" style="margin-top:6px;">
           <button class="filter-chip active" data-filter="rated" data-value="rated" onclick="toggleFilter(this)">Rated</button>
           <button class="filter-chip active" data-filter="rated" data-value="casual" onclick="toggleFilter(this)">Casual</button>
+        </div>
+        <div class="filter-row" style="margin-top:6px;">
+          <button class="filter-chip" id="btnHideTimeTrouble" onclick="toggleTimeTroubleFilter()" title="Hide mistakes made under time pressure (< 45s remaining, < 10s spent)">⏱ Hide time trouble</button>
         </div>
       </div>
       <div class="filter-row" style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);" id="openingFilterRow">
@@ -1506,6 +1509,7 @@ const ICON_MISTAKE = '<svg width="14" height="14" viewBox="0 0 40 40" style="ver
 const ICON_TACTIC = '<svg width="14" height="14" viewBox="0 0 40 40" style="vertical-align:-2px"><circle cx="20" cy="20" r="18" fill="#5b9bd5"/><text x="20" y="28" text-anchor="middle" fill="#fff" font-size="26" font-weight="700" font-family="sans-serif">!</text></svg>';
 
 const filters = { color: new Set(['white','black']), severity: new Set(['mistake','blunder']), platform: new Set(['lichess','chesscom']), type: new Set(['mistake','tactic']), speed: new Set(['bullet','blitz','rapid','classical']), rated: new Set(['rated','casual']) };
+let hideTimeTrouble = false;
 
 // ─── Opening filter state ───
 let openingFilterMode = false;   // true when the board is in filter-input mode
@@ -1684,7 +1688,7 @@ let syncDebounceTimer = null;
 let appShown = false; // guard to prevent double showMainApp()
 const GIST_FILENAME = 'mistakelab_progress.json';
 const GIST_GAMES_FILENAME = 'mistakelab_games.json';
-const MISTAKES_CACHE_VERSION = 4;
+const MISTAKES_CACHE_VERSION = 5;
 const MISTAKES_CACHE_PARAMS = { wpDropThreshold: 10 };
 
 // Populate login fields from saved config + auto-load
@@ -3671,6 +3675,15 @@ function extractMistakesForGame(game) {
     const wpDrop = wpBefore - wpAfter;
 
     if (wpDrop > MISTAKES_CACHE_PARAMS.wpDropThreshold) {
+      // Clock data: game.clocks[i] = seconds remaining after move i
+      const hasClocks = Array.isArray(game.clocks) && game.clocks.length > i;
+      const clockRemaining = hasClocks ? game.clocks[i] : null;
+      const moveTime = hasClocks && i >= 2 && game.clocks[i - 2] != null
+        ? Math.max(0, Math.round((game.clocks[i - 2] - game.clocks[i]) * 10) / 10)
+        : null;
+      const timeTrouble = clockRemaining != null && clockRemaining < 45
+        && moveTime != null && moveTime < 10;
+
       mistakes.push({
         type: 'mistake',
         gameId: game.id,
@@ -3684,6 +3697,9 @@ function extractMistakesForGame(game) {
         playerColor: playerColor,
         moveNumber: Math.ceil(ply / 2),
         bestEval: evalBefore,
+        clockRemaining,
+        moveTime,
+        timeTrouble,
       });
     }
   }
@@ -3967,6 +3983,16 @@ function toggleFilter(el) {
     filterSet.add(value);
     el.classList.add('active');
   }
+  applyFilters();
+  gameListDisplayLimit = 50;
+  updateSessionProgress();
+  if (activeGameId) selectGame(activeGameId);
+}
+
+function toggleTimeTroubleFilter() {
+  hideTimeTrouble = !hideTimeTrouble;
+  const btn = document.getElementById('btnHideTimeTrouble');
+  btn.classList.toggle('active', hideTimeTrouble);
   applyFilters();
   gameListDisplayLimit = 50;
   updateSessionProgress();
@@ -4697,6 +4723,7 @@ function applyFilters() {
       if (!isRated && !filters.rated.has('casual')) return false;
     }
     if (openingFilterFen && !gameMatchesOpeningFen(m.gameId)) return false;
+    if (hideTimeTrouble && m.type === 'mistake' && m.timeTrouble) return false;
     return true;
   });
 }

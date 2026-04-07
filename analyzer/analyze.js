@@ -31,6 +31,7 @@
 //   --tactic-depth MultiPV analysis depth for tactic detection (default: 20)
 //   --rescan-tactics Reset _tacticsScanned flags and re-scan all games
 //   --maia-model    Path to Maia ONNX model for human-like opponent lines (optional)
+//   --rescan-clocks Re-extract clock data for all games (re-fetches Lichess, re-parses Chess.com PGN)
 //
 // Examples:
 //   node analyze.js --username DrNykterstein --stockfish ./stockfish
@@ -89,9 +90,17 @@ const CONFIG = {
   tacticDepth:   parseInt(args['tactic-depth']) || 20,
   rescanTactics:  args['rescan-tactics'] === 'true' || args['rescan-tactics'] === true,
   maiaModel:      args['maia-model'] || null,
+  // Clock data
+  rescanClocks:   args['rescan-clocks'] === 'true' || args['rescan-clocks'] === true,
 };
 
-if (CONFIG.scanTactics) {
+if (CONFIG.rescanClocks) {
+  // --rescan-clocks doesn't need stockfish, but needs a way to load games (gist or username)
+  if (!CONFIG.gistToken && !CONFIG.gistId && !CONFIG.username) {
+    console.error('Usage: node analyze.js --rescan-clocks [--gist-token X --gist-id Y] [--username <n>]');
+    process.exit(1);
+  }
+} else if (CONFIG.scanTactics) {
   if (!CONFIG.stockfishPath) {
     console.error('Usage: node analyze.js --scan-tactics --stockfish <path> [--gist-token X --gist-id Y]');
     process.exit(1);
@@ -429,7 +438,7 @@ async function fetchLichessGames(username, maxGames) {
     moves: 'true',
     pgnInJson: 'true',
     opening: 'true',
-    clocks: 'false',
+    clocks: 'true',
     evals: 'true',       // include server evals if available (we'll use them)
     rated: CONFIG.ratedOnly ? 'true' : '',
   });
@@ -565,6 +574,56 @@ function inferTimeClass(tc) {
   if (total < 600) return 'blitz';
   if (total < 1800) return 'rapid';
   return 'classical';
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Clock Data Extraction
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Extract clock data from a Chess.com PGN string.
+ * PGN contains comments like {[%clk 0:09:58.3]} after each move.
+ * Returns an array of seconds remaining per move (same index as moves), or null.
+ */
+function extractClocksFromPGN(pgn) {
+  if (!pgn) return null;
+  const clkRegex = /\{\[%clk\s+(\d+):(\d+):(\d+(?:\.\d+)?)\]\}/g;
+  const clocks = [];
+  let match;
+  while ((match = clkRegex.exec(pgn)) !== null) {
+    const h = parseInt(match[1]);
+    const m = parseInt(match[2]);
+    const s = parseFloat(match[3]);
+    clocks.push(Math.round((h * 3600 + m * 60 + s) * 10) / 10);
+  }
+  return clocks.length > 0 ? clocks : null;
+}
+
+/**
+ * Stamp clock data on a game object (in-place). Handles both platforms.
+ * Lichess: game.clocks is already an array of centiseconds from the API.
+ * Chess.com: parse %clk comments from the PGN.
+ * Normalizes to game.clocks = [seconds remaining per move].
+ * Sets game._clocksStamped = true when done.
+ */
+function stampClocks(game) {
+  if (game._clocksStamped) return;
+
+  if (game._source === 'chesscom') {
+    // Chess.com: extract from PGN
+    const clocks = extractClocksFromPGN(game.pgn);
+    if (clocks) {
+      game.clocks = clocks;
+      game._clocksStamped = true;
+    }
+  } else {
+    // Lichess: clocks array from the API is always in centiseconds
+    if (Array.isArray(game.clocks) && game.clocks.length > 0) {
+      game.clocks = game.clocks.map(cs => Math.round(cs / 10) / 10);
+      game._clocksStamped = true;
+    }
+  }
 }
 
 
@@ -1295,32 +1354,38 @@ async function main() {
   const threadsPerWorker = Math.max(1, Math.floor(CONFIG.threads / numWorkers));
   const hashPerWorker = Math.max(16, Math.floor(CONFIG.hash / numWorkers));
 
+  const needsStockfish = !CONFIG.rescanClocks;
+
   log('═══════════════════════════════════════════════════');
-  log(`  MistakeLab ${CONFIG.scanTactics ? 'Tactic Scanner' : 'Analyzer'}`);
+  log(`  MistakeLab ${CONFIG.rescanClocks ? 'Clock Rescan' : CONFIG.scanTactics ? 'Tactic Scanner' : 'Analyzer'}`);
   log('═══════════════════════════════════════════════════');
-  if (!CONFIG.scanTactics) {
+  if (!CONFIG.scanTactics && !CONFIG.rescanClocks) {
     log(`Username:    ${CONFIG.username}`);
     log(`Platform:    ${CONFIG.platform}`);
   }
-  log(`Stockfish:   ${CONFIG.stockfishPath}`);
-  log(`Depth:       ${CONFIG.scanTactics ? CONFIG.tacticDepth + ' (tactic MultiPV)' : CONFIG.depth}`);
-  log(`Workers:     ${numWorkers} × ${threadsPerWorker} threads, ${hashPerWorker}MB hash each`);
-  if (!CONFIG.scanTactics) log(`Max games:   ${CONFIG.maxGames}`);
+  if (needsStockfish) {
+    log(`Stockfish:   ${CONFIG.stockfishPath}`);
+    log(`Depth:       ${CONFIG.scanTactics ? CONFIG.tacticDepth + ' (tactic MultiPV)' : CONFIG.depth}`);
+    log(`Workers:     ${numWorkers} × ${threadsPerWorker} threads, ${hashPerWorker}MB hash each`);
+  }
+  if (!CONFIG.scanTactics && !CONFIG.rescanClocks) log(`Max games:   ${CONFIG.maxGames}`);
   log(`Gist sync:   ${CONFIG.gistToken && CONFIG.gistId ? 'enabled' : 'disabled'}`);
   log(`Output file: ${CONFIG.outputFile}`);
   log('');
 
   // ── Phase 1: Start Stockfish worker pool ──
   const pool = [];
-  for (let w = 0; w < numWorkers; w++) {
-    const sf = new StockfishEngine(CONFIG.stockfishPath);
-    await sf.start(threadsPerWorker, hashPerWorker);
-    pool.push(sf);
+  if (needsStockfish) {
+    for (let w = 0; w < numWorkers; w++) {
+      const sf = new StockfishEngine(CONFIG.stockfishPath);
+      await sf.start(threadsPerWorker, hashPerWorker);
+      pool.push(sf);
+    }
+    log(`${numWorkers} Stockfish worker(s) ready`);
   }
-  log(`${numWorkers} Stockfish worker(s) ready`);
 
   // Load position eval cache
-  loadPosCache();
+  if (needsStockfish) loadPosCache();
 
   function quitAll() { for (const sf of pool) sf.quit(); }
 
@@ -1357,8 +1422,66 @@ async function main() {
                || g.players?.white?.user?.id?.toLowerCase() === CONFIG.username.toLowerCase();
       g._playerColor = isW ? 'white' : 'black';
     }
+    // Stamp clocks on games that already have raw data (Chess.com PGN, or Lichess centiseconds)
+    stampClocks(g);
   }
   log(`${existingIds.size} games already have analysis`);
+
+  // ── Rescan-clocks mode: re-fetch Lichess clock data, re-parse Chess.com PGNs ──
+  if (CONFIG.rescanClocks) {
+    log('');
+    log('═══════════════════════════════════════════════════');
+    log('  Clock Data Rescan');
+    log('═══════════════════════════════════════════════════');
+
+    // Chess.com games: re-parse clocks from existing PGN (reset _clocksStamped to force re-parse)
+    let chesscomStamped = 0;
+    for (const g of existingGames) {
+      if (g._source === 'chesscom' && g.pgn) {
+        g._clocksStamped = false;
+        stampClocks(g);
+        if (g._clocksStamped) chesscomStamped++;
+      }
+    }
+    if (chesscomStamped > 0) log(`Extracted clocks from ${chesscomStamped} Chess.com PGNs`);
+
+    // Lichess games: need to re-fetch with clocks=true
+    const lichessGames = existingGames.filter(g => g._source !== 'chesscom' && !g._clocksStamped);
+    if (lichessGames.length > 0) {
+      log(`Re-fetching ${lichessGames.length} Lichess games for clock data…`);
+      // Fetch all games for the known usernames with clocks enabled
+      const usernames = gistUsernames.length > 0 ? gistUsernames : (CONFIG.username ? [CONFIG.username] : []);
+      const lichessById = new Map(lichessGames.map(g => [g.id, g]));
+      for (const username of usernames) {
+        try {
+          const freshGames = await fetchLichessGames(username, CONFIG.maxGames);
+          let matched = 0;
+          for (const fg of freshGames) {
+            const existing = lichessById.get(fg.id);
+            if (existing && Array.isArray(fg.clocks) && fg.clocks.length > 0) {
+              existing.clocks = fg.clocks;
+              existing._clocksStamped = false; // force re-stamp (centiseconds → seconds)
+              stampClocks(existing);
+              matched++;
+            }
+          }
+          log(`  ${username}: matched clocks for ${matched}/${lichessGames.length} games`);
+        } catch (err) {
+          logError(`  Failed to re-fetch for ${username}: ${err.message}`);
+        }
+      }
+    } else {
+      log('All Lichess games already have clock data');
+    }
+
+    const totalWithClocks = existingGames.filter(g => g._clocksStamped).length;
+    log(`\nTotal games with clock data: ${totalWithClocks}/${existingGames.length}`);
+
+    await saveAll(existingGames, undefined, `MistakeLab clock rescan — ${totalWithClocks} games with clocks`);
+    quitAll();
+    log('Done!');
+    return;
+  }
 
   // Seed position cache from existing analyzed games
     const preSeedCount = Object.keys(posCache).length;
@@ -1542,6 +1665,9 @@ async function main() {
   } else {
     fetchedGames = await fetchLichessGames(CONFIG.username, CONFIG.maxGames);
   }
+
+  // Stamp clock data on newly fetched games
+  for (const g of fetchedGames) stampClocks(g);
 
   // Filter out already-analyzed games and games with server analysis
   const toAnalyze = fetchedGames.filter(g => {
