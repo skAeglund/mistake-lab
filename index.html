@@ -1167,7 +1167,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Advantage: capitalization-aware blunder filter (opponent must hold for 3 moves)</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Revert hide time trouble default</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1238,7 +1238,7 @@
           <button class="filter-chip active" data-filter="rated" data-value="casual" onclick="toggleFilter(this)">Casual</button>
         </div>
         <div class="filter-row" style="margin-top:6px;">
-          <button class="filter-chip active" id="btnHideTimeTrouble" onclick="toggleTimeTroubleFilter()" title="Hide mistakes made under time pressure (< 45s remaining, < 10s spent)">⏱ Hide time trouble</button>
+          <button class="filter-chip" id="btnHideTimeTrouble" onclick="toggleTimeTroubleFilter()" title="Hide mistakes made under time pressure (< 45s remaining, < 10s spent)">⏱ Hide time trouble</button>
         </div>
       </div>
       <div class="filter-row" style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);" id="openingFilterRow">
@@ -1516,7 +1516,7 @@ const ICON_TACTIC = '<svg width="14" height="14" viewBox="0 0 40 40" style="vert
 const ICON_ADVANTAGE = '<svg width="14" height="14" viewBox="0 0 40 40" style="vertical-align:-2px"><circle cx="20" cy="20" r="18" fill="#4caf50"/><text x="20" y="28" text-anchor="middle" fill="#fff" font-size="22" font-weight="700" font-family="sans-serif">♛</text></svg>';
 
 const filters = { color: new Set(['white','black']), severity: new Set(['mistake','blunder']), platform: new Set(['lichess','chesscom']), type: new Set(['mistake','tactic','advantage']), speed: new Set(['bullet','blitz','rapid','classical']), rated: new Set(['rated','casual']) };
-let hideTimeTrouble = true;
+let hideTimeTrouble = false;
 
 // ─── Opening filter state ───
 let openingFilterMode = false;   // true when the board is in filter-input mode
