@@ -1004,6 +1004,20 @@
   .sync-dot.off { background: var(--text-muted); }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 
+  /* Toggle switch */
+  .toggle-switch { position: relative; display: inline-block; width: 38px; height: 22px; }
+  .toggle-switch input { opacity: 0; width: 0; height: 0; }
+  .toggle-track {
+    position: absolute; inset: 0; cursor: pointer; border-radius: 22px;
+    background: var(--border); transition: background 0.2s;
+  }
+  .toggle-track::before {
+    content: ''; position: absolute; width: 16px; height: 16px; left: 3px; top: 3px;
+    border-radius: 50%; background: #fff; transition: transform 0.2s;
+  }
+  .toggle-switch input:checked + .toggle-track { background: var(--accent); }
+  .toggle-switch input:checked + .toggle-track::before { transform: translateX(16px); }
+
   /* Settings modal */
   .modal-backdrop {
     position: fixed; inset: 0; background: rgba(0,0,0,0.6);
@@ -1153,7 +1167,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add settings gear button in header, restructure settings modal</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add airplane mode setting (disables all Gist network requests)</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1340,6 +1354,16 @@
   <div class="modal">
     <h3>⚙ Settings</h3>
     <label style="font-size:13px;font-weight:600;color:var(--text-primary);margin-bottom:2px;">☁ Cloud Sync</label>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin:8px 0 12px;">
+      <div>
+        <span style="font-size:13px;">✈ Airplane Mode</span>
+        <div class="hint" style="margin-top:2px;">Disables all network requests to Gist. Uses locally cached data only.</div>
+      </div>
+      <label class="toggle-switch" style="flex-shrink:0;margin-left:12px;">
+        <input type="checkbox" id="settingsAirplaneMode">
+        <span class="toggle-track"></span>
+      </label>
+    </div>
     <label>GitHub Token</label>
     <input type="password" id="settingsToken" placeholder="ghp_...">
     <div class="hint">Personal access token with <code>gist</code> scope only.</div>
@@ -1654,6 +1678,7 @@ function buildReviewQueue() {
 let gistToken = localStorage.getItem('mistakelab_gist_token') || '';
 let gistId = localStorage.getItem('mistakelab_gist_id') || '';
 let gistData = null; // { positions: { posId: { completed, ... } }, version: 1 }
+let airplaneMode = localStorage.getItem('airplaneMode') === 'true';
 let syncDebounceTimer = null;
 let appShown = false; // guard to prevent double showMainApp()
 const GIST_FILENAME = 'mistakelab_progress.json';
@@ -1874,16 +1899,26 @@ async function gistCreate() {
 
 // ─── Sync logic ───
 function debounceSyncToGist() {
+  if (airplaneMode) {
+    // Still cache locally so changes survive page reload
+    if (gistData) {
+      try { localStorage.setItem(GIST_PROGRESS_CACHE_KEY, JSON.stringify(gistData)); } catch (_) {}
+    }
+    return;
+  }
   if (!gistToken || !gistId) return;
   clearTimeout(syncDebounceTimer);
   syncDebounceTimer = setTimeout(() => syncToGist(), 3000);
 }
 
 async function syncToGist() {
+  if (airplaneMode) return;
   if (!gistToken || !gistId || !gistData) return;
   setSyncStatus('syncing', 'Syncing…');
   try {
     await gistWrite(gistData);
+    // Update local cache for airplane mode
+    try { localStorage.setItem(GIST_PROGRESS_CACHE_KEY, JSON.stringify(gistData)); } catch (_) {}
     setSyncStatus('ok', 'Synced');
   } catch (e) {
     console.error('Sync failed:', e);
@@ -1891,7 +1926,21 @@ async function syncToGist() {
   }
 }
 
+const GIST_PROGRESS_CACHE_KEY = 'mistakelab_progress_cache';
+
 async function loadFromGist() {
+  if (airplaneMode) {
+    // Load from localStorage cache instead of network
+    try {
+      const cached = localStorage.getItem(GIST_PROGRESS_CACHE_KEY);
+      if (cached) {
+        gistData = JSON.parse(cached);
+        migrateInvalidationsToGist();
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
   if (!gistToken || !gistId) return false;
   setSyncStatus('syncing', 'Loading…');
   try {
@@ -1903,6 +1952,8 @@ async function loadFromGist() {
       const s = getCompletedSet();
       localStorage.setItem(getCompletedKey(), JSON.stringify([...s]));
     }
+    // Cache for airplane mode
+    try { localStorage.setItem(GIST_PROGRESS_CACHE_KEY, JSON.stringify(gistData)); } catch (_) {}
     setSyncStatus('ok', 'Synced');
     return true;
   } catch (e) {
@@ -1918,6 +1969,16 @@ function setSyncStatus(state, label) {
   if (!dot) return;
   dot.className = `sync-dot ${state}`;
   lbl.textContent = label;
+}
+
+function updateSyncStatusForAirplane() {
+  if (airplaneMode) {
+    setSyncStatus('off', '✈ Offline');
+  } else if (isGistConfigured()) {
+    setSyncStatus('ok', 'Synced');
+  } else {
+    setSyncStatus('off', 'Not synced');
+  }
 }
 
 function isGistConfigured() { return !!(gistToken && gistId); }
@@ -2042,6 +2103,7 @@ function mergeGames(cached, fetched) {
 }
 
 async function gistReadGames() {
+  if (airplaneMode) return null;
   if (!gistToken || !gistId) return null;
   const resp = await fetch(`https://api.github.com/gists/${gistId}`, {
     headers: { 'Authorization': `token ${gistToken}` }
@@ -2089,6 +2151,18 @@ function openSettings() {
   document.getElementById('settingsToken').value = gistToken;
   document.getElementById('settingsGistId').value = gistId;
   document.getElementById('settingsMsg').textContent = '';
+  // Airplane mode toggle
+  const airplaneToggle = document.getElementById('settingsAirplaneMode');
+  airplaneToggle.checked = airplaneMode;
+  airplaneToggle.onchange = function() {
+    airplaneMode = this.checked;
+    localStorage.setItem('airplaneMode', airplaneMode);
+    updateSyncStatusForAirplane();
+    // When turning off airplane mode, push any accumulated changes
+    if (!airplaneMode && gistData && isGistConfigured()) {
+      debounceSyncToGist();
+    }
+  };
   // Show mobile depth offset setting only on mobile
   const depthSetting = document.getElementById('mobileDepthSetting');
   if (isMobileView()) {
@@ -4638,7 +4712,9 @@ function showMainApp() {
   document.getElementById('syncStatus').classList.remove('hidden');
   document.body.classList.add('mobile-browsing');
 
-  if (isGistConfigured()) {
+  if (airplaneMode) {
+    setSyncStatus('off', '✈ Offline');
+  } else if (isGistConfigured()) {
     setSyncStatus('ok', 'Synced');
   } else {
     setSyncStatus('off', 'Not synced');
