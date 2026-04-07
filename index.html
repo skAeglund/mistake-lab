@@ -1167,7 +1167,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add airplane mode setting (disables all Gist network requests)</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix icon alignment, near-best feedback text, multi-color arrows</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1413,11 +1413,12 @@
 // ─── State ───
 // ─── Arrow drawing ───
 let arrowStartSquare = null;
-let activeArrows = new Set(); // Stores strings like "e2e4"
-let activeCircles = new Set(); // Stores square strings like "e4" for right-click circles
+let activeArrows = new Map(); // key "e2e4" → color ('green'|'red'|'blue')
+let activeCircles = new Map(); // square "e4" → color ('green'|'red'|'blue')
 let ghostCircle = null; // square string for preview circle during right-click hold
-let ghostCircleWasActive = false; // true if ghostCircle replaced an existing permanent circle
+let ghostCircleWasColor = null; // color of circle that was there before mousedown (null if none)
 let ghostArrow = null; // { from: 'e2', to: 'e4' }
+let currentDrawColor = 'green'; // set on mousedown from modifier keys
 let bestMoveArrow = null; // { from: 'e2', to: 'e4' } — shown for engine best move reveals
 let analysisArrow = null; // { from: 'e2', to: 'e4' } — temporary arrow during SF analysis
 let isRightClicking = false;
@@ -4760,7 +4761,7 @@ const SPEED_ICON_URLS = {
 };
 function speedIcon(speed) {
   const url = SPEED_ICON_URLS[speed];
-  return url ? `<img src="${url}" width="12" height="12" alt="" style="vertical-align:-1px;margin-right:2px;">` : '';
+  return url ? `<img src="${url}" width="12" height="12" alt="" style="vertical-align:-2px;margin-right:4px;">` : '';
 }
 
 function renderGameList() {
@@ -5027,9 +5028,10 @@ function onBoardClick(e) {
     if (sq) {
       arrowStartSquare = sq;
       ghostArrow = null;
+      currentDrawColor = getDrawColor(e);
       // If square already has a circle, pull it into ghost state (preview removal)
-      ghostCircleWasActive = activeCircles.has(sq);
-      if (ghostCircleWasActive) activeCircles.delete(sq);
+      ghostCircleWasColor = activeCircles.has(sq) ? activeCircles.get(sq) : null;
+      if (ghostCircleWasColor) activeCircles.delete(sq);
       ghostCircle = sq;
       renderArrows();
     }
@@ -6447,15 +6449,17 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
   if (wpDrop <= 5) {
     highlightSquaresWithColor(from, to, color);
     const userUci = from + to + (move.promotion || '');
-    const isExactBest = move.san === bestMoveSan
-      || (bestMoveUci && userUci === bestMoveUci)
-      || wpDrop < 0.5;
+    const isLiteralBest = move.san === bestMoveSan
+      || (bestMoveUci && userUci === bestMoveUci);
+    const isExactBest = isLiteralBest || wpDrop < 0.5;
 
     if (continuationMode) {
       // Continuation mode: simple feedback, no SRS
       const title = isExactBest ? 'Best move!' : wpDrop <= 2 ? 'Excellent!' : 'Good enough!';
-      const body = isExactBest
+      const body = isLiteralBest
         ? `<code>${escHtml(move.san)}</code> is the engine's top choice.`
+        : isExactBest
+        ? `<code>${escHtml(move.san)}</code> is just as strong as the best move.`
         : `<code>${escHtml(move.san)}</code> (−${wpStr}% win).`;
       showColorFeedback(color, colorDim, title, body);
     } else {
@@ -6474,10 +6478,14 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
       let title, body;
       if (isExactBest && !firstAttemptFailed) {
         title = 'Best move!';
-        body = `<code>${escHtml(move.san)}</code> is the engine's top choice.`;
+        body = isLiteralBest
+          ? `<code>${escHtml(move.san)}</code> is the engine's top choice.`
+          : `<code>${escHtml(move.san)}</code> is just as strong as the best move.`;
       } else if (wpDrop <= 2) {
         title = firstAttemptFailed ? 'Got it on retry' : 'Excellent!';
-        body = `<code>${escHtml(move.san)}</code> ` + (isExactBest ? `is the engine's top choice.` : `is nearly as good as the best move (−${wpStr}% win).`) +
+        body = `<code>${escHtml(move.san)}</code> ` + (isExactBest
+          ? (isLiteralBest ? `is the engine's top choice.` : `is just as strong as the best move.`)
+          : `is nearly as good as the best move (−${wpStr}% win).`) +
           (isExactBest ? '' : bestMoveButton(revealId, bestMoveSan, bestMoveUci, m));
       } else {
         title = firstAttemptFailed ? 'Got it on retry' : 'Good enough!';
@@ -7956,14 +7964,14 @@ function initArrowListeners() {
       if (ghostCircle) {
         ghostCircle = null;
         // Restore permanent circle if it was active before mousedown
-        if (ghostCircleWasActive) activeCircles.add(arrowStartSquare);
+        if (ghostCircleWasColor) activeCircles.set(arrowStartSquare, ghostCircleWasColor);
       }
       ghostArrow = { from: arrowStartSquare, to: currentSq };
       renderArrows();
     } else if (currentSq && currentSq === arrowStartSquare && ghostArrow) {
       // Dragged back to start — cancel arrow, restore ghost circle
       ghostArrow = null;
-      if (ghostCircleWasActive) activeCircles.delete(arrowStartSquare);
+      if (ghostCircleWasColor) activeCircles.delete(arrowStartSquare);
       ghostCircle = arrowStartSquare;
       renderArrows();
     }
@@ -7975,18 +7983,21 @@ function initArrowListeners() {
       
       if (endSq && endSq !== arrowStartSquare) {
         const arrowKey = `${arrowStartSquare}${endSq}`;
-        // Toggle behavior
-        if (activeArrows.has(arrowKey)) {
+        // Toggle: same color removes, different color replaces
+        if (activeArrows.has(arrowKey) && activeArrows.get(arrowKey) === currentDrawColor) {
           activeArrows.delete(arrowKey);
         } else {
-          activeArrows.add(arrowKey);
+          activeArrows.set(arrowKey, currentDrawColor);
         }
       } else if (endSq && endSq === arrowStartSquare) {
         // Same square — toggle circle
-        // ghostCircleWasActive means it was removed on mousedown → confirm removal (don't re-add)
-        // !ghostCircleWasActive means it was a new circle → confirm addition
-        if (!ghostCircleWasActive) {
-          activeCircles.add(endSq);
+        // ghostCircleWasColor with same color → confirm removal (don't re-add)
+        // ghostCircleWasColor with different color → replace with new color
+        // no previous circle → add new circle
+        if (ghostCircleWasColor && ghostCircleWasColor === currentDrawColor) {
+          // confirm removal — do nothing
+        } else {
+          activeCircles.set(endSq, currentDrawColor);
         }
       }
       
@@ -8019,12 +8030,23 @@ function getSquareFromMouseEvent(e) {
   return file + rank;
 }
 
+const DRAW_COLOR_MAP = {
+  green: { arrow: 'rgba(21, 120, 27, 0.6)', circle: 'rgba(21, 120, 27, 0.75)', ghost: 'rgba(21, 120, 27, 0.6)' },
+  red:   { arrow: 'rgba(200, 40, 40, 0.6)', circle: 'rgba(200, 40, 40, 0.75)', ghost: 'rgba(200, 40, 40, 0.6)' },
+  blue:  { arrow: 'rgba(66, 133, 244, 0.6)', circle: 'rgba(66, 133, 244, 0.75)', ghost: 'rgba(66, 133, 244, 0.6)' },
+};
+function getDrawColor(e) {
+  if (e.altKey) return 'blue';
+  if (e.shiftKey || e.ctrlKey || e.metaKey) return 'red';
+  return 'green';
+}
+
 function clearArrows() {
   activeArrows.clear();
   activeCircles.clear();
   ghostArrow = null;
   ghostCircle = null;
-  ghostCircleWasActive = false;
+  ghostCircleWasColor = null;
   bestMoveArrow = null;
   analysisArrow = null;
   renderArrows();
@@ -8104,24 +8126,24 @@ function renderArrows() {
     // Hint arrow
     if (hintArrow) drawOne(hintArrow.from, hintArrow.to, 'rgba(66, 133, 244, 0.7)', 1);
     // User-drawn arrows
-    activeArrows.forEach(key => drawOne(key.substring(0, 2), key.substring(2, 4), 'rgba(21, 120, 27, 0.6)', 1));
+    activeArrows.forEach((color, key) => drawOne(key.substring(0, 2), key.substring(2, 4), DRAW_COLOR_MAP[color].arrow, 1));
     // Ghost arrow while dragging
-    if (ghostArrow) drawOne(ghostArrow.from, ghostArrow.to, 'rgba(21, 120, 27, 0.6)', 0.45);
+    if (ghostArrow) drawOne(ghostArrow.from, ghostArrow.to, DRAW_COLOR_MAP[currentDrawColor].arrow, 0.45);
 
     // User-drawn circles (right-click on same square, Lichess-style)
     const circleStroke = sqSize * 0.056;
-    activeCircles.forEach(sq => {
+    activeCircles.forEach((color, sq) => {
       const center = sqCenter(sq);
       if (!center) return;
       const r = sqSize * 0.46;
-      html += `<circle cx="${center.x}" cy="${center.y}" r="${r}" fill="none" stroke="rgba(21, 120, 27, 0.75)" stroke-width="${circleStroke}" opacity="0.9" />`;
+      html += `<circle cx="${center.x}" cy="${center.y}" r="${r}" fill="none" stroke="${DRAW_COLOR_MAP[color].circle}" stroke-width="${circleStroke}" opacity="0.9" />`;
     });
     // Ghost circle (preview while right-click held, before drag)
     if (ghostCircle) {
       const center = sqCenter(ghostCircle);
       if (center) {
         const r = sqSize * 0.46;
-        html += `<circle cx="${center.x}" cy="${center.y}" r="${r}" fill="none" stroke="rgba(21, 120, 27, 0.6)" stroke-width="${circleStroke * 0.7}" opacity="0.5" />`;
+        html += `<circle cx="${center.x}" cy="${center.y}" r="${r}" fill="none" stroke="${DRAW_COLOR_MAP[currentDrawColor].ghost}" stroke-width="${circleStroke * 0.7}" opacity="0.5" />`;
       }
     }
 
