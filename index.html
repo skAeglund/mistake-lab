@@ -1143,7 +1143,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Eval bar: dedicated worker with two-phase depth (16 quick, 30 when idle)</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Increase Stockfish hash: 512/128 desktop, 256/64 mobile</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2153,7 +2153,7 @@ async function initStockfish() {
       sfWorker.addEventListener('message', handler);
       sfWorker.postMessage('uci');
     });
-    sfWorker.postMessage('setoption name Hash value 64');
+    sfWorker.postMessage(`setoption name Hash value ${isMobileView() ? 256 : 512}`);
     sfWorker.postMessage('isready');
     await new Promise((resolve) => {
       function handler(e) {
@@ -2251,7 +2251,7 @@ async function initEvalWorker() {
       evalSfWorker.addEventListener('message', handler);
       evalSfWorker.postMessage('uci');
     });
-    evalSfWorker.postMessage('setoption name Hash value 16');
+    evalSfWorker.postMessage(`setoption name Hash value ${isMobileView() ? 64 : 128}`);
     evalSfWorker.postMessage('isready');
     await new Promise((resolve) => {
       function handler(e) {
