@@ -1143,7 +1143,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix review count not updating when toggling filter chips</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Eval bar: dedicated worker with two-phase depth (16 quick, 30 when idle)</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1420,6 +1420,18 @@ let srsRecorded = false;         // true after SRS grade is recorded; prevents r
 let evalBarEnabled = localStorage.getItem('evalBarEnabled') !== 'false'; // user toggle (default on)
 let mobileDepthOffset = parseInt(localStorage.getItem('mobileDepthOffset') || '1', 10); // reduce depth on mobile
 let evalBarRevealed = false;     // true after first attempt on current position
+// --- Eval bar dedicated Stockfish worker (two-phase: quick depth then deep when idle) ---
+let evalSfWorker = null;
+let evalSfReady = false;
+let evalSfSearchActive = false;
+let evalSfSession = 0;           // incremented to invalidate stale results
+let evalSfResult = null;         // { fen, cpWhite, depth } — latest eval for displayed position
+let evalSfDebounceTimer = null;
+let evalSfPhase = 0;             // 0=idle, 1=phase1 running, 2=phase2 running
+let evalSfPhase2PollTimer = null; // polls for main worker idle to start phase 2
+let evalSfCurrentFen = null;     // FEN being analyzed (for phase 2 continuity)
+const EVAL_WORKER_PHASE1_DEPTH = 16;
+const EVAL_WORKER_PHASE2_DEPTH = 30;
 let hintLevel = 0;               // 0=no hint, 1=piece shown, 2=full move shown
 let hintUsed = false;            // true if hint was used this position (forces SRS Again)
 let hintMove = null;             // frozen UCI string of the best move when hint was first used
@@ -2206,6 +2218,206 @@ function depthAdj(d) {
   return isMobileView() ? Math.max(8, d - mobileDepthOffset) : d;
 }
 
+// ─── Eval bar dedicated Stockfish worker (two-phase) ───────────────────────
+// Phase 1: quick depth 16 — always runs immediately on position change.
+// Phase 2: deep depth 30 — starts only after phase 1 completes AND main worker is idle.
+// Stockfish hash persists between phases, so phase 2 benefits from phase 1 work.
+async function initEvalWorker() {
+  if (evalSfWorker) {
+    evalSfWorker.terminate();
+    evalSfWorker = null;
+  }
+  evalSfReady = false;
+  evalSfSearchActive = false;
+  evalSfPhase = 0;
+  try {
+    evalSfWorker = new Worker(SF_PATH);
+    evalSfWorker.addEventListener('error', (err) => {
+      console.error('[EvalWorker] crash:', err?.message || err);
+      evalSfReady = false;
+      evalSfSearchActive = false;
+      evalSfPhase = 0;
+      clearInterval(evalSfPhase2PollTimer);
+      evalSfPhase2PollTimer = null;
+      if (evalSfWorker) { try { evalSfWorker.terminate(); } catch (_) {} evalSfWorker = null; }
+    });
+    await new Promise((resolve) => {
+      function handler(e) {
+        if (typeof e.data === 'string' && e.data === 'uciok') {
+          evalSfWorker.removeEventListener('message', handler);
+          resolve();
+        }
+      }
+      evalSfWorker.addEventListener('message', handler);
+      evalSfWorker.postMessage('uci');
+    });
+    evalSfWorker.postMessage('setoption name Hash value 16');
+    evalSfWorker.postMessage('isready');
+    await new Promise((resolve) => {
+      function handler(e) {
+        if (typeof e.data === 'string' && e.data === 'readyok') {
+          evalSfWorker.removeEventListener('message', handler);
+          resolve();
+        }
+      }
+      evalSfWorker.addEventListener('message', handler);
+    });
+    evalSfReady = true;
+    evalSfSearchActive = false;
+  } catch (err) {
+    console.error('[EvalWorker] init failed:', err);
+    evalSfReady = false;
+  }
+}
+
+/** Start phase 2 (deep search) on the eval worker. Reuses hash from phase 1. */
+function evalWorkerStartPhase2(fen, session, sideToMove) {
+  if (!evalSfReady || !evalSfWorker || session !== evalSfSession) return;
+  evalSfPhase = 2;
+  const depth = depthAdj(EVAL_WORKER_PHASE2_DEPTH);
+
+  // Remove previous listener
+  if (evalSfWorker._evalListener) {
+    evalSfWorker.removeEventListener('message', evalSfWorker._evalListener);
+  }
+  const listener = (e) => {
+    if (session !== evalSfSession) return;
+    const line = typeof e.data === 'string' ? e.data : '';
+    if (line.startsWith('info depth')) {
+      const depthM = line.match(/^info depth (\d+)/);
+      const cpM = line.match(/score cp (-?\d+)/);
+      const mateM = line.match(/score mate (-?\d+)/);
+      const pvM = line.match(/multipv (\d+)/);
+      if (pvM && parseInt(pvM[1]) !== 1) return;
+      let cp = null;
+      if (cpM) cp = parseInt(cpM[1]);
+      else if (mateM) cp = parseInt(mateM[1]) > 0 ? 10000 : -10000;
+      if (cp !== null && depthM) {
+        const d = parseInt(depthM[1]);
+        const cpWhite = sideToMove === 'w' ? cp : -cp;
+        evalSfResult = { fen, cpWhite, depth: d };
+        updateEvalBar();
+      }
+    } else if (line.startsWith('bestmove')) {
+      evalSfSearchActive = false;
+      evalSfPhase = 0;
+    }
+  };
+  evalSfWorker._evalListener = listener;
+  evalSfWorker.addEventListener('message', listener);
+
+  evalSfWorker.postMessage(`position fen ${fen}`);
+  evalSfWorker.postMessage(`go depth ${depth}`);
+  evalSfSearchActive = true;
+}
+
+/** Poll for main worker idle, then start phase 2. */
+function evalWorkerWaitForIdle(fen, session, sideToMove) {
+  clearInterval(evalSfPhase2PollTimer);
+  evalSfPhase2PollTimer = setInterval(() => {
+    if (session !== evalSfSession) {
+      // Position changed — cancel
+      clearInterval(evalSfPhase2PollTimer);
+      evalSfPhase2PollTimer = null;
+      return;
+    }
+    if (!sfSearchActive) {
+      clearInterval(evalSfPhase2PollTimer);
+      evalSfPhase2PollTimer = null;
+      evalWorkerStartPhase2(fen, session, sideToMove);
+    }
+  }, 100);
+}
+
+/** Two-phase analyze: phase 1 (quick) then phase 2 (deep when main worker idle). */
+async function evalWorkerAnalyze(fen) {
+  const session = ++evalSfSession;
+  clearInterval(evalSfPhase2PollTimer);
+  evalSfPhase2PollTimer = null;
+  evalSfCurrentFen = fen;
+
+  // Must terminate if a search is running (can't send stop)
+  if (evalSfSearchActive && evalSfWorker) {
+    evalSfWorker.terminate();
+    evalSfWorker = null;
+    evalSfReady = false;
+    evalSfSearchActive = false;
+    evalSfPhase = 0;
+  }
+  if (!evalSfReady) await initEvalWorker();
+  if (!evalSfReady || !evalSfWorker) return;
+
+  const sideToMove = fen.split(' ')[1]; // 'w' or 'b'
+  const depth = depthAdj(EVAL_WORKER_PHASE1_DEPTH);
+  evalSfPhase = 1;
+
+  // Remove stale listener
+  if (evalSfWorker._evalListener) {
+    evalSfWorker.removeEventListener('message', evalSfWorker._evalListener);
+  }
+  const listener = (e) => {
+    if (session !== evalSfSession) return; // stale
+    const line = typeof e.data === 'string' ? e.data : '';
+    if (line.startsWith('info depth')) {
+      const depthM = line.match(/^info depth (\d+)/);
+      const cpM = line.match(/score cp (-?\d+)/);
+      const mateM = line.match(/score mate (-?\d+)/);
+      const pvM = line.match(/multipv (\d+)/);
+      if (pvM && parseInt(pvM[1]) !== 1) return;
+      let cp = null;
+      if (cpM) cp = parseInt(cpM[1]);
+      else if (mateM) cp = parseInt(mateM[1]) > 0 ? 10000 : -10000;
+      if (cp !== null && depthM) {
+        const d = parseInt(depthM[1]);
+        const cpWhite = sideToMove === 'w' ? cp : -cp;
+        evalSfResult = { fen, cpWhite, depth: d };
+        updateEvalBar();
+      }
+    } else if (line.startsWith('bestmove')) {
+      evalSfSearchActive = false;
+      evalSfPhase = 0;
+      // Phase 1 complete — transition to phase 2
+      if (session !== evalSfSession) return;
+      if (!sfSearchActive) {
+        // Main worker is idle — start phase 2 immediately
+        evalWorkerStartPhase2(fen, session, sideToMove);
+      } else {
+        // Main worker busy — poll until idle
+        evalWorkerWaitForIdle(fen, session, sideToMove);
+      }
+    }
+  };
+  evalSfWorker._evalListener = listener;
+  evalSfWorker.addEventListener('message', listener);
+
+  evalSfWorker.postMessage(`position fen ${fen}`);
+  evalSfWorker.postMessage(`go depth ${depth}`);
+  evalSfSearchActive = true;
+}
+
+/** Debounced request — call this from navigation handlers. */
+function requestEvalWorkerAnalysis(fen) {
+  clearTimeout(evalSfDebounceTimer);
+  evalSfDebounceTimer = setTimeout(() => evalWorkerAnalyze(fen), 150);
+}
+
+/** Stop eval worker search and clear result. */
+function stopEvalWorkerSearch() {
+  clearTimeout(evalSfDebounceTimer);
+  clearInterval(evalSfPhase2PollTimer);
+  evalSfPhase2PollTimer = null;
+  evalSfSession++;
+  evalSfResult = null;
+  evalSfCurrentFen = null;
+  evalSfPhase = 0;
+  if (evalSfSearchActive && evalSfWorker) {
+    evalSfWorker.terminate();
+    evalSfWorker = null;
+    evalSfReady = false;
+    evalSfSearchActive = false;
+  }
+}
+
 function sfAnalyze(fen, depth = 16, multiPv = 1) {
   return new Promise(async (resolve) => {
     if (sfSearchActive) {
@@ -2624,8 +2836,8 @@ function updateEvalBar() {
   const bar = document.getElementById('evalBar');
   if (!bar) return;
 
-  const hasEngineLineEval = browsingLine && engineLine && afterMoveCpWhite !== null;
-  const shouldShow = evalBarEnabled && evalBarRevealed && !continuationMode && currentMistakeIdx >= 0 && (preAnalysis || hasEngineLineEval);
+  const hasEngineLineEval = browsingLine && engineLine && (evalSfResult || afterMoveCpWhite !== null);
+  const shouldShow = evalBarEnabled && evalBarRevealed && !continuationMode && !tacticMode && currentMistakeIdx >= 0 && (preAnalysis || hasEngineLineEval);
   const wasVisible = bar.classList.contains('visible');
   bar.classList.toggle('visible', !!shouldShow);
   if (wasVisible !== !!shouldShow && boardObj) {
@@ -2637,10 +2849,13 @@ function updateEvalBar() {
   const m = filteredMistakes[currentMistakeIdx];
   if (!m) return;
 
-  // preAnalysis.bestCp is from side-to-move's perspective
-  // Determine side to move from the FEN being analyzed
+  // Determine cpWhite for the currently displayed position.
+  // Priority: eval worker (per-position) > afterMoveCpWhite (line-level) > preAnalysis
   let cpWhite;
-  if (afterMoveCpWhite !== null) {
+  if (browsingLine && evalSfResult) {
+    // Per-position eval from the dedicated eval worker
+    cpWhite = evalSfResult.cpWhite;
+  } else if (afterMoveCpWhite !== null) {
     // After user's move — use post-move eval (updated by handleEvalResult, goToLineMove, etc.)
     cpWhite = afterMoveCpWhite;
   } else if (preAnalysis) {
@@ -4973,6 +5188,7 @@ function loadPosition(globalIdx) {
   srsRecorded = false;
   evalBarRevealed = false;
   afterMoveCpWhite = null;
+  stopEvalWorkerSearch();
   updateEvalBar();
   hintLevel = 0;
   hintUsed = false;
@@ -6860,7 +7076,7 @@ function goToLineMove(idx, animate = true) {
   // Re-render move list to update active highlights
   renderEngineLine();
 
-  // Update eval bar with the active path's evaluation
+  // Update eval bar with the active path's evaluation (immediate fallback)
   if (engineLine.activeAlt >= 0) {
     const alt = engineLine.alternatives[engineLine.activeAlt];
     if (alt && alt.cpWhite != null) afterMoveCpWhite = alt.cpWhite;
@@ -6868,6 +7084,12 @@ function goToLineMove(idx, animate = true) {
     afterMoveCpWhite = engineLine.cpWhite;
   }
   updateEvalBar();
+
+  // Request per-position eval from the dedicated eval worker (debounced)
+  if (evalBarEnabled && evalBarRevealed && !tacticMode) {
+    const evalFen = idx === -1 ? engineLine.baseFen : getEngineLineFen();
+    if (evalFen) requestEvalWorkerAnalysis(evalFen);
+  }
 }
 
 /** Click handler for main line moves — switches activeAlt to main */
@@ -6902,6 +7124,7 @@ function lineStep(delta) {
 
 function exitEngineLine() {
   browsingLine = false;
+  stopEvalWorkerSearch();
 
   if (engineLine) {
     // Restore the puzzle position
