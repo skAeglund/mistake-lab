@@ -1143,7 +1143,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Increase Stockfish hash: 512/128 desktop, 256/64 mobile</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add engine hash size setting (applies on next page load)</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1344,6 +1344,14 @@
         <span id="settingsDepthOffsetValue" style="font-size:13px;font-weight:600;min-width:20px;text-align:center;">1</span>
       </div>
     </div>
+    <div id="hashSetting" style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
+      <label style="margin-top:0;">Engine Hash Size</label>
+      <div class="hint">Memory for the engine hash table. Higher values improve analysis quality at deeper depths. Eval bar worker uses ¼ of this. <em>Applies on next page load.</em></div>
+      <div style="display:flex;align-items:center;gap:10px;margin-top:6px;">
+        <input type="range" id="settingsHash" min="5" max="10" step="1" value="9" style="flex:1;">
+        <span id="settingsHashValue" style="font-size:13px;font-weight:600;min-width:56px;text-align:center;">512 MB</span>
+      </div>
+    </div>
     <div class="modal-actions">
       <button class="btn btn-ghost btn-sm" onclick="disconnectGist()">Disconnect</button>
       <button class="btn btn-ghost btn-sm" onclick="closeSettings()">Cancel</button>
@@ -1419,6 +1427,7 @@ let firstAttemptFailed = false;  // tracks if first try on current position was 
 let srsRecorded = false;         // true after SRS grade is recorded; prevents retry from re-grading
 let evalBarEnabled = localStorage.getItem('evalBarEnabled') !== 'false'; // user toggle (default on)
 let mobileDepthOffset = parseInt(localStorage.getItem('mobileDepthOffset') || '1', 10); // reduce depth on mobile
+let sfHashMB = parseInt(localStorage.getItem('sfHashMB') || (window.innerWidth <= 768 ? '256' : '512'), 10); // main worker hash in MB
 let evalBarRevealed = false;     // true after first attempt on current position
 // --- Eval bar dedicated Stockfish worker (two-phase: quick depth then deep when idle) ---
 let evalSfWorker = null;
@@ -2082,6 +2091,21 @@ function openSettings() {
   } else {
     depthSetting.style.display = 'none';
   }
+  // Engine hash slider — range depends on device
+  const hashSlider = document.getElementById('settingsHash');
+  const hashLabel = document.getElementById('settingsHashValue');
+  const mobile = isMobileView();
+  hashSlider.min = mobile ? 5 : 6;   // 32MB mobile, 64MB desktop
+  hashSlider.max = mobile ? 9 : 10;  // 512MB mobile, 1024MB desktop
+  const currentLog2 = Math.round(Math.log2(sfHashMB));
+  hashSlider.value = Math.max(parseInt(hashSlider.min), Math.min(parseInt(hashSlider.max), currentLog2));
+  hashLabel.textContent = (1 << parseInt(hashSlider.value)) + ' MB';
+  hashSlider.oninput = function() {
+    const mb = 1 << parseInt(this.value);
+    hashLabel.textContent = mb + ' MB';
+    sfHashMB = mb;
+    localStorage.setItem('sfHashMB', mb);
+  };
   document.getElementById('settingsModal').classList.remove('hidden');
 }
 
@@ -2153,7 +2177,7 @@ async function initStockfish() {
       sfWorker.addEventListener('message', handler);
       sfWorker.postMessage('uci');
     });
-    sfWorker.postMessage(`setoption name Hash value ${isMobileView() ? 256 : 512}`);
+    sfWorker.postMessage(`setoption name Hash value ${sfHashMB}`);
     sfWorker.postMessage('isready');
     await new Promise((resolve) => {
       function handler(e) {
@@ -2251,7 +2275,7 @@ async function initEvalWorker() {
       evalSfWorker.addEventListener('message', handler);
       evalSfWorker.postMessage('uci');
     });
-    evalSfWorker.postMessage(`setoption name Hash value ${isMobileView() ? 64 : 128}`);
+    evalSfWorker.postMessage(`setoption name Hash value ${Math.max(16, Math.round(sfHashMB / 4))}`);
     evalSfWorker.postMessage('isready');
     await new Promise((resolve) => {
       function handler(e) {
