@@ -1167,7 +1167,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Advantage diagnostics logging; hide time trouble on by default</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Advantage: capitalization-aware blunder filter (opponent must hold for 3 moves)</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3955,10 +3955,37 @@ function extractAllMistakes() {
       }
     }
 
-    // No significant mistakes: none with wpDrop > advantageOverlapThreshold
+    // Check if any big mistake was truly capitalized by the opponent
+    // A mistake is "capitalized" if the user's eval stayed below +50cp for 3+ consecutive
+    // user moves after the blunder. Un-capitalized blunders don't disqualify — the user
+    // recovered and the game's trajectory is still a gradual decline.
     const gameMistakes = rawMistakes.filter(m => m.gameId === game.id && m.type === 'mistake');
-    const hasSignificant = gameMistakes.some(m => m.wpDrop > MISTAKES_CACHE_PARAMS.advantageOverlapThreshold);
-    if (hasSignificant) { advantageItemCount.skippedSignificant++; continue; }
+    const analysis = game.analysis || [];
+    const CAPITALIZED_CP = 50;
+    const CAPITALIZED_MOVES = 3;
+    let hasCapitalizedBlunder = false;
+    for (const m of gameMistakes) {
+      if (m.wpDrop <= MISTAKES_CACHE_PARAMS.advantageOverlapThreshold) continue;
+      // Check the position before the user's next N moves (= after opponent responded)
+      // Mistake at movePly P → analysis[P] is eval after opponent's response
+      // Next check: analysis[P+2], then analysis[P+4]
+      let consecutiveBelow = 0;
+      for (let k = 0; k < CAPITALIZED_MOVES; k++) {
+        const evalIdx = m.movePly + (k * 2); // after each opponent response
+        if (evalIdx >= analysis.length) break;
+        const cp = evalToCp(analysis[evalIdx], playerColor);
+        if (cp < CAPITALIZED_CP) {
+          consecutiveBelow++;
+        } else {
+          break; // recovered
+        }
+      }
+      if (consecutiveBelow >= CAPITALIZED_MOVES) {
+        hasCapitalizedBlunder = true;
+        break;
+      }
+    }
+    if (hasCapitalizedBlunder) { advantageItemCount.skippedSignificant++; continue; }
 
     // Replace mistakes at or after the peak ply with the advantage item
     const replacedPids = new Set();
@@ -3991,7 +4018,7 @@ function extractAllMistakes() {
     }
   }
   if (advantageItemCount.checked > 0) {
-    console.log(`[Advantage] ${advantageItemCount.checked} candidates: ${advantageItemCount.added} added, ${advantageItemCount.skippedWin} won, ${advantageItemCount.skippedTimeLoss} time-loss, ${advantageItemCount.skippedSignificant} had mistake >15%`);
+    console.log(`[Advantage] ${advantageItemCount.checked} candidates: ${advantageItemCount.added} added, ${advantageItemCount.skippedWin} won, ${advantageItemCount.skippedTimeLoss} time-loss, ${advantageItemCount.skippedSignificant} capitalized blunder`);
   }
 
   // Restore game references
