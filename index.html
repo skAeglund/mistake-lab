@@ -1167,7 +1167,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Time trouble detection: clock data extraction + hide filter</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Time trouble UI indicators in position info, review list, and game list</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -5017,7 +5017,7 @@ function renderReviewList() {
 
     const moveLabel = isTactic
       ? `${ICON_TACTIC} Move ${m.moveNumber}${m.playerColor==='white'?'.':'…'} <span style="color:var(--yellow)">+${Math.abs(m.wpSwing)}%</span>`
-      : `${ICON_MISTAKE} Move ${m.moveNumber}${m.playerColor==='white'?'.':'…'} <span class="loss ${lossClass}">−${m.wpDrop}%</span>`;
+      : `${ICON_MISTAKE} Move ${m.moveNumber}${m.playerColor==='white'?'.':'…'} <span class="loss ${lossClass}">−${m.wpDrop}%</span>${m.timeTrouble ? ' <span style="color:var(--text-muted);font-size:11px" title="Time trouble">⏱</span>' : ''}`;
 
     item.innerHTML = `
       <div class="review-item-top">
@@ -5364,7 +5364,7 @@ function renderQueue() {
     const lossClass = m.wpDrop >= 15 ? 'loss-blunder' : 'loss-mistake';
     item.innerHTML = `
       <span><span class="ply">${m.moveNumber}${m.playerColor==='white'?'.':'…'}</span> ???</span>
-      <span class="loss ${lossClass}">−${m.wpDrop}%</span>
+      <span class="loss ${lossClass}">−${m.wpDrop}%${m.timeTrouble ? ' <span style="color:var(--text-muted)" title="Time trouble">⏱</span>' : ''}</span>
     `;
     list.appendChild(item);
   }
@@ -5513,9 +5513,13 @@ function loadPosition(globalIdx) {
     updateSessionProgress();
   } else {
     // ── Mistake mode setup ──
+    const clockInfo = m.clockRemaining != null
+      ? `<div style="font-size:11px;margin-top:2px;color:var(--text-muted)">⏱ ${formatClockTime(m.clockRemaining)} remaining${m.moveTime != null ? ` · ${m.moveTime}s spent` : ''}${m.timeTrouble ? ' — <span style="color:var(--yellow)">time trouble</span>' : ''}</div>`
+      : '';
     document.getElementById('posInfoContent').innerHTML = `
       <div style="font-size:13px;line-height:1.7">
         <div>Move <code class="mono">${m.moveNumber}${m.playerColor==='white'?'.':'…'}</code> — win% dropped <span style="color:var(--red);font-weight:600">−${m.wpDrop}%</span> <span style="color:var(--text-muted)">(${m.cpLoss}cp)</span></div>
+        ${clockInfo}
         <div id="mistakeReveal">
           <button class="btn btn-ghost btn-sm" style="margin-top:6px;font-size:11px;" onclick="this.parentElement.innerHTML='You played <code class=mono>${escHtml(m.sanPlayed)}</code>'">Show original mistake</button>
         </div>
@@ -8239,6 +8243,13 @@ function hideArrow() {
   bestMoveArrow = null;
   analysisArrow = null;
   renderArrows();
+}
+
+function formatClockTime(seconds) {
+  if (seconds == null) return '?';
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
 function escHtml(s) {
