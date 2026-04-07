@@ -1167,7 +1167,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Revert hide time trouble default</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix: include clock presence in cache fingerprint to bust stale cache</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1695,7 +1695,7 @@ let syncDebounceTimer = null;
 let appShown = false; // guard to prevent double showMainApp()
 const GIST_FILENAME = 'mistakelab_progress.json';
 const GIST_GAMES_FILENAME = 'mistakelab_games.json';
-const MISTAKES_CACHE_VERSION = 5;
+const MISTAKES_CACHE_VERSION = 6;
 const MISTAKES_CACHE_PARAMS = { wpDropThreshold: 10, advantageThreshold: 300, advantageMinMoves: 2, advantageOverlapThreshold: 15 };
 
 // Populate login fields from saved config + auto-load
@@ -2086,7 +2086,10 @@ function saveMistakesCache(rawMistakes, gameFingerprints, fenData, moveStatsData
 }
 
 function buildGameFingerprint(game) {
-  return { tacticsLen: Array.isArray(game.tactics) ? game.tactics.length : 0 };
+  return {
+    tacticsLen: Array.isArray(game.tactics) ? game.tactics.length : 0,
+    hasClocks: Array.isArray(game.clocks) && game.clocks.length > 0,
+  };
 }
 
 function buildGameFingerprints(games) {
