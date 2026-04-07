@@ -1449,8 +1449,16 @@ async function main() {
     const lichessGames = existingGames.filter(g => g._source !== 'chesscom' && !g._clocksStamped);
     if (lichessGames.length > 0) {
       log(`Re-fetching ${lichessGames.length} Lichess games for clock data…`);
-      // Fetch all games for the known usernames with clocks enabled
-      const usernames = gistUsernames.length > 0 ? gistUsernames : (CONFIG.username ? [CONFIG.username] : []);
+      // Determine which usernames appear in Lichess games (skip Chess.com-only names)
+      const lichessUsernames = new Set();
+      for (const g of lichessGames) {
+        const wn = g.players?.white?.user?.id?.toLowerCase();
+        const bn = g.players?.black?.user?.id?.toLowerCase();
+        if (wn) lichessUsernames.add(wn);
+        if (bn) lichessUsernames.add(bn);
+      }
+      const allUsernames = gistUsernames.length > 0 ? gistUsernames : (CONFIG.username ? [CONFIG.username] : []);
+      const usernames = allUsernames.filter(u => lichessUsernames.has(u.toLowerCase()));
       const lichessById = new Map(lichessGames.map(g => [g.id, g]));
       for (const username of usernames) {
         try {
