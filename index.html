@@ -1167,7 +1167,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add Advantage Capitalization mode — detect blown advantages and drill conversion</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Advantage diagnostics logging; hide time trouble on by default</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1238,7 +1238,7 @@
           <button class="filter-chip active" data-filter="rated" data-value="casual" onclick="toggleFilter(this)">Casual</button>
         </div>
         <div class="filter-row" style="margin-top:6px;">
-          <button class="filter-chip" id="btnHideTimeTrouble" onclick="toggleTimeTroubleFilter()" title="Hide mistakes made under time pressure (< 45s remaining, < 10s spent)">⏱ Hide time trouble</button>
+          <button class="filter-chip active" id="btnHideTimeTrouble" onclick="toggleTimeTroubleFilter()" title="Hide mistakes made under time pressure (< 45s remaining, < 10s spent)">⏱ Hide time trouble</button>
         </div>
       </div>
       <div class="filter-row" style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);" id="openingFilterRow">
@@ -1516,7 +1516,7 @@ const ICON_TACTIC = '<svg width="14" height="14" viewBox="0 0 40 40" style="vert
 const ICON_ADVANTAGE = '<svg width="14" height="14" viewBox="0 0 40 40" style="vertical-align:-2px"><circle cx="20" cy="20" r="18" fill="#4caf50"/><text x="20" y="28" text-anchor="middle" fill="#fff" font-size="22" font-weight="700" font-family="sans-serif">♛</text></svg>';
 
 const filters = { color: new Set(['white','black']), severity: new Set(['mistake','blunder']), platform: new Set(['lichess','chesscom']), type: new Set(['mistake','tactic','advantage']), speed: new Set(['bullet','blitz','rapid','classical']), rated: new Set(['rated','casual']) };
-let hideTimeTrouble = false;
+let hideTimeTrouble = true;
 
 // ─── Opening filter state ───
 let openingFilterMode = false;   // true when the board is in filter-input mode
@@ -3933,7 +3933,7 @@ function extractAllMistakes() {
   console.log(`[OpeningExplorer] Built positionMoveIndex with ${positionMoveIndex.size} positions`);
 
   // ── Advantage capitalization: filter candidates and push valid items ──
-  const advantageItemCount = { checked: 0, added: 0 };
+  const advantageItemCount = { checked: 0, added: 0, skippedWin: 0, skippedTimeLoss: 0, skippedSignificant: 0 };
   for (const game of allGames) {
     const cand = advantageCandidates[game.id];
     if (!cand) continue;
@@ -3941,7 +3941,7 @@ function extractAllMistakes() {
     const playerColor = detectPlayerColor(game);
     const { winner } = getGameResultInfo(game);
     const userWon = winner === playerColor;
-    if (userWon) continue; // must be draw or loss
+    if (userWon) { advantageItemCount.skippedWin++; continue; }
 
     // Time loss check: exclude only if user lost on time AND was still winning
     const isTimeLoss = game.status === 'outoftime' ||
@@ -3951,15 +3951,14 @@ function extractAllMistakes() {
       if (analysis.length > 0) {
         const lastEval = analysis[analysis.length - 1];
         const finalCp = evalToCp(lastEval, playerColor);
-        if (finalCp >= 0) continue; // still winning/equal when flagged — exclude
+        if (finalCp >= 0) { advantageItemCount.skippedTimeLoss++; continue; }
       }
-      // If no analysis or eval negative — include (advantage blown OTB)
     }
 
     // No significant mistakes: none with wpDrop > advantageOverlapThreshold
     const gameMistakes = rawMistakes.filter(m => m.gameId === game.id && m.type === 'mistake');
     const hasSignificant = gameMistakes.some(m => m.wpDrop > MISTAKES_CACHE_PARAMS.advantageOverlapThreshold);
-    if (hasSignificant) continue;
+    if (hasSignificant) { advantageItemCount.skippedSignificant++; continue; }
 
     // Replace mistakes at or after the peak ply with the advantage item
     const replacedPids = new Set();
@@ -3992,7 +3991,7 @@ function extractAllMistakes() {
     }
   }
   if (advantageItemCount.checked > 0) {
-    console.log(`[Advantage] Checked ${advantageItemCount.checked} candidates, added ${advantageItemCount.added} items`);
+    console.log(`[Advantage] ${advantageItemCount.checked} candidates: ${advantageItemCount.added} added, ${advantageItemCount.skippedWin} won, ${advantageItemCount.skippedTimeLoss} time-loss, ${advantageItemCount.skippedSignificant} had mistake >15%`);
   }
 
   // Restore game references
