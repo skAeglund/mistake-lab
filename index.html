@@ -3731,6 +3731,43 @@ function extractMistakesForGame(game) {
 }
 
 function extractAllMistakes() {
+  // ── TEST GAME WITH CLOCK DATA — remove after testing ──
+  if (!allGames.find(g => g.id === '_test_clocks_6sS121tG')) {
+    allGames.push({
+      id: '_test_clocks_6sS121tG',
+      moves: 'Nf3 c5 g3 Nf6 Bg2 g6 c4 Bg7 Nc3 O-O O-O d5 cxd5 Nxd5 Qb3 e6 Rd1 Nc6 d3 Qb6 Nxd5 Qxb3 axb3 exd5 Bf4 Re8 Bd6 Rxe2 Bxc5 Rxb2 Rab1 Bg4 Rxb2 Bxb2 Rd2 Bg7 h3 Be6 Ng5 b6 Ba3 Bh6 h4 f6 Nxe6 Bxd2 Bxd5 Rc8 Nd8+ Kg7 Nxc6 a5 Nd4 Rc3 Nf3 Rxd3 Nxd2 Rxd2 Bc4 Ra2 Bd6 a4 bxa4 Rxa4 Be2 Ra1+ Kg2 Rb1 Bd3 Rb3 Bc4 Rb1 Ba2 Rb2 Bd5 b5 Bc6 b4 Bf4 b3 Be4 Ra2',
+      analysis: [
+        {eval:10},{eval:25},{eval:3},{eval:10},{eval:14},{eval:14},{eval:9},{eval:22},{eval:14},{eval:13},
+        {eval:12},{eval:0},{eval:14},{eval:13},{eval:-21},{eval:-9},{eval:-41},{eval:-38},{eval:-36},{eval:27},
+        {eval:-2},{eval:15},{eval:-9},{eval:-10},{eval:-61},{eval:-71},{eval:-219},{eval:-206},{eval:-216},{eval:-225},
+        {eval:-213},{eval:-191},{eval:-203},{eval:-201},{eval:-210},{eval:-197},{eval:-200},{eval:-200},{eval:-242},{eval:-226},
+        {eval:-346},{eval:-221},{eval:-232},{eval:321},{eval:322},{eval:314},{eval:305},{eval:331},{eval:327},{eval:321},
+        {eval:317},{eval:312},{eval:306},{eval:434},{eval:-77},{eval:-115},{eval:-97},{eval:-42},{eval:-109},{eval:-13},
+        {eval:-51},{eval:76},{eval:75},{eval:76},{eval:73},{eval:92},{eval:104},{eval:100},{eval:-268},{eval:80},
+        {eval:38},{eval:111},{eval:56},{eval:77},{eval:-263},{eval:73},{eval:0},{eval:0},{eval:-218},{eval:-218},
+        {eval:-183},{eval:-7}
+      ],
+      clocks: [
+        180,180,181,180,182,181,182,183,183,184,183,184,176,186,141,181,139,178,132,175,
+        115,171,117,171,103,167,95,161,92,161,87,150,83,150,82,148,65,145,61,141,
+        54,137,40,135,37,134,38,124,33,116,33,110,24,104,18,100,18,100,16,92,
+        14,90,11,92,9,89,9,88,6,87,6,86,5,86,3,85,3,85,3,83,2,79
+      ],
+      _clocksStamped: true,
+      _playerColor: 'white',
+      _source: 'lichess',
+      speed: 'blitz',
+      rated: true,
+      createdAt: 1744022253000,
+      opening: { name: 'Zukertort Opening: Sicilian Invitation' },
+      players: {
+        white: { user: { name: 'blindsmurf', id: 'blindsmurf' } },
+        black: { user: { name: 'whit_king', id: 'whit_king' } },
+      },
+    });
+  }
+  // ── END TEST GAME ──
+
   const currentFingerprints = buildGameFingerprints(allGames);
   const currentGameIds = new Set(allGames.map(g => g.id));
   const gamesById = new Map(allGames.map(g => [g.id, g]));
