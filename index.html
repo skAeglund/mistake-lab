@@ -142,11 +142,17 @@
     cursor: default;
   }
   #btnNote.has-note { color: var(--accent); border-color: var(--accent); }
-  /* Note panel */
+  /* Note panel — separate section in right panel */
   .note-panel {
-    background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px;
-    padding: 12px; margin-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+    padding: 12px 16px;
   }
+  .note-panel h4 { font-size: 12px; font-weight: 700; color: var(--text-secondary); margin: 0 0 8px; display: flex; align-items: center; justify-content: space-between; }
+  .note-panel .note-view-text {
+    font-size: 12px; color: var(--text-primary); line-height: 1.5;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .note-panel .note-arrows-only { font-size: 11px; color: var(--text-muted); font-style: italic; }
   .note-panel textarea {
     width: 100%; min-height: 60px; max-height: 150px; resize: vertical;
     background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border);
@@ -156,7 +162,6 @@
   .note-panel textarea:focus { outline: none; border-color: var(--accent); }
   .note-panel .note-actions { display: flex; gap: 6px; margin-top: 8px; justify-content: flex-end; }
   .note-panel .note-hint { font-size: 10px; color: var(--text-muted); margin-top: 6px; }
-  .note-saved-indicator { font-size: 11px; color: var(--text-muted); margin-bottom: 6px; display: flex; align-items: center; gap: 4px; }
   .btn-inline {
     background: none; border: 1px solid var(--border); color: var(--text-secondary);
     font-family: 'DM Sans', sans-serif; font-size: 10px; font-weight: 600;
@@ -922,6 +927,7 @@
     .info-card { padding: 10px 12px; }
     .note-panel { padding: 10px; }
     .note-panel textarea { min-height: 50px; font-size: 13px; }
+    .note-panel h4 { font-size: 11px; }
     .info-card h4 { margin-bottom: 6px; }
     .engine-line { padding: 10px; }
 
@@ -1192,7 +1198,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add position notes with saved arrows</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Notes: separate panel, view/edit modes</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1347,6 +1353,7 @@
         <button class="btn btn-ghost btn-sm" onclick="clearOpeningFilter()">✕ Clear</button>
       </div>
     </div>
+    <div id="notePanel" class="note-panel" style="display:none"></div>
     <div class="feedback-area" id="feedbackArea">
       <div class="info-card" id="posInfoCard" style="display:none">
         <h4>Current Position</h4>
@@ -1369,7 +1376,6 @@
           <span class="maia-slider-value" id="maiaPrecisionValue">0.75</span>
         </div>
       </div>
-      <div id="notePanel" class="note-panel" style="display:none"></div>
       <div id="feedbackContainer"></div>
       <div id="contLineContainer"></div>
     </div>
@@ -1516,7 +1522,8 @@ let hintMove = null;             // frozen UCI string of the best move when hint
 let hintArrow = null;            // { from, to } for hint arrow drawn on second press
 let noteArrows = [];             // [{from, to, color}] arrows from saved note
 let noteCircles = [];            // [{square, color}] circles from saved note
-let notePanelOpen = false;       // true when note editing panel is visible
+let notePanelOpen = false;       // true when note panel is visible
+let noteEditMode = false;        // true when note panel is in edit mode (vs read-only view)
 let reviewMode = false;          // true = show only due SRS positions
 let reviewQueue = [];            // positions due for review
 
@@ -8842,33 +8849,76 @@ function toggleNotePanel() {
 function openNotePanel() {
   const panel = document.getElementById('notePanel');
   if (!panel) return;
-  notePanelOpen = true;
 
   const fen = getCurrentNoteFen();
   if (!fen) return;
-  const key = fenPositionKey(fen);
   const note = getNoteForFen(fen);
 
-  // If note has saved arrows/circles, restore them to the board for editing
+  notePanelOpen = true;
+  noteEditMode = false;
+
   if (note) {
-    // Set active arrows/circles from saved note so user can see/edit them
-    activeArrows.clear();
-    activeCircles.clear();
+    // Show read-only view
+    showNoteViewMode(panel, note);
+  } else {
+    // No note yet — go straight to edit mode
+    enterNoteEditMode();
+  }
+}
+
+function showNoteViewMode(panel, note) {
+  noteEditMode = false;
+  // Show note arrows as overlay
+  showNoteArrows(note);
+
+  const hasText = note.text && note.text.trim();
+  const hasAnnotations = (note.arrows?.length > 0) || (note.circles?.length > 0);
+  const annotationSummary = [];
+  if (note.arrows?.length > 0) annotationSummary.push(`${note.arrows.length} arrow${note.arrows.length > 1 ? 's' : ''}`);
+  if (note.circles?.length > 0) annotationSummary.push(`${note.circles.length} circle${note.circles.length > 1 ? 's' : ''}`);
+
+  panel.style.display = 'block';
+  panel.innerHTML = `
+    <h4>📝 Note <span style="display:flex;gap:6px;">
+      <button class="btn btn-ghost btn-sm" onclick="enterNoteEditMode()" style="font-size:10px;padding:2px 8px;">✏ Edit</button>
+      <button class="btn btn-ghost btn-sm" onclick="closeNotePanel()" style="font-size:10px;padding:2px 8px;">✕</button>
+    </span></h4>
+    ${hasText ? `<div class="note-view-text">${escHtml(note.text)}</div>` : ''}
+    ${!hasText && hasAnnotations ? `<div class="note-arrows-only">${annotationSummary.join(', ')} on the board</div>` : ''}
+    ${hasText && hasAnnotations ? `<div class="note-arrows-only" style="margin-top:6px">${annotationSummary.join(', ')} on the board</div>` : ''}
+  `;
+}
+
+function enterNoteEditMode() {
+  const panel = document.getElementById('notePanel');
+  if (!panel) return;
+
+  const fen = getCurrentNoteFen();
+  if (!fen) return;
+  const note = getNoteForFen(fen);
+
+  notePanelOpen = true;
+  noteEditMode = true;
+
+  // Restore saved arrows/circles as live annotations for editing
+  activeArrows.clear();
+  activeCircles.clear();
+  if (note) {
     for (const a of (note.arrows || [])) {
       activeArrows.set(a.from + a.to, a.color || 'green');
     }
     for (const c of (note.circles || [])) {
       activeCircles.set(c.square, c.color || 'green');
     }
-    // Clear note overlay arrows (user arrows are now live)
-    noteArrows = [];
-    noteCircles = [];
-    renderArrows();
   }
+  // Clear note overlay (user arrows are now live)
+  noteArrows = [];
+  noteCircles = [];
+  renderArrows();
 
   panel.style.display = 'block';
   panel.innerHTML = `
-    <div class="note-saved-indicator">${note ? '📝 Editing note' : '📝 New note'}</div>
+    <h4>${note ? '📝 Edit Note' : '📝 New Note'} <button class="btn btn-ghost btn-sm" onclick="closeNotePanel()" style="font-size:10px;padding:2px 8px;">✕</button></h4>
     <textarea id="noteText" maxlength="500" placeholder="Write a note about this position… (arrows on the board will be saved too)">${note?.text ? escHtml(note.text) : ''}</textarea>
     <div class="note-hint">Arrows and circles drawn on the board will be saved with this note.</div>
     <div class="note-actions">
@@ -8878,18 +8928,21 @@ function openNotePanel() {
     </div>
   `;
 
-  // Focus textarea
   const ta = document.getElementById('noteText');
   if (ta) ta.focus();
 }
 
 function closeNotePanel() {
+  const wasEditing = noteEditMode;
   notePanelOpen = false;
+  noteEditMode = false;
   const panel = document.getElementById('notePanel');
   if (panel) { panel.style.display = 'none'; panel.innerHTML = ''; }
-  // Clear user-drawn arrows (they were for note editing)
-  activeArrows.clear();
-  activeCircles.clear();
+  // Clear user-drawn arrows if we were editing
+  if (wasEditing) {
+    activeArrows.clear();
+    activeCircles.clear();
+  }
   // Re-show saved note arrows if a note exists
   const fen = getCurrentNoteFen();
   const note = getNoteForFen(fen);
@@ -8919,7 +8972,6 @@ function saveNote() {
 
   // Must have text or at least one annotation
   if (!text && arrows.length === 0 && circles.length === 0) {
-    // Empty note = delete it
     deleteNote();
     return;
   }
@@ -8943,15 +8995,12 @@ function saveNote() {
     syncDebounceTimer = setTimeout(() => syncToGist(), 3000);
   }
 
-  // Close panel and show the saved note overlay
-  notePanelOpen = false;
-  const panel = document.getElementById('notePanel');
-  if (panel) { panel.style.display = 'none'; panel.innerHTML = ''; }
+  // Switch to view mode with the saved note
+  noteEditMode = false;
   activeArrows.clear();
   activeCircles.clear();
-  showNoteArrows(gistData.notes[key]);
+  showNoteViewMode(document.getElementById('notePanel'), gistData.notes[key]);
   updateNoteButton();
-  // Re-render review list if visible (to update 📝 icons)
   if (reviewMode) renderReviewList();
 }
 
@@ -8970,6 +9019,7 @@ function deleteNote() {
   }
 
   notePanelOpen = false;
+  noteEditMode = false;
   const panel = document.getElementById('notePanel');
   if (panel) { panel.style.display = 'none'; panel.innerHTML = ''; }
   activeArrows.clear();
