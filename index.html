@@ -1167,7 +1167,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Advantage invalidation: skip replacement for invalidated items, restore mistakes on next load</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix isOurMove for From Position games (use FEN turn, not ply parity)</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3676,8 +3676,9 @@ function extractMistakesForGame(game) {
     if (i >= analysis.length) continue;
 
     const ply = i + 1;
-    const isOurMove = (playerColor === 'white' && ply % 2 === 1) ||
-                      (playerColor === 'black' && ply % 2 === 0);
+    const sideToMove = fenBefore.split(' ')[1]; // 'w' or 'b'
+    const isOurMove = (playerColor === 'white' && sideToMove === 'w') ||
+                      (playerColor === 'black' && sideToMove === 'b');
     if (!isOurMove) continue;
 
     const evalBefore = i > 0 ? analysis[i - 1] : null;
@@ -5670,6 +5671,17 @@ function loadPosition(globalIdx) {
     updateSessionProgress();
   } else if (m.type === 'advantage') {
     // ── Advantage capitalization mode setup ──
+    // Defensive: verify the FEN is the user's turn (guards against stale cached candidates)
+    const advTurn = m.fenBefore.split(' ')[1];
+    if ((m.playerColor === 'white' && advTurn !== 'w') || (m.playerColor === 'black' && advTurn !== 'b')) {
+      console.warn(`[Advantage] Skipping ${m.gameId}: FEN turn (${advTurn}) doesn't match player (${m.playerColor})`);
+      document.getElementById('posInfoContent').innerHTML = `<div style="font-size:13px;color:var(--text-muted)">This position has a turn mismatch — skipping.</div>`;
+      document.getElementById('feedbackContainer').innerHTML = '';
+      document.getElementById('contLineContainer').innerHTML = '';
+      renderQueue();
+      updateSessionProgress();
+      return;
+    }
     advantageMode = true;
     advantageMinCpReached = m.peakCp; // starts at peak
     advantageConsecutiveAbove1000 = 0;
