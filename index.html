@@ -142,10 +142,16 @@
     cursor: default;
   }
   #btnNote.has-note { color: var(--accent); border-color: var(--accent); }
-  /* Note panel — separate section in right panel */
+  /* Note panel — floating card over the board */
   .note-panel {
-    border-bottom: 1px solid var(--border);
-    padding: 12px 16px;
+    position: absolute;
+    top: 50%; right: 8px; transform: translateY(-50%);
+    z-index: 60;
+    width: 240px;
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 14px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.35);
+    pointer-events: auto;
   }
   .note-panel h4 { font-size: 12px; font-weight: 700; color: var(--text-secondary); margin: 0 0 8px; display: flex; align-items: center; justify-content: space-between; }
   .note-panel .note-view-text {
@@ -925,7 +931,7 @@
     .feedback-title { font-size: 13px; }
     .feedback-text { font-size: 12px; }
     .info-card { padding: 10px 12px; }
-    .note-panel { padding: 10px; }
+    .note-panel { width: auto; left: 8px; right: 8px; top: auto; bottom: 8px; transform: none; }
     .note-panel textarea { min-height: 50px; font-size: 13px; }
     .note-panel h4 { font-size: 11px; }
     .info-card h4 { margin-bottom: 6px; }
@@ -1198,7 +1204,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Notes: close panel on navigation</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Notes: floating card over board</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1306,6 +1312,7 @@
       </button>
       <div id="board" style="width:100%"></div>
       <svg class="hidden" id="arrowSvg"></svg>
+      <div id="notePanel" class="note-panel" style="display:none"></div>
     </div>
     <div class="position-nav hidden" id="filterBoardBar" style="justify-content:center;">
       <button class="btn btn-ghost btn-sm" onclick="filterFlipBoard()" title="Flip board">⇅ Flip</button>
@@ -1353,7 +1360,6 @@
         <button class="btn btn-ghost btn-sm" onclick="clearOpeningFilter()">✕ Clear</button>
       </div>
     </div>
-    <div id="notePanel" class="note-panel" style="display:none"></div>
     <div class="feedback-area" id="feedbackArea">
       <div class="info-card" id="posInfoCard" style="display:none">
         <h4>Current Position</h4>
