@@ -1204,7 +1204,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Silent mode: suppress move highlights during advantage cap</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Board classification badges + review navigation improvements</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1474,6 +1474,7 @@ let ghostArrow = null; // { from: 'e2', to: 'e4' }
 let currentDrawColor = 'green'; // set on mousedown from modifier keys
 let bestMoveArrow = null; // { from: 'e2', to: 'e4' } — shown for engine best move reveals
 let analysisArrow = null; // { from: 'e2', to: 'e4' } — temporary arrow during SF analysis
+let moveClassBadge = null; // { square: 'e4', classification: 'mistake' } — shown on board after classified move
 let isRightClicking = false;
 let lastTouchTime = 0; // prevents synthetic mousedown from double-firing after touch
 
@@ -7060,6 +7061,10 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
       afterCp: afterCpPlayer,
     };
     lastContUserAfterCp = afterCpPlayer;
+
+    // Show classification badge on the board
+    moveClassBadge = { square: to, classification };
+    renderArrows();
   }
 
   if (wpDrop <= 5) {
@@ -8067,8 +8072,18 @@ function goToContLineMove(idx) {
   if (idx >= 0 && contLine.moves[idx].uci) {
     const uci = contLine.moves[idx].uci;
     showLastMoveHighlight(uci.substring(0, 2), uci.substring(2, 4));
+    // Show classification badge on destination square
+    const mv = contLine.moves[idx];
+    if (mv.classification) {
+      moveClassBadge = { square: uci.substring(2, 4), classification: mv.classification };
+    } else {
+      moveClassBadge = null;
+    }
+    renderArrows();
   } else {
     clearLastMoveHighlight();
+    moveClassBadge = null;
+    renderArrows();
   }
 
   // When returning to the live end, restore pre-analysis
@@ -8387,8 +8402,8 @@ function reviewNextKeyMove() {
     return;
   }
   const moveIdx = contLineReviewKeyMoves[contLineReviewKeyIdx];
-  // Navigate to position BEFORE this move (one step before the move itself)
-  goToContLineMove(moveIdx - 1);
+  // Navigate to position AFTER this move — badge shows on destination square via goToContLineMove
+  goToContLineMove(moveIdx);
   showReviewKeyMoveInfo(moveIdx);
 }
 
@@ -8399,7 +8414,7 @@ function reviewPrevKeyMove() {
     contLineReviewKeyIdx = 0;
   }
   const moveIdx = contLineReviewKeyMoves[contLineReviewKeyIdx];
-  goToContLineMove(moveIdx - 1);
+  goToContLineMove(moveIdx);
   showReviewKeyMoveInfo(moveIdx);
 }
 
@@ -8432,19 +8447,15 @@ function showReviewKeyMoveInfo(moveIdx) {
       <div class="feedback-text">
         <div>${mv.wpDrop != null ? `Lost ${mv.wpDrop}% winning chances (−${mv.cpLoss || 0}cp)` : ''}</div>
         ${bestInfo}
-        <div style="margin-top:6px;font-size:11px;color:var(--text-muted);">Click the move on the board, or press → to see what happened next</div>
+        <div style="margin-top:6px;font-size:11px;color:var(--text-muted);">← to see the position before · → to continue</div>
         ${navHtml}
       </div>
     </div>
   `;
 
-  // Draw arrow for best move
-  if (mv.bestMoveUci) {
-    const from = mv.bestMoveUci.substring(0, 2);
-    const to = mv.bestMoveUci.substring(2, 4);
-    bestMoveArrow = { from, to };
-    renderArrows();
-  }
+  // Badge is already set by goToContLineMove — just clear any stale arrows
+  bestMoveArrow = null;
+  analysisArrow = null;
 }
 
 function showReviewComplete() {
@@ -8626,6 +8637,7 @@ async function advanceContinuation(contUci) {
   }
 
   // Animate the opponent's move
+  moveClassBadge = null; // clear user's move badge before opponent animates
   boardObj.position(gameEngine.fen(), true);
   showLastMoveHighlightDeferred(fromSq, toSq);
 
@@ -9061,6 +9073,7 @@ function clearArrows() {
   ghostCircleWasColor = null;
   bestMoveArrow = null;
   analysisArrow = null;
+  moveClassBadge = null;
   noteArrows = [];
   noteCircles = [];
   renderArrows();
@@ -9071,7 +9084,7 @@ function renderArrows() {
     const boardEl = document.querySelector('#board [class^="board-"]');
     if (!boardEl) return;
 
-    const hasSomething = activeArrows.size > 0 || activeCircles.size > 0 || ghostCircle || ghostArrow || bestMoveArrow || analysisArrow || hintArrow || filterArrows.length > 0 || noteArrows.length > 0 || noteCircles.length > 0;
+    const hasSomething = activeArrows.size > 0 || activeCircles.size > 0 || ghostCircle || ghostArrow || bestMoveArrow || analysisArrow || hintArrow || filterArrows.length > 0 || noteArrows.length > 0 || noteCircles.length > 0 || moveClassBadge;
     svg.classList.toggle('hidden', !hasSomething);
     if (!hasSomething) { svg.innerHTML = ''; return; }
 
@@ -9174,6 +9187,23 @@ function renderArrows() {
       }
     }
 
+    // Move classification badge (chess.com-style circle with symbol on destination square)
+    if (moveClassBadge) {
+      const cls = MOVE_CLASSIFICATION[moveClassBadge.classification];
+      if (cls) {
+        const el = document.querySelector(`[data-square="${moveClassBadge.square}"]`);
+        if (el) {
+          const r = el.getBoundingClientRect();
+          const cx = r.left - boardRect.left + r.width * 0.85;
+          const cy = r.top - boardRect.top + r.height * 0.15;
+          const radius = sqSize * 0.18;
+          const sym = moveClassBadge.classification === 'good' ? '✓' : (moveClassBadge.classification === 'best' ? '★' : cls.symbol);
+          html += `<circle cx="${cx}" cy="${cy}" r="${radius}" fill="${cls.color}" stroke="rgba(0,0,0,0.3)" stroke-width="0.5" />`;
+          html += `<text x="${cx}" y="${cy}" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="${radius * 1.3}px" font-weight="700" font-family="sans-serif">${sym}</text>`;
+        }
+      }
+    }
+
     svg.innerHTML = html;
 }
 
@@ -9201,6 +9231,7 @@ function drawArrow(from, to) {
 function hideArrow() {
   bestMoveArrow = null;
   analysisArrow = null;
+  moveClassBadge = null;
   renderArrows();
 }
 
