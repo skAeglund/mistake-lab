@@ -1203,7 +1203,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add "Post progress on return" setting</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add cross-device Stockfish eval cache via Gist</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1748,6 +1748,16 @@ let syncDebounceTimer = null;
 let appShown = false; // guard to prevent double showMainApp()
 const GIST_FILENAME = 'mistakelab_progress.json';
 const GIST_GAMES_FILENAME = 'mistakelab_games.json';
+const GIST_EVALS_FILENAME = 'mistakelab_evals.json';
+
+// ─── Evaluation cache (cross-device via Gist) ───
+const EVAL_CACHE_MIN_DEPTH = 20;        // only cache results at this depth or higher
+const EVAL_CACHE_SYNC_THRESHOLD = 10;   // sync after this many new entries
+const EVAL_CACHE_SYNC_DEBOUNCE = 15000; // 15s debounce
+const EVAL_CACHE_LS_KEY = 'mistakelab_eval_cache';
+let evalCache = new Map();       // fenKey → { depth, bestMove, bestCp, pvs, multiPv }
+let evalCacheDirty = 0;          // count of unsaved entries since last sync
+let evalCacheSyncTimer = null;
 const MISTAKES_CACHE_VERSION = 6;
 const MISTAKES_CACHE_PARAMS = { wpDropThreshold: 10, advantageThreshold: 300, advantageMinMoves: 2 };
 
@@ -1997,6 +2007,7 @@ const GIST_PROGRESS_CACHE_KEY = 'mistakelab_progress_cache';
 async function loadFromGist() {
   if (airplaneMode) {
     // Load from localStorage cache instead of network
+    loadEvalCacheFromLocalStorage();
     try {
       const cached = localStorage.getItem(GIST_PROGRESS_CACHE_KEY);
       if (cached) {
@@ -2020,6 +2031,8 @@ async function loadFromGist() {
     }
     // Cache for airplane mode
     try { localStorage.setItem(GIST_PROGRESS_CACHE_KEY, JSON.stringify(gistData)); } catch (_) {}
+    // Load eval cache (non-blocking — not on critical path)
+    loadEvalCacheFromGist();
     setSyncStatus('ok', 'Synced');
     return true;
   } catch (e) {
@@ -2048,6 +2061,141 @@ function updateSyncStatusForAirplane() {
 }
 
 function isGistConfigured() { return !!(gistToken && gistId); }
+
+// ─── Evaluation Cache ───
+function evalCacheKey(fen) {
+  // First 4 FEN fields: position, turn, castling, en-passant (strip move clocks for transposition hits)
+  return fen.split(' ').slice(0, 4).join(' ');
+}
+
+function evalCacheGet(fen, minDepth, minMultiPv = 1) {
+  const entry = evalCache.get(evalCacheKey(fen));
+  if (!entry) return null;
+  if (entry.depth < minDepth) return null;
+  if ((entry.multiPv || 1) < minMultiPv) return null;
+  return entry;
+}
+
+function evalCacheStore(fen, depth, bestMove, bestCp, pvs, multiPv = 1) {
+  if (depth < EVAL_CACHE_MIN_DEPTH) return;
+  const key = evalCacheKey(fen);
+  const existing = evalCache.get(key);
+  // Only overwrite if deeper, or same depth but more PVs
+  if (existing && existing.depth > depth) return;
+  if (existing && existing.depth === depth && (existing.multiPv || 1) >= multiPv) return;
+  evalCache.set(key, { depth, bestMove, bestCp, pvs, multiPv });
+  evalCacheDirty++;
+  debounceEvalCacheSync();
+}
+
+function debounceEvalCacheSync() {
+  if (airplaneMode || !isGistConfigured()) {
+    // Still cache locally
+    saveEvalCacheToLocalStorage();
+    return;
+  }
+  clearTimeout(evalCacheSyncTimer);
+  evalCacheSyncTimer = setTimeout(() => syncEvalCacheToGist(), EVAL_CACHE_SYNC_DEBOUNCE);
+}
+
+function evalCacheToJSON() {
+  const obj = {};
+  for (const [key, val] of evalCache) {
+    obj[key] = val;
+  }
+  return obj;
+}
+
+function evalCacheFromJSON(obj) {
+  evalCache.clear();
+  if (!obj || typeof obj !== 'object') return;
+  for (const [key, val] of Object.entries(obj)) {
+    if (val && typeof val.depth === 'number' && val.bestMove) {
+      evalCache.set(key, val);
+    }
+  }
+}
+
+function saveEvalCacheToLocalStorage() {
+  try {
+    localStorage.setItem(EVAL_CACHE_LS_KEY, JSON.stringify(evalCacheToJSON()));
+  } catch (_) { /* quota exceeded — non-critical */ }
+}
+
+function loadEvalCacheFromLocalStorage() {
+  try {
+    const raw = localStorage.getItem(EVAL_CACHE_LS_KEY);
+    if (raw) evalCacheFromJSON(JSON.parse(raw));
+  } catch (_) {}
+}
+
+async function gistReadEvals() {
+  if (airplaneMode || !gistToken || !gistId) return null;
+  const resp = await fetch(`https://api.github.com/gists/${gistId}`, {
+    headers: { 'Authorization': `token ${gistToken}` }
+  });
+  if (!resp.ok) return null;
+  const gist = await resp.json();
+  const file = gist.files?.[GIST_EVALS_FILENAME];
+  if (!file) return null;
+  const content = await gistReadFileContent(file);
+  if (!content) return null;
+  try { return JSON.parse(content); } catch { return null; }
+}
+
+async function syncEvalCacheToGist() {
+  if (airplaneMode || !isGistConfigured()) return;
+  if (evalCacheDirty === 0) return;
+  try {
+    const data = evalCacheToJSON();
+    await fetch(`https://api.github.com/gists/${gistId}`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `token ${gistToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        files: { [GIST_EVALS_FILENAME]: { content: JSON.stringify(data) } }
+      })
+    });
+    evalCacheDirty = 0;
+    saveEvalCacheToLocalStorage();
+    console.log(`[EvalCache] Synced ${evalCache.size} entries to Gist`);
+  } catch (e) {
+    console.warn('[EvalCache] Gist sync failed:', e.message);
+  }
+}
+
+async function loadEvalCacheFromGist() {
+  // Load from localStorage first (fast, offline-available)
+  loadEvalCacheFromLocalStorage();
+  const localCount = evalCache.size;
+  // Then merge from Gist (may have entries from other devices)
+  try {
+    const gistEvals = await gistReadEvals();
+    if (gistEvals && typeof gistEvals === 'object') {
+      let merged = 0;
+      for (const [key, val] of Object.entries(gistEvals)) {
+        if (!val || typeof val.depth !== 'number' || !val.bestMove) continue;
+        const existing = evalCache.get(key);
+        if (!existing || val.depth > existing.depth ||
+            (val.depth === existing.depth && (val.multiPv || 1) > (existing.multiPv || 1))) {
+          evalCache.set(key, val);
+          merged++;
+        }
+      }
+      if (merged > 0) {
+        saveEvalCacheToLocalStorage();
+        console.log(`[EvalCache] Merged ${merged} entries from Gist (total: ${evalCache.size})`);
+      }
+    }
+  } catch (e) {
+    console.warn('[EvalCache] Gist load failed (using localStorage):', e.message);
+  }
+  if (evalCache.size > 0) {
+    console.log(`[EvalCache] Loaded ${evalCache.size} cached evaluations`);
+  }
+}
 
 // ─── Game Cache (localStorage L1 + Gist L2) ───
 function getGamesCacheKey(username) { return `mistakelab_games_${username.toLowerCase()}`; }
@@ -2622,6 +2770,17 @@ function stopEvalWorkerSearch() {
 
 function sfAnalyze(fen, depth = 16, multiPv = 1) {
   return new Promise(async (resolve) => {
+    // ── Eval cache check ──
+    const cached = evalCacheGet(fen, depthAdj(depth), multiPv);
+    if (cached) {
+      sfLog('sfAnalyze', `CACHE HIT depth=${cached.depth} bestMove=${cached.bestMove} fen=${fen.split(' ').slice(0,2).join(' ')}…`);
+      const pvs = cached.pvs.map(pv => ({
+        cp: pv.cp, moves: pv.uciLine || pv.move, depth: cached.depth, firstMove: pv.move
+      }));
+      resolve({ bestMove: cached.bestMove, pvs, fen });
+      return;
+    }
+
     if (sfSearchActive) {
       // Never send 'stop' to this WASM build — terminate and recreate
       sfLog('sfAnalyze', `terminating worker (search was active) before analyzing fen=${fen.split(' ').slice(0,2).join(' ')}…`);
@@ -2672,6 +2831,13 @@ function sfAnalyze(fen, depth = 16, multiPv = 1) {
           .sort((a, b) => parseInt(a) - parseInt(b))
           .map(k => collected[k]);
         sfLog('sfAnalyze', `COMPLETE bestmove=${bm} maxDepth=${pvs[0]?.depth} fen=${fen.split(' ').slice(0,2).join(' ')}…`);
+        // Store in eval cache
+        const finalDepth = pvs[0]?.depth || 0;
+        if (finalDepth >= EVAL_CACHE_MIN_DEPTH) {
+          evalCacheStore(fen, finalDepth, bm, pvs[0]?.cp ?? 0,
+            pvs.map(pv => ({ cp: pv.cp, move: pv.firstMove, san: uciToSan(fen, pv.firstMove), uciLine: pv.moves })),
+            multiPv);
+        }
         resolve({ bestMove: bm, pvs, fen });
       }
     }
@@ -2754,6 +2920,11 @@ function sfAnalyzeAdaptive(fen, { minDepth = 16, maxDepth = 22, stableCount = 2,
           if (stableTransitions >= stableCount) {
             resolved = true;
             sfLog('sfAnalyzeAdaptive', `STABLE EXIT at depth ${d} bestMove=${firstMove} stableTransitions=${stableTransitions}`);
+            // Store in eval cache
+            if (d >= EVAL_CACHE_MIN_DEPTH) {
+              evalCacheStore(fen, d, firstMove, cp,
+                [{ cp, move: firstMove, san: uciToSan(fen, firstMove), uciLine: collected[1]?.moves || '' }], 1);
+            }
             resolve({ bestMove: firstMove, pvs: [collected[1]], fen, earlyExit: true, exitDepth: d });
           }
         }
@@ -2768,6 +2939,12 @@ function sfAnalyzeAdaptive(fen, { minDepth = 16, maxDepth = 22, stableCount = 2,
             .sort((a, b) => parseInt(a) - parseInt(b))
             .map(k => collected[k]);
           sfLog('sfAnalyzeAdaptive', `FULL DEPTH bestmove=${bm} depth=${pvs[0]?.depth}`);
+          // Store in eval cache
+          const fd = pvs[0]?.depth || 0;
+          if (fd >= EVAL_CACHE_MIN_DEPTH) {
+            evalCacheStore(fen, fd, bm, pvs[0]?.cp ?? 0,
+              pvs.map(pv => ({ cp: pv.cp, move: pv.firstMove, san: uciToSan(fen, pv.firstMove), uciLine: pv.moves })), 1);
+          }
           resolve({ bestMove: bm, pvs, fen });
         }
       }
@@ -2819,6 +2996,28 @@ function startPreAnalysis(fen) {
   const session = ++preAnalysisSession;
 
   sfLog('startPreAnalysis', `session=${session} fen=${fen.split(' ').slice(0,2).join(' ')}… sfSearchActive=${sfSearchActive}`);
+
+  // ── Eval cache check: skip Stockfish entirely if we have a deep enough cached result ──
+  const cachedEval = evalCacheGet(fen, depthAdj(30), 3);
+  if (cachedEval) {
+    sfLog('startPreAnalysis', `session=${session} CACHE HIT depth=${cachedEval.depth} bestMove=${cachedEval.bestMove} fen=${fen.split(' ').slice(0,2).join(' ')}…`);
+    preAnalysisDepth = cachedEval.depth;
+    preAnalysis = {
+      bestCp: cachedEval.bestCp,
+      bestMove: cachedEval.bestMove,
+      pvs: cachedEval.pvs.map(pv => ({
+        cp: pv.cp,
+        move: pv.move,
+        san: pv.san || uciToSan(fen, pv.move),
+        uciLine: pv.uciLine || '',
+      })),
+      depth: cachedEval.depth,
+    };
+    preAnalysisComplete = true;
+    resolveWaiters();
+    updatePreAnalysisUI();
+    return;
+  }
 
   if (sfSearchActive) {
     // Never send 'stop' to this WASM build — terminate and recreate worker
@@ -2938,6 +3137,12 @@ function launchPreAnalysisSearch(fen, session) {
         preAnalysisComplete = true;
         resolveWaiters();
         updatePreAnalysisUI();
+        // Store in eval cache for cross-device reuse
+        if (preAnalysis && preAnalysisDepth >= EVAL_CACHE_MIN_DEPTH) {
+          evalCacheStore(fen, preAnalysisDepth, preAnalysis.bestMove, preAnalysis.bestCp,
+            preAnalysis.pvs.map(pv => ({ cp: pv.cp, move: pv.move, san: pv.san, uciLine: pv.uciLine })),
+            3);
+        }
       } else {
         sfLog('startPreAnalysis', `session=${session} bestmove arrived but session is stale (current=${preAnalysisSession}), DISCARDING`);
       }
@@ -9104,6 +9309,14 @@ window.addEventListener('beforeunload', () => {
     clearTimeout(syncDebounceTimer);
     // Best-effort sync (may be cancelled by browser)
     syncToGist();
+  }
+  // Flush dirty eval cache
+  if (evalCacheDirty > 0) {
+    clearTimeout(evalCacheSyncTimer);
+    saveEvalCacheToLocalStorage();
+    if (isGistConfigured() && !airplaneMode) {
+      syncEvalCacheToGist(); // best-effort
+    }
   }
 });
 </script>
