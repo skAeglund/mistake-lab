@@ -1204,7 +1204,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Advantage cap: silent game mode + move classification + post-game review</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Silent mode: suppress move highlights during advantage cap</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -7063,7 +7063,7 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
   }
 
   if (wpDrop <= 5) {
-    highlightSquaresWithColor(from, to, color);
+    if (!silentContinuation) highlightSquaresWithColor(from, to, color);
     const userUci = from + to + (move.promotion || '');
     const isLiteralBest = move.san === bestMoveSan
       || (bestMoveUci && userUci === bestMoveUci);
