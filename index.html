@@ -1167,7 +1167,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix AC: user plays first (peakFen is before user's move)</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Rework advantage filtering: time trouble blunder check, exclude tactic peaks</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1696,7 +1696,7 @@ let appShown = false; // guard to prevent double showMainApp()
 const GIST_FILENAME = 'mistakelab_progress.json';
 const GIST_GAMES_FILENAME = 'mistakelab_games.json';
 const MISTAKES_CACHE_VERSION = 6;
-const MISTAKES_CACHE_PARAMS = { wpDropThreshold: 10, advantageThreshold: 300, advantageMinMoves: 2, advantageOverlapThreshold: 15 };
+const MISTAKES_CACHE_PARAMS = { wpDropThreshold: 10, advantageThreshold: 300, advantageMinMoves: 2 };
 
 // Populate login fields from saved config + auto-load
 document.addEventListener('DOMContentLoaded', () => {
@@ -3659,9 +3659,9 @@ function extractMistakesForGame(game) {
   const moveStats = []; // collect {posKey, moveUci, moveSan} for opening explorer
 
   // Advantage capitalization tracking
-  let peakCp = -Infinity, peakFen = null, peakPly = 0;
   let consecutiveUserMovesAboveThreshold = 0;
   let heldAdvantage = false;
+  const advantagePeaks = []; // all positions where advantage was held, for fallback selection
 
   for (let i = 0; i < moves.length; i++) {
     const fenBefore = chess.fen();
@@ -3727,13 +3727,24 @@ function extractMistakesForGame(game) {
         if (consecutiveUserMovesAboveThreshold >= MISTAKES_CACHE_PARAMS.advantageMinMoves) {
           heldAdvantage = true;
         }
-        if (cpBefore > peakCp) {
-          peakCp = cpBefore;
-          peakFen = fenBefore;
-          peakPly = ply;
+        // Record every qualifying position as a potential peak
+        if (heldAdvantage) {
+          advantagePeaks.push({ peakCp: cpBefore, peakFen: fenBefore, peakPly: ply });
         }
       } else {
         consecutiveUserMovesAboveThreshold = 0;
+      }
+    }
+  }
+
+  // Build tactic ply ranges (used to exclude tactic positions from advantage peak detection)
+  const tacticPlySet = new Set();
+  if (Array.isArray(game.tactics)) {
+    for (const tactic of game.tactics) {
+      if (!tactic.moves || tactic.moves.length < 3) continue;
+      if (tactic.moves.filter(tm => tm.isUser).length < 2) continue;
+      for (let k = 0; k <= tactic.moves.length; k++) {
+        tacticPlySet.add(tactic.startPly + k);
       }
     }
   }
@@ -3761,7 +3772,11 @@ function extractMistakesForGame(game) {
       });
     }
   }
-  const advantageCandidate = heldAdvantage && peakFen ? { peakCp, peakFen, peakPly } : null;
+
+  // Build advantage candidates: pick the best peak that doesn't overlap with a tactic.
+  // Sort by eval descending so the highest non-tactic peak is selected.
+  advantagePeaks.sort((a, b) => b.peakCp - a.peakCp);
+  const advantageCandidate = advantagePeaks.find(p => !tacticPlySet.has(p.peakPly)) || null;
   return { mistakes, fens, moveStats, advantageCandidate };
 }
 
@@ -3936,7 +3951,7 @@ function extractAllMistakes() {
   console.log(`[OpeningExplorer] Built positionMoveIndex with ${positionMoveIndex.size} positions`);
 
   // ── Advantage capitalization: filter candidates and push valid items ──
-  const advantageItemCount = { checked: 0, added: 0, skippedWin: 0, skippedTimeLoss: 0, skippedSignificant: 0 };
+  const advantageItemCount = { checked: 0, added: 0, skippedWin: 0, skippedTimeLoss: 0, skippedTimeTrouble: 0 };
   for (const game of allGames) {
     const cand = advantageCandidates[game.id];
     if (!cand) continue;
@@ -3946,7 +3961,7 @@ function extractAllMistakes() {
     const userWon = winner === playerColor;
     if (userWon) { advantageItemCount.skippedWin++; continue; }
 
-    // Time loss check: exclude only if user lost on time AND was still winning
+    // Time loss check: exclude if user ran out of time while still winning
     const isTimeLoss = game.status === 'outoftime' ||
       (game.pgn && /\[Termination\s+"[^"]*on time[^"]*"\]/i.test(game.pgn));
     if (isTimeLoss) {
@@ -3958,37 +3973,21 @@ function extractAllMistakes() {
       }
     }
 
-    // Check if any big mistake was truly capitalized by the opponent
-    // A mistake is "capitalized" if the user's eval stayed below +50cp for 3+ consecutive
-    // user moves after the blunder. Un-capitalized blunders don't disqualify — the user
-    // recovered and the game's trajectory is still a gradual decline.
+    // Time trouble blunder check: if any mistake at/after peak was made in time trouble
+    // AND the eval after that mistake dropped below +100cp → bad time management, not
+    // a conversion problem. Exclude the game.
     const gameMistakes = rawMistakes.filter(m => m.gameId === game.id && m.type === 'mistake');
-    const analysis = game.analysis || [];
-    const CAPITALIZED_CP = 50;
-    const CAPITALIZED_MOVES = 3;
-    let hasCapitalizedBlunder = false;
+    let timeTroubleCollapse = false;
     for (const m of gameMistakes) {
-      if (m.wpDrop <= MISTAKES_CACHE_PARAMS.advantageOverlapThreshold) continue;
-      // Check the position before the user's next N moves (= after opponent responded)
-      // Mistake at movePly P → analysis[P] is eval after opponent's response
-      // Next check: analysis[P+2], then analysis[P+4]
-      let consecutiveBelow = 0;
-      for (let k = 0; k < CAPITALIZED_MOVES; k++) {
-        const evalIdx = m.movePly + (k * 2); // after each opponent response
-        if (evalIdx >= analysis.length) break;
-        const cp = evalToCp(analysis[evalIdx], playerColor);
-        if (cp < CAPITALIZED_CP) {
-          consecutiveBelow++;
-        } else {
-          break; // recovered
-        }
-      }
-      if (consecutiveBelow >= CAPITALIZED_MOVES) {
-        hasCapitalizedBlunder = true;
+      if (m.movePly < cand.peakPly) continue;
+      if (!m.timeTrouble) continue;
+      // cpAfter is from user's perspective (already stored on the mistake)
+      if (m.cpAfter < 100) {
+        timeTroubleCollapse = true;
         break;
       }
     }
-    if (hasCapitalizedBlunder) { advantageItemCount.skippedSignificant++; continue; }
+    if (timeTroubleCollapse) { advantageItemCount.skippedTimeTrouble++; continue; }
 
     // Replace mistakes at or after the peak ply with the advantage item
     const replacedPids = new Set();
@@ -4021,7 +4020,7 @@ function extractAllMistakes() {
     }
   }
   if (advantageItemCount.checked > 0) {
-    console.log(`[Advantage] ${advantageItemCount.checked} candidates: ${advantageItemCount.added} added, ${advantageItemCount.skippedWin} won, ${advantageItemCount.skippedTimeLoss} time-loss, ${advantageItemCount.skippedSignificant} capitalized blunder`);
+    console.log(`[Advantage] ${advantageItemCount.checked} candidates: ${advantageItemCount.added} added, ${advantageItemCount.skippedWin} won, ${advantageItemCount.skippedTimeLoss} time-loss, ${advantageItemCount.skippedTimeTrouble} time-trouble blunder`);
   }
 
   // Restore game references
