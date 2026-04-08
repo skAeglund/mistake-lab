@@ -1198,7 +1198,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Notes: separate panel, view/edit modes</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Notes: close panel on navigation</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -8815,6 +8815,8 @@ function getNoteForFen(fen) {
 function updateNoteButton() {
   const btn = document.getElementById('btnNote');
   if (!btn) return;
+  // Close note panel when navigating away from the noted position
+  if (notePanelOpen) closeNotePanel();
   const fen = getCurrentNoteFen();
   const note = getNoteForFen(fen);
   if (note) {
