@@ -1203,7 +1203,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add cross-device Stockfish eval cache via Gist</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Eval cache: seed from partial hits, deepen in background</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2997,10 +2997,12 @@ function startPreAnalysis(fen) {
 
   sfLog('startPreAnalysis', `session=${session} fen=${fen.split(' ').slice(0,2).join(' ')}… sfSearchActive=${sfSearchActive}`);
 
-  // ── Eval cache check: skip Stockfish entirely if we have a deep enough cached result ──
-  const cachedEval = evalCacheGet(fen, depthAdj(30), 3);
+  // ── Eval cache check ──
+  const targetDepth = depthAdj(30);
+  const cachedEval = evalCacheGet(fen, EVAL_CACHE_MIN_DEPTH, 1);
   if (cachedEval) {
-    sfLog('startPreAnalysis', `session=${session} CACHE HIT depth=${cachedEval.depth} bestMove=${cachedEval.bestMove} fen=${fen.split(' ').slice(0,2).join(' ')}…`);
+    const isFullHit = cachedEval.depth >= targetDepth && (cachedEval.multiPv || 1) >= 3;
+    sfLog('startPreAnalysis', `session=${session} CACHE ${isFullHit ? 'FULL' : 'SEED'} depth=${cachedEval.depth}/${targetDepth} mpv=${cachedEval.multiPv||1}/3 bestMove=${cachedEval.bestMove} fen=${fen.split(' ').slice(0,2).join(' ')}…`);
     preAnalysisDepth = cachedEval.depth;
     preAnalysis = {
       bestCp: cachedEval.bestCp,
@@ -3013,10 +3015,17 @@ function startPreAnalysis(fen) {
       })),
       depth: cachedEval.depth,
     };
-    preAnalysisComplete = true;
+    if (isFullHit) {
+      // Cache has full-depth MultiPV 3 result — no need to run Stockfish
+      preAnalysisComplete = true;
+      resolveWaiters();
+      updatePreAnalysisUI();
+      return;
+    }
+    // Partial hit: seed preAnalysis for instant feedback, but continue to Stockfish for deeper analysis
     resolveWaiters();
     updatePreAnalysisUI();
-    return;
+    // Fall through to launch Stockfish in the background…
   }
 
   if (sfSearchActive) {
