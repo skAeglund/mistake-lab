@@ -1167,7 +1167,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix: include clock presence in cache fingerprint to bust stale cache</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix AC: user plays first (peakFen is before user's move)</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -5675,7 +5675,7 @@ function loadPosition(globalIdx) {
         <div>${ICON_ADVANTAGE} <strong>Convert the Advantage</strong></div>
         <div>You were winning here: <span style="color:#4caf50;font-weight:600">+${evalDisplay}</span></div>
         <div style="font-size:11px;color:var(--text-muted);margin-top:2px">You drew or lost this game without a single big mistake — the advantage slipped away gradually.</div>
-        <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Starting continuation…</div>
+        <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
       </div>
     `;
 
@@ -5684,7 +5684,7 @@ function loadPosition(globalIdx) {
     renderQueue();
     updateSessionProgress();
 
-    // Enter continuation mode immediately
+    // Enter continuation mode — user plays first (peakFen is before user's move)
     startAdvantageContinuation(m);
   } else {
     // ── Mistake mode setup ──
@@ -7770,8 +7770,11 @@ function startAdvantageContinuation(m) {
   continuationMode = true;
   showMaiaControls();
   updateEvalBar();
-  // gameEngine is at the peak advantage position — let Maia/SF pick opponent's response
-  advanceContinuation('');
+  // peakFen is the position before the user's move — it's the user's turn.
+  // Start pre-analysis and let the user play first; advanceContinuation will
+  // fire after their good move to play the opponent's response.
+  currentSolveFen = gameEngine.fen();
+  startPreAnalysis(currentSolveFen);
 }
 
 function updateAdvantageTracking(afterCpPlayer) {
