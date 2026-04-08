@@ -1204,7 +1204,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Board classification badges + review navigation improvements</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Review: eval sparkline graph + mistake markers</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -8341,7 +8341,72 @@ function buildContLineReviewData() {
       keyMoves.push(i);
     }
   }
-  return { tally, accuracy, keyMoves, totalUserMoves: userMoves.length };
+
+  // Build eval graph data points (one per move)
+  const evalPoints = [];
+  // Seed with starting eval from first user move's bestCp
+  const firstUser = moves.find(mv => mv.isUser && mv.bestCp != null);
+  if (firstUser) evalPoints.push({ cp: firstUser.bestCp, idx: -1, classification: null });
+  for (let i = 0; i < moves.length; i++) {
+    const mv = moves[i];
+    if (mv.isUser && mv.afterCp != null) {
+      evalPoints.push({ cp: mv.afterCp, idx: i, classification: mv.classification });
+    } else if (mv.isUser && mv.bestCp != null && mv.cpLoss != null) {
+      evalPoints.push({ cp: mv.bestCp - mv.cpLoss, idx: i, classification: mv.classification });
+    } else if (!mv.isUser && i > 0) {
+      // Opponent move: use next user move's bestCp if available, else interpolate
+      const nextUser = moves.slice(i + 1).find(m => m.isUser && m.bestCp != null);
+      if (nextUser) {
+        evalPoints.push({ cp: nextUser.bestCp, idx: i, classification: mv.classification });
+      }
+    }
+  }
+
+  return { tally, accuracy, keyMoves, totalUserMoves: userMoves.length, evalPoints };
+}
+
+function buildEvalSparkline(evalPoints) {
+  if (!evalPoints || evalPoints.length < 2) return '';
+  const W = 260, H = 50, PAD = 4;
+  const plotW = W - PAD * 2, plotH = H - PAD * 2;
+
+  // Clamp cp values and compute range
+  const cps = evalPoints.map(p => Math.max(-1500, Math.min(1500, p.cp)));
+  const minCp = Math.min(0, ...cps);
+  const maxCp = Math.max(200, ...cps);
+  const range = maxCp - minCp || 1;
+
+  const toX = (i) => PAD + (i / (evalPoints.length - 1)) * plotW;
+  const toY = (cp) => PAD + plotH - ((Math.max(-1500, Math.min(1500, cp)) - minCp) / range) * plotH;
+
+  // Build polyline points
+  const pts = evalPoints.map((p, i) => `${toX(i).toFixed(1)},${toY(p.cp).toFixed(1)}`).join(' ');
+
+  // Area fill: line down to bottom, creating a filled area
+  const zeroY = toY(0);
+  const areaPts = evalPoints.map((p, i) => `${toX(i).toFixed(1)},${toY(p.cp).toFixed(1)}`).join(' ')
+    + ` ${toX(evalPoints.length - 1).toFixed(1)},${zeroY.toFixed(1)} ${toX(0).toFixed(1)},${zeroY.toFixed(1)}`;
+
+  // Mistake dots
+  let dots = '';
+  for (let i = 0; i < evalPoints.length; i++) {
+    const p = evalPoints[i];
+    if (p.classification && (p.classification === 'mistake' || p.classification === 'blunder' || p.classification === 'inaccuracy')) {
+      const cls = MOVE_CLASSIFICATION[p.classification];
+      dots += `<circle cx="${toX(i).toFixed(1)}" cy="${toY(p.cp).toFixed(1)}" r="3" fill="${cls.color}" stroke="var(--bg-card)" stroke-width="1" />`;
+    }
+  }
+
+  return `
+    <div style="margin:6px 0 8px;">
+      <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="display:block;border-radius:6px;background:rgba(255,255,255,0.03);">
+        <line x1="${PAD}" y1="${zeroY.toFixed(1)}" x2="${W - PAD}" y2="${zeroY.toFixed(1)}" stroke="var(--text-muted)" stroke-width="0.5" stroke-dasharray="3,3" opacity="0.3" />
+        <polygon points="${areaPts}" fill="rgba(62,207,142,0.1)" />
+        <polyline points="${pts}" fill="none" stroke="rgba(62,207,142,0.6)" stroke-width="1.5" stroke-linejoin="round" />
+        ${dots}
+      </svg>
+    </div>
+  `;
 }
 
 function startContLineReview() {
@@ -8355,6 +8420,9 @@ function startContLineReview() {
   // Show summary in feedback area
   const container = document.getElementById('feedbackContainer');
   container.innerHTML = '';
+
+  // Build eval sparkline SVG
+  const sparklineHtml = buildEvalSparkline(data.evalPoints);
 
   // Build tally HTML
   let tallyHtml = '';
@@ -8371,6 +8439,7 @@ function startContLineReview() {
     <div class="feedback-box" style="background:var(--bg-card);border-left:3px solid var(--accent);">
       <div class="feedback-title" style="color:var(--accent)">📋 Game Review</div>
       <div class="feedback-text">
+        ${sparklineHtml}
         <div style="font-size:20px;font-weight:700;margin:4px 0;">${data.accuracy}%</div>
         <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">${data.totalUserMoves} moves analyzed</div>
         <div style="font-size:12px;line-height:1.8;">${tallyHtml}</div>
