@@ -1203,7 +1203,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Notes: float outside board, remove summary</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add "Post progress on return" setting</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1403,6 +1403,16 @@
       </div>
       <label class="toggle-switch" style="flex-shrink:0;margin-left:12px;">
         <input type="checkbox" id="settingsAirplaneMode">
+        <span class="toggle-track"></span>
+      </label>
+    </div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin:0 0 12px;">
+      <div>
+        <span style="font-size:13px;">Post progress on return</span>
+        <div class="hint" style="margin-top:2px;">Push accumulated changes to Gist when Airplane Mode is turned off.</div>
+      </div>
+      <label class="toggle-switch" style="flex-shrink:0;margin-left:12px;">
+        <input type="checkbox" id="settingsPostOnReturn">
         <span class="toggle-track"></span>
       </label>
     </div>
@@ -1733,6 +1743,7 @@ let gistToken = localStorage.getItem('mistakelab_gist_token') || '';
 let gistId = localStorage.getItem('mistakelab_gist_id') || '';
 let gistData = null; // { positions: { posId: { completed, ... } }, version: 1 }
 let airplaneMode = localStorage.getItem('airplaneMode') === 'true';
+let postProgressOnReturn = localStorage.getItem('postProgressOnReturn') !== 'false';
 let syncDebounceTimer = null;
 let appShown = false; // guard to prevent double showMainApp()
 const GIST_FILENAME = 'mistakelab_progress.json';
@@ -2218,9 +2229,16 @@ function openSettings() {
     localStorage.setItem('airplaneMode', airplaneMode);
     updateSyncStatusForAirplane();
     // When turning off airplane mode, push any accumulated changes
-    if (!airplaneMode && gistData && isGistConfigured()) {
+    if (!airplaneMode && postProgressOnReturn && gistData && isGistConfigured()) {
       debounceSyncToGist();
     }
+  };
+  // Post progress on return toggle
+  const postOnReturnToggle = document.getElementById('settingsPostOnReturn');
+  postOnReturnToggle.checked = postProgressOnReturn;
+  postOnReturnToggle.onchange = function() {
+    postProgressOnReturn = this.checked;
+    localStorage.setItem('postProgressOnReturn', postProgressOnReturn);
   };
   // Show mobile depth offset setting only on mobile
   const depthSetting = document.getElementById('mobileDepthSetting');
