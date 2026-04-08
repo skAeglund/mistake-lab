@@ -1167,7 +1167,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix isOurMove for From Position games (use FEN turn, not ply parity)</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Maia defaults: 2000 ELO, 0.75 precision</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1331,16 +1331,16 @@
         <div class="maia-slider-row">
           <span class="maia-slider-label">Strength</span>
           <input type="range" class="maia-slider" id="maiaEloSlider"
-                 min="1600" max="2200" step="25" value="1900"
+                 min="1600" max="2200" step="25" value="2000"
                  oninput="onMaiaEloChange(this.value)">
-          <span class="maia-slider-value" id="maiaEloValue">1900</span>
+          <span class="maia-slider-value" id="maiaEloValue">2000</span>
         </div>
         <div class="maia-slider-row">
           <span class="maia-slider-label">Precision</span>
           <input type="range" class="maia-slider" id="maiaPrecisionSlider"
-                 min="0" max="1" step="0.05" value="0.5"
+                 min="0" max="1" step="0.05" value="0.75"
                  oninput="onMaiaPrecisionChange(this.value)">
-          <span class="maia-slider-value" id="maiaPrecisionValue">0.50</span>
+          <span class="maia-slider-value" id="maiaPrecisionValue">0.75</span>
         </div>
       </div>
       <div id="feedbackContainer"></div>
@@ -1539,8 +1539,8 @@ let maiaMovesForward = null;  // UCI string → index (e.g. "e2e4" → 123)
 let maiaMovesReverse = null;  // index → UCI string (e.g. 123 → "e2e4")
 let maiaInputNames = null;    // discovered from the ONNX model
 let maiaOutputNames = null;
-let maiaElo = 1900;           // ELO for Maia predictions (adjustable via slider)
-let maiaPrecision = 0.5;      // 1.0 = argmax, 0.0 = high temperature sampling
+let maiaElo = 2000;           // ELO for Maia predictions (adjustable via slider)
+let maiaPrecision = 0.75;     // 1.0 = argmax, 0.0 = high temperature sampling
 
 // ─── Debug logging toggle ───
 const DEBUG_SF = true;
