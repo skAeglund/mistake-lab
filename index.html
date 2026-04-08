@@ -400,6 +400,7 @@
   .engine-line-moves .alt-bracket { color: var(--text-muted); font-size: 12px; user-select: none; }
   .engine-line-moves .alt-move { color: var(--text-muted); font-style: italic; }
   .engine-line-moves .alt-move.active { color: var(--accent); font-style: normal; }
+  .engine-line-moves .move-class { font-size: 10px; font-weight: 700; margin-left: 1px; vertical-align: super; }
   .engine-line-nav {
     display: flex; gap: 6px; margin-top: 8px; align-items: center;
   }
@@ -1203,7 +1204,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Eval cache: seed from partial hits, deepen in background</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Advantage cap: silent game mode + move classification + post-game review</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1558,6 +1559,28 @@ let tacticPrefixUserMoves = 0;   // user moves auto-played in common prefix (for
 let advantageMode = false;              // true when drilling an advantage item
 let advantageMinCpReached = null;       // lowest user-perspective cp seen during advantage continuation
 let advantageConsecutiveAbove1000 = 0;  // consecutive user moves where eval ≥ +1000cp
+
+// ─── Silent continuation / game review state ───
+let silentContinuation = false;         // true = suppress per-move feedback (advantage cap review mode)
+let lastContUserAfterCp = null;         // afterCpPlayer of last user move — used to classify opponent's next move
+
+// Move classification thresholds and display data
+const MOVE_CLASSIFICATION = {
+  best:       { symbol: '★',  label: 'Best',       color: '#62cf8e' },
+  excellent:  { symbol: '!',  label: 'Excellent',   color: '#96c84a' },
+  good:       { symbol: '✓',  label: 'Good',        color: '#96bc4b' },
+  inaccuracy: { symbol: '?!', label: 'Inaccuracy',  color: '#e8a62d' },
+  mistake:    { symbol: '?',  label: 'Mistake',     color: '#e07a3a' },
+  blunder:    { symbol: '??', label: 'Blunder',     color: '#ef5f5f' },
+};
+function classifyWpDrop(wpDrop, isExactBest) {
+  if (isExactBest || wpDrop < 0.5) return 'best';
+  if (wpDrop <= 2) return 'excellent';
+  if (wpDrop <= 5) return 'good';
+  if (wpDrop <= 10) return 'inaccuracy';
+  if (wpDrop <= 15) return 'mistake';
+  return 'blunder';
+}
 
 let gameListDisplayLimit = 50;
 let reviewListDisplayLimit = 50;
@@ -5862,6 +5885,11 @@ function loadPosition(globalIdx) {
   advantageMode = false;
   advantageMinCpReached = null;
   advantageConsecutiveAbove1000 = 0;
+  silentContinuation = false;
+  lastContUserAfterCp = null;
+  contLineReviewMode = false;
+  contLineReviewKeyMoves = [];
+  contLineReviewKeyIdx = -1;
   hideMaiaControls();
   engineLine = null;
   browsingLine = false;
@@ -5961,8 +5989,11 @@ function loadPosition(globalIdx) {
       return;
     }
     advantageMode = true;
+    silentContinuation = true;
+    lastContUserAfterCp = m.peakCp; // seed from starting eval so first opponent move can be classified
     advantageMinCpReached = m.peakCp; // starts at peak
     advantageConsecutiveAbove1000 = 0;
+    document.getElementById('btnHint').classList.add('hidden'); // no hints in silent game mode
 
     const evalDisplay = (m.peakCp / 100).toFixed(1);
     document.getElementById('posInfoContent').innerHTML = `
@@ -6991,6 +7022,46 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
   const wpStr = Math.round(wpDrop * 10) / 10;
   const pid = posId(m);
 
+  // ── Silent continuation: classify move & retroactively annotate opponent ──
+  if (silentContinuation && contLine) {
+    const userUci = from + to + (move.promotion || '');
+    const isLiteralBest = move.san === bestMoveSan || (bestMoveUci && userUci === bestMoveUci);
+    const isExactBest = isLiteralBest || wpDrop < 0.5;
+    const classification = classifyWpDrop(wpDrop, isExactBest);
+
+    // Retroactively annotate the opponent's previous move (if any)
+    if (lastContUserAfterCp !== null && contLine.moves.length > 0) {
+      // Find the last opponent move in contLine
+      for (let ri = contLine.moves.length - 1; ri >= 0; ri--) {
+        if (!contLine.moves[ri].isUser && contLine.moves[ri].classification === undefined) {
+          // Opponent's eval change: from user's perspective, bestCp is eval AFTER opponent moved
+          // lastContUserAfterCp is eval AFTER the previous user move (= before opponent moved)
+          const oppCpLoss = lastContUserAfterCp - bestCp; // positive = opponent lost eval
+          const oppWpBefore = cpToWinPct(-lastContUserAfterCp); // from opponent's perspective
+          const oppWpAfter = cpToWinPct(-bestCp);
+          const oppWpDrop = oppWpBefore - oppWpAfter;
+          const oppClassification = classifyWpDrop(Math.max(0, oppWpDrop), oppWpDrop < 0.5);
+          contLine.moves[ri].classification = oppClassification;
+          contLine.moves[ri].wpDrop = Math.max(0, oppWpDrop);
+          contLine.moves[ri].cpLoss = Math.max(0, oppCpLoss);
+          break;
+        }
+      }
+    }
+
+    // Store this user move's eval data (will be attached in addContLineMove below)
+    window._pendingContEvalData = {
+      classification,
+      wpDrop: Math.round(wpDrop * 10) / 10,
+      cpLoss: Math.round(cpLoss),
+      bestMoveSan,
+      bestMoveUci: bestMoveUci || null,
+      bestCp,
+      afterCp: afterCpPlayer,
+    };
+    lastContUserAfterCp = afterCpPlayer;
+  }
+
   if (wpDrop <= 5) {
     highlightSquaresWithColor(from, to, color);
     const userUci = from + to + (move.promotion || '');
@@ -6999,14 +7070,16 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
     const isExactBest = isLiteralBest || wpDrop < 0.5;
 
     if (continuationMode) {
-      // Continuation mode: simple feedback, no SRS
-      const title = isExactBest ? 'Best move!' : wpDrop <= 2 ? 'Excellent!' : 'Good enough!';
-      const body = isLiteralBest
-        ? `<code>${escHtml(move.san)}</code> is the engine's top choice.`
-        : isExactBest
-        ? `<code>${escHtml(move.san)}</code> is just as strong as the best move.`
-        : `<code>${escHtml(move.san)}</code> (−${wpStr}% win).`;
-      showColorFeedback(color, colorDim, title, body);
+      // Continuation mode: simple feedback, no SRS (suppressed in silent mode)
+      if (!silentContinuation) {
+        const title = isExactBest ? 'Best move!' : wpDrop <= 2 ? 'Excellent!' : 'Good enough!';
+        const body = isLiteralBest
+          ? `<code>${escHtml(move.san)}</code> is the engine's top choice.`
+          : isExactBest
+          ? `<code>${escHtml(move.san)}</code> is just as strong as the best move.`
+          : `<code>${escHtml(move.san)}</code> (−${wpStr}% win).`;
+        showColorFeedback(color, colorDim, title, body);
+      }
     } else {
       // Normal mode: full SRS + reveal button
       // Compute SRS grade
@@ -7055,8 +7128,10 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
 
     if (continuationMode) {
       // Continuation mode: inaccurate still counts as good enough to continue
-      showColorFeedback(color, colorDim, 'Inaccurate but OK',
-        `<code>${escHtml(move.san)}</code> loses ${wpStr}% winning chances (−${Math.round(cpLoss)}cp). Continuing…`);
+      if (!silentContinuation) {
+        showColorFeedback(color, colorDim, 'Inaccurate but OK',
+          `<code>${escHtml(move.san)}</code> loses ${wpStr}% winning chances (−${Math.round(cpLoss)}cp). Continuing…`);
+      }
     } else {
       // Normal mode: full SRS + reveal
       let grade, gradeLabel;
@@ -7088,10 +7163,18 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
 
     if (continuationMode && advantageMode && afterCpPlayer <= 100) {
       // Advantage mode: eval collapsed — end drill immediately
+      if (silentContinuation) {
+        // In silent mode, still record the move before finishing
+        addContLineMove(move.san, from + to + (move.promotion || ''), gameEngine.fen(), true, window._pendingContEvalData || undefined);
+        window._pendingContEvalData = null;
+      }
       gameEngine.undo(); // undo the wrong move
       boardObj.position(gameEngine.fen(), false);
       finishAdvantage('collapse');
       return;
+    } else if (continuationMode && silentContinuation) {
+      // Silent continuation: bad move stays on board, game continues (like a real game)
+      // The eval data is already stored via _pendingContEvalData, will be attached in addContLineMove below
     } else if (continuationMode) {
       // Continuation mode: show refutation engine line (like normal mode)
       contWrongMovePending = true;
@@ -7127,15 +7210,19 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
   }
 
   if (continuationMode) {
-    // In continuation: good move (≤10%) advances, bad move (>10%) now handled by contWrongMovePending
-    if (wpDrop <= 10) {
-      // Advantage mode: track eval progression after each good user move
-      if (advantageMode) {
+    // In continuation: good move (≤10%) advances, bad move (>10%) normally handled by contWrongMovePending
+    // In silent mode: ALL moves advance (game continues like a real game)
+    const shouldAdvance = wpDrop <= 10 || silentContinuation;
+    if (shouldAdvance) {
+      // Advantage mode: track eval progression
+      if (advantageMode && (wpDrop <= 10 || silentContinuation)) {
         updateAdvantageTracking(afterCpPlayer);
         if (!advantageMode) return; // finishAdvantage was called (collapse)
       }
-      // Record user's move in the continuation line
-      addContLineMove(move.san, from + to + (move.promotion || ''), gameEngine.fen(), true);
+      // Record user's move in the continuation line (with eval data if in silent mode)
+      const evalData = window._pendingContEvalData || undefined;
+      window._pendingContEvalData = null;
+      addContLineMove(move.san, from + to + (move.promotion || ''), gameEngine.fen(), true, evalData);
       setTimeout(() => advanceContinuation(contUci), 500);
     }
   } else if (contWrongMovePending) {
@@ -7883,9 +7970,11 @@ function tryAgainFromContinuationLine() {
 }
 
 // ─── Continuation Line ───
-function addContLineMove(san, uci, fen, isUser) {
+function addContLineMove(san, uci, fen, isUser, evalData) {
   if (!contLine) return;
-  contLine.moves.push({ san, uci, fen, isUser });
+  const move = { san, uci, fen, isUser };
+  if (evalData) Object.assign(move, evalData);
+  contLine.moves.push(move);
   contLine.currentIdx = contLine.moves.length - 1;
   contLineBrowsing = false;
   renderContLine();
@@ -7919,7 +8008,21 @@ function renderContLine() {
       movesHtml += `<span class="move-num">${moveNum}…</span>`;
     }
 
-    movesHtml += `<span class="move${activeClass}${userClass}" onclick="goToContLineMove(${i})">${escHtml(mv.san)}</span> `;
+    // Classification badge (if annotated)
+    let classSymbol = '';
+    if (mv.classification && MOVE_CLASSIFICATION[mv.classification]) {
+      const cls = MOVE_CLASSIFICATION[mv.classification];
+      if (mv.classification !== 'good' && mv.classification !== 'best') {
+        classSymbol = `<span class="move-class" style="color:${cls.color}" title="${cls.label} (${mv.wpDrop != null ? '−' + mv.wpDrop + '%' : ''})">${cls.symbol}</span>`;
+      } else if (mv.classification === 'best') {
+        classSymbol = `<span class="move-class" style="color:${cls.color}" title="${cls.label}"></span>`;
+      } else {
+        // Good = green checkmark
+        classSymbol = `<span class="move-class" style="color:${cls.color}" title="${cls.label}">✓</span>`;
+      }
+    }
+
+    movesHtml += `<span class="move${activeClass}${userClass}" onclick="goToContLineMove(${i})">${escHtml(mv.san)}${classSymbol}</span> `;
 
     if (!isWhiteTurn) moveNum++;
     isWhiteTurn = !isWhiteTurn;
@@ -8072,7 +8175,7 @@ function startAdvantageContinuation(m) {
   };
   contLineBrowsing = false;
   continuationMode = true;
-  showMaiaControls();
+  if (!silentContinuation) showMaiaControls();
   updateEvalBar();
   // peakFen is the position before the user's move — it's the user's turn.
   // Start pre-analysis and let the user play first; advanceContinuation will
@@ -8126,6 +8229,8 @@ function finishAdvantage(outcome) {
   // outcome: 'victory' (claim or checkmate), 'collapse' (eval ≤ 100cp), 'draw'
   if (!advantageMode) return;
   advantageMode = false;
+  silentContinuation = false;
+  lastContUserAfterCp = null;
   continuationMode = false;
   hideMaiaControls();
   stopPreAnalysis();
@@ -8178,10 +8283,16 @@ function finishAdvantage(outcome) {
 
   const invalidateBtn = `<div style="margin-top:6px;"><button class="btn btn-ghost btn-sm" style="font-size:10px;color:var(--text-muted);border-color:var(--border);" onclick="handleBadMistake()">✕ Bad position</button></div>`;
 
+  // Build review button if we have annotated moves
+  const hasAnnotatedMoves = contLine && contLine.moves.some(mv => mv.classification);
+  const reviewBtn = hasAnnotatedMoves
+    ? `<div style="margin-top:8px;"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="startContLineReview()">📋 Review Game</button></div>`
+    : '';
+
   showColorFeedback(
     outcome === 'victory' ? '#4caf50' : '#ef5f5f',
     outcome === 'victory' ? 'rgba(76,175,80,0.08)' : 'rgba(239,95,95,0.08)',
-    title, body + srsInfo + invalidateBtn
+    title, body + srsInfo + reviewBtn + invalidateBtn
   );
 
   document.getElementById('btnRetry').classList.remove('hidden');
@@ -8189,6 +8300,173 @@ function finishAdvantage(outcome) {
   clearHintHighlights();
   updateSessionProgress();
   renderQueue();
+}
+
+// ─── Continuation Game Review ───
+let contLineReviewMode = false;       // true when reviewing annotated continuation line
+let contLineReviewKeyMoves = [];      // indices into contLine.moves of key moves (mistakes/blunders)
+let contLineReviewKeyIdx = -1;        // current position in keyMoves array
+
+function buildContLineReviewData() {
+  if (!contLine || contLine.moves.length === 0) return null;
+  const moves = contLine.moves;
+  const userMoves = moves.filter(mv => mv.isUser && mv.classification);
+  const tally = {};
+  for (const cls of Object.keys(MOVE_CLASSIFICATION)) tally[cls] = 0;
+  for (const mv of userMoves) {
+    if (tally[mv.classification] !== undefined) tally[mv.classification]++;
+  }
+  // Accuracy = % of user moves that are good or better
+  const goodOrBetter = (tally.best || 0) + (tally.excellent || 0) + (tally.good || 0);
+  const accuracy = userMoves.length > 0 ? Math.round((goodOrBetter / userMoves.length) * 100) : 100;
+  // Key moves = user mistakes/blunders (wpDrop > 5)
+  const keyMoves = [];
+  for (let i = 0; i < moves.length; i++) {
+    if (moves[i].isUser && moves[i].classification && moves[i].wpDrop > 5) {
+      keyMoves.push(i);
+    }
+  }
+  return { tally, accuracy, keyMoves, totalUserMoves: userMoves.length };
+}
+
+function startContLineReview() {
+  const data = buildContLineReviewData();
+  if (!data) return;
+
+  contLineReviewMode = true;
+  contLineReviewKeyMoves = data.keyMoves;
+  contLineReviewKeyIdx = -1;
+
+  // Show summary in feedback area
+  const container = document.getElementById('feedbackContainer');
+  container.innerHTML = '';
+
+  // Build tally HTML
+  let tallyHtml = '';
+  for (const [cls, info] of Object.entries(MOVE_CLASSIFICATION)) {
+    const count = data.tally[cls] || 0;
+    if (count > 0) {
+      const sym = cls === 'good' ? '✓' : (cls === 'best' ? '' : info.symbol);
+      tallyHtml += `<span style="color:${info.color};font-weight:600;margin-right:8px;">${sym} ${count} ${info.label.toLowerCase()}</span>`;
+    }
+  }
+
+  const keyMoveCount = data.keyMoves.length;
+  const summaryHtml = `
+    <div class="feedback-box" style="background:var(--bg-card);border-left:3px solid var(--accent);">
+      <div class="feedback-title" style="color:var(--accent)">📋 Game Review</div>
+      <div class="feedback-text">
+        <div style="font-size:20px;font-weight:700;margin:4px 0;">${data.accuracy}%</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">${data.totalUserMoves} moves analyzed</div>
+        <div style="font-size:12px;line-height:1.8;">${tallyHtml}</div>
+        ${keyMoveCount > 0
+          ? `<div style="margin-top:10px;">
+              <button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="reviewNextKeyMove()">▶ Review ${keyMoveCount} key move${keyMoveCount > 1 ? 's' : ''}</button>
+            </div>`
+          : `<div style="margin-top:8px;font-size:12px;color:var(--text-muted);">No mistakes to review — clean play!</div>`
+        }
+        <div style="margin-top:6px;font-size:11px;color:var(--text-muted);">Use ← → to step through all moves</div>
+      </div>
+    </div>
+  `;
+  container.innerHTML = summaryHtml;
+
+  // Navigate to start of line
+  if (contLine) {
+    goToContLineMove(-1); // go to base position
+    renderContLine();
+  }
+}
+
+function reviewNextKeyMove() {
+  if (!contLineReviewMode || contLineReviewKeyMoves.length === 0) return;
+  contLineReviewKeyIdx++;
+  if (contLineReviewKeyIdx >= contLineReviewKeyMoves.length) {
+    contLineReviewKeyIdx = contLineReviewKeyMoves.length; // past end
+    showReviewComplete();
+    return;
+  }
+  const moveIdx = contLineReviewKeyMoves[contLineReviewKeyIdx];
+  // Navigate to position BEFORE this move (one step before the move itself)
+  goToContLineMove(moveIdx - 1);
+  showReviewKeyMoveInfo(moveIdx);
+}
+
+function reviewPrevKeyMove() {
+  if (!contLineReviewMode || contLineReviewKeyMoves.length === 0) return;
+  contLineReviewKeyIdx--;
+  if (contLineReviewKeyIdx < 0) {
+    contLineReviewKeyIdx = 0;
+  }
+  const moveIdx = contLineReviewKeyMoves[contLineReviewKeyIdx];
+  goToContLineMove(moveIdx - 1);
+  showReviewKeyMoveInfo(moveIdx);
+}
+
+function showReviewKeyMoveInfo(moveIdx) {
+  if (!contLine) return;
+  const mv = contLine.moves[moveIdx];
+  if (!mv) return;
+  const cls = MOVE_CLASSIFICATION[mv.classification] || {};
+  const sym = mv.classification === 'good' ? '✓' : (mv.classification === 'best' ? '' : cls.symbol || '');
+
+  const container = document.getElementById('feedbackContainer');
+  const navHtml = `
+    <div style="display:flex;gap:8px;margin-top:10px;">
+      ${contLineReviewKeyIdx > 0 ? '<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="reviewPrevKeyMove()">◀ Prev</button>' : ''}
+      <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="reviewNextKeyMove()">Next ▶</button>
+      <span style="font-size:11px;color:var(--text-muted);align-self:center;">${contLineReviewKeyIdx + 1} / ${contLineReviewKeyMoves.length}</span>
+    </div>
+  `;
+
+  // Show what was played and what was best
+  const bestInfo = mv.bestMoveSan
+    ? `<div style="margin-top:4px;font-size:12px;">Best was <code>${escHtml(mv.bestMoveSan)}</code></div>`
+    : '';
+
+  container.innerHTML = `
+    <div class="feedback-box" style="background:${wpDropToColorDim(mv.wpDrop || 0)};border-left:3px solid ${cls.color || 'var(--border)'};">
+      <div class="feedback-title" style="color:${cls.color || 'var(--text-primary)'}">
+        ${sym} ${cls.label || 'Move'} · <code>${escHtml(mv.san)}</code>
+      </div>
+      <div class="feedback-text">
+        <div>${mv.wpDrop != null ? `Lost ${mv.wpDrop}% winning chances (−${mv.cpLoss || 0}cp)` : ''}</div>
+        ${bestInfo}
+        <div style="margin-top:6px;font-size:11px;color:var(--text-muted);">Click the move on the board, or press → to see what happened next</div>
+        ${navHtml}
+      </div>
+    </div>
+  `;
+
+  // Draw arrow for best move
+  if (mv.bestMoveUci) {
+    const from = mv.bestMoveUci.substring(0, 2);
+    const to = mv.bestMoveUci.substring(2, 4);
+    bestMoveArrow = { from, to };
+    renderArrows();
+  }
+}
+
+function showReviewComplete() {
+  const container = document.getElementById('feedbackContainer');
+  container.innerHTML = `
+    <div class="feedback-box" style="background:var(--bg-card);border-left:3px solid var(--accent);">
+      <div class="feedback-title" style="color:var(--accent)">Review Complete</div>
+      <div class="feedback-text">
+        <div>All key moves reviewed. Use ← → to browse the full line.</div>
+        <div style="margin-top:8px;">
+          <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="startContLineReview()">↺ Start over</button>
+        </div>
+      </div>
+    </div>
+  `;
+  contLineReviewMode = false;
+}
+
+function exitContLineReview() {
+  contLineReviewMode = false;
+  contLineReviewKeyMoves = [];
+  contLineReviewKeyIdx = -1;
 }
 
 function startTacticContinuation() {
@@ -8399,36 +8677,52 @@ async function advanceContinuation(contUci) {
   hintLevel = 0;
   hintMove = null;
   clearHintHighlights();
-  const hintBtnCont = document.getElementById('btnHint');
-  if (hintBtnCont) { hintBtnCont.classList.remove('hidden'); hintBtnCont.disabled = false; hintBtnCont.textContent = '💡 Hint'; hintBtnCont.style.borderColor = ''; hintBtnCont.style.color = ''; }
   startPreAnalysis(currentSolveFen);
-
-  // Update info panel for continuation
-  document.getElementById('feedbackContainer').innerHTML = '';
-  const infoCard = document.getElementById('posInfoCard');
-  infoCard.style.display = '';
-  if (advantageMode) {
-    const om = filteredMistakes[currentMistakeIdx];
-    const evalDisplay = om?.peakCp ? (om.peakCp / 100).toFixed(1) : '?';
+  const hintBtnCont = document.getElementById('btnHint');
+  if (silentContinuation) {
+    // Silent mode: hide hint, don't clear feedback, show minimal game-like info
+    if (hintBtnCont) hintBtnCont.classList.add('hidden');
+    const infoCard = document.getElementById('posInfoCard');
+    infoCard.style.display = '';
+    const moveCount = contLine ? contLine.moves.filter(mv => mv.isUser).length : 0;
     document.getElementById('posInfoContent').innerHTML = `
       <div style="font-size:13px;line-height:1.7">
-        <div style="color:#4caf50;font-weight:600;">${ICON_ADVANTAGE} Convert the Advantage (+${evalDisplay})</div>
-        <div>Opponent played <code class="mono">${escHtml(result.san)}</code> <span style="font-size:10px;color:var(--text-muted)">(${moveSource})</span></div>
-        <div>Find the best move!</div>
+        <div style="color:#4caf50;font-weight:600;">${ICON_ADVANTAGE} Convert the Advantage</div>
+        <div>Move ${moveCount + 1} · Your turn</div>
         <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
       </div>
     `;
-    // Re-show claim button if threshold was already met
     if (advantageConsecutiveAbove1000 >= 3) showAdvantageClaimButton();
   } else {
-    document.getElementById('posInfoContent').innerHTML = `
-      <div style="font-size:13px;line-height:1.7">
-        <div style="color:var(--blue);font-weight:600;">Continuation Practice</div>
-        <div>Opponent played <code class="mono">${escHtml(result.san)}</code> <span style="font-size:10px;color:var(--text-muted)">(${moveSource})</span></div>
-        <div>Find the best move!</div>
-        <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
-      </div>
-    `;
+    if (hintBtnCont) { hintBtnCont.classList.remove('hidden'); hintBtnCont.disabled = false; hintBtnCont.textContent = '💡 Hint'; hintBtnCont.style.borderColor = ''; hintBtnCont.style.color = ''; }
+
+    // Update info panel for continuation
+    document.getElementById('feedbackContainer').innerHTML = '';
+    const infoCard = document.getElementById('posInfoCard');
+    infoCard.style.display = '';
+    if (advantageMode) {
+      const om = filteredMistakes[currentMistakeIdx];
+      const evalDisplay = om?.peakCp ? (om.peakCp / 100).toFixed(1) : '?';
+      document.getElementById('posInfoContent').innerHTML = `
+        <div style="font-size:13px;line-height:1.7">
+          <div style="color:#4caf50;font-weight:600;">${ICON_ADVANTAGE} Convert the Advantage (+${evalDisplay})</div>
+          <div>Opponent played <code class="mono">${escHtml(result.san)}</code> <span style="font-size:10px;color:var(--text-muted)">(${moveSource})</span></div>
+          <div>Find the best move!</div>
+          <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
+        </div>
+      `;
+      // Re-show claim button if threshold was already met
+      if (advantageConsecutiveAbove1000 >= 3) showAdvantageClaimButton();
+    } else {
+      document.getElementById('posInfoContent').innerHTML = `
+        <div style="font-size:13px;line-height:1.7">
+          <div style="color:var(--blue);font-weight:600;">Continuation Practice</div>
+          <div>Opponent played <code class="mono">${escHtml(result.san)}</code> <span style="font-size:10px;color:var(--text-muted)">(${moveSource})</span></div>
+          <div>Find the best move!</div>
+          <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
+        </div>
+      `;
+    }
   }
 }
 
