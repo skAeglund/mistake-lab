@@ -1167,7 +1167,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Rework advantage filtering: time trouble blunder check, exclude tactic peaks</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Advantage invalidation: skip replacement for invalidated items, restore mistakes on next load</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3952,9 +3952,15 @@ function extractAllMistakes() {
 
   // ── Advantage capitalization: filter candidates and push valid items ──
   const advantageItemCount = { checked: 0, added: 0, skippedWin: 0, skippedTimeLoss: 0, skippedTimeTrouble: 0 };
+  const invalidatedAdvantage = getInvalidatedMistakes(); // reuse same invalidation store
   for (const game of allGames) {
     const cand = advantageCandidates[game.id];
     if (!cand) continue;
+
+    // Skip if this advantage position was previously invalidated by the user
+    const advPid = `${game.id}_a${cand.peakPly}`;
+    if (invalidatedAdvantage.has(advPid)) continue;
+
     advantageItemCount.checked++;
     const playerColor = detectPlayerColor(game);
     const { winner } = getGameResultInfo(game);
@@ -6476,13 +6482,16 @@ function confirmRemoveMistake() {
   const m = filteredMistakes[currentMistakeIdx];
   if (!m || (m.type !== 'mistake' && m.type !== 'advantage')) return;
   const pid = posId(m);
+  const label = m.type === 'advantage' ? 'Position' : 'Mistake';
   invalidateMistake(pid);
   allMistakes = allMistakes.filter(mm => posId(mm) !== pid);
   applyFilters();
   renderGameList();
   buildReviewQueue();
   updateSessionProgress();
-  showFeedback('info', 'Mistake removed', "This position won't appear in reviews.");
+  showFeedback('info', `${label} removed`, m.type === 'advantage'
+    ? "This game won't get an advantage drill. Replaced mistakes will return on next load."
+    : "This position won't appear in reviews.");
   // Navigate to next position or show empty state
   if (filteredMistakes.length === 0) {
     currentMistakeIdx = -1;
