@@ -1204,7 +1204,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Review: eval sparkline graph + mistake markers</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Review retry + badges only in review mode</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -5646,6 +5646,13 @@ function onBoardClick(e) {
 
       // Making a move while browsing the continuation line
       if (contLine && contLineBrowsing) {
+        // Review retry mode — evaluate the move without modifying contLine
+        if (contLineReviewRetryIdx >= 0) {
+          currentAttempts++;
+          evaluateMove(move.from, move.to, move);
+          return;
+        }
+
         const keepCount = contLine.currentIdx + 1;
         contLine.moves = contLine.moves.slice(0, keepCount);
 
@@ -5891,6 +5898,7 @@ function loadPosition(globalIdx) {
   contLineReviewMode = false;
   contLineReviewKeyMoves = [];
   contLineReviewKeyIdx = -1;
+  contLineReviewRetryIdx = -1;
   hideMaiaControls();
   engineLine = null;
   browsingLine = false;
@@ -6127,6 +6135,13 @@ function onDrop(source, target) {
 
   // Making a move while browsing the continuation line — truncate and branch
   if (contLine && contLineBrowsing) {
+    // Review retry mode — evaluate the move without modifying contLine
+    if (contLineReviewRetryIdx >= 0) {
+      currentAttempts++;
+      evaluateMove(source, target, move);
+      return;
+    }
+
     // Truncate line after the current browsed position
     const keepCount = contLine.currentIdx + 1;
     contLine.moves = contLine.moves.slice(0, keepCount);
@@ -7023,6 +7038,15 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
   const wpStr = Math.round(wpDrop * 10) / 10;
   const pid = posId(m);
 
+  // ── Review retry mode: show feedback without SRS or contLine modification ──
+  if (contLineReviewRetryIdx >= 0) {
+    const userUci = from + to + (move.promotion || '');
+    const isLiteralBest = move.san === bestMoveSan || (bestMoveUci && userUci === bestMoveUci);
+    const isExactBest = isLiteralBest || wpDrop < 0.5;
+    handleReviewRetryResult(wpDrop, move, bestMoveSan, isExactBest);
+    return;
+  }
+
   // ── Silent continuation: classify move & retroactively annotate opponent ──
   if (silentContinuation && contLine) {
     const userUci = from + to + (move.promotion || '');
@@ -7061,10 +7085,6 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
       afterCp: afterCpPlayer,
     };
     lastContUserAfterCp = afterCpPlayer;
-
-    // Show classification badge on the board
-    moveClassBadge = { square: to, classification };
-    renderArrows();
   }
 
   if (wpDrop <= 5) {
@@ -8321,6 +8341,7 @@ function finishAdvantage(outcome) {
 let contLineReviewMode = false;       // true when reviewing annotated continuation line
 let contLineReviewKeyMoves = [];      // indices into contLine.moves of key moves (mistakes/blunders)
 let contLineReviewKeyIdx = -1;        // current position in keyMoves array
+let contLineReviewRetryIdx = -1;      // contLine move index being retried (-1 = not retrying)
 
 function buildContLineReviewData() {
   if (!contLine || contLine.moves.length === 0) return null;
@@ -8516,7 +8537,9 @@ function showReviewKeyMoveInfo(moveIdx) {
       <div class="feedback-text">
         <div>${mv.wpDrop != null ? `Lost ${mv.wpDrop}% winning chances (−${mv.cpLoss || 0}cp)` : ''}</div>
         ${bestInfo}
-        <div style="margin-top:6px;font-size:11px;color:var(--text-muted);">← to see the position before · → to continue</div>
+        <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;">
+          <button class="btn btn-primary btn-sm" style="font-size:11px;" onclick="startReviewRetry(${moveIdx})">↺ Retry</button>
+        </div>
         ${navHtml}
       </div>
     </div>
@@ -8525,6 +8548,106 @@ function showReviewKeyMoveInfo(moveIdx) {
   // Badge is already set by goToContLineMove — just clear any stale arrows
   bestMoveArrow = null;
   analysisArrow = null;
+}
+
+function startReviewRetry(moveIdx) {
+  if (!contLine || !contLine.moves[moveIdx]) return;
+  contLineReviewRetryIdx = moveIdx;
+
+  // Navigate to position BEFORE the mistake
+  goToContLineMove(moveIdx - 1);
+  moveClassBadge = null;
+  renderArrows();
+
+  // Load the pre-move FEN into the game engine so user can make a move
+  const preFen = moveIdx - 1 >= 0 ? contLine.moves[moveIdx - 1].fen : contLine.baseFen;
+  gameEngine.load(preFen);
+  currentSolveFen = preFen;
+  currentAttempts = 0;
+
+  // Start pre-analysis for the retry position
+  startPreAnalysis(preFen);
+
+  const container = document.getElementById('feedbackContainer');
+  container.innerHTML = `
+    <div class="feedback-box" style="background:var(--bg-card);border-left:3px solid var(--accent);">
+      <div class="feedback-title" style="color:var(--accent)">Find the better move</div>
+      <div class="feedback-text">
+        <div style="font-size:12px;">You played <code>${escHtml(contLine.moves[moveIdx].san)}</code> — can you find a stronger move?</div>
+        <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
+        <div style="margin-top:8px;">
+          <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="cancelReviewRetry(${moveIdx})">Skip</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function cancelReviewRetry(moveIdx) {
+  contLineReviewRetryIdx = -1;
+  stopPreAnalysis();
+  goToContLineMove(moveIdx);
+  showReviewKeyMoveInfo(moveIdx);
+}
+
+function handleReviewRetryResult(wpDrop, move, bestMoveSan, isExactBest) {
+  const moveIdx = contLineReviewRetryIdx;
+  contLineReviewRetryIdx = -1;
+  stopPreAnalysis();
+
+  if (!contLine || !contLine.moves[moveIdx]) return;
+  const originalMv = contLine.moves[moveIdx];
+
+  const classification = classifyWpDrop(wpDrop, isExactBest);
+  const cls = MOVE_CLASSIFICATION[classification] || {};
+  const improved = wpDrop < (originalMv.wpDrop || 100);
+
+  // Undo the retry move — restore pre-move position
+  gameEngine.undo();
+  const preFen = moveIdx - 1 >= 0 ? contLine.moves[moveIdx - 1].fen : contLine.baseFen;
+  boardObj.position(preFen, false);
+
+  // Show the badge on the retry move's destination
+  moveClassBadge = { square: move.to, classification };
+  renderArrows();
+
+  const color = wpDropToColor(wpDrop);
+  const wpStr = Math.round(wpDrop * 10) / 10;
+  const sym = classification === 'good' ? '✓' : (classification === 'best' ? '★' : cls.symbol || '');
+
+  let title, body;
+  if (isExactBest) {
+    title = `${sym} Best move!`;
+    body = `<code>${escHtml(move.san)}</code> is the engine's top choice.`;
+  } else if (wpDrop <= 2) {
+    title = `${sym} Excellent!`;
+    body = `<code>${escHtml(move.san)}</code> is nearly as good as the best move.`;
+  } else if (wpDrop <= 5) {
+    title = `${sym} Good`;
+    body = `<code>${escHtml(move.san)}</code> (−${wpStr}% win).`;
+  } else {
+    title = `${sym} ${cls.label || 'Move'}`;
+    body = `<code>${escHtml(move.san)}</code> loses ${wpStr}% winning chances.`;
+  }
+
+  if (improved && bestMoveSan) {
+    body += `<div style="margin-top:4px;font-size:12px;color:var(--text-muted);">Better than your original <code>${escHtml(originalMv.san)}</code> (−${originalMv.wpDrop}%)</div>`;
+  }
+
+  const navHtml = `
+    <div style="display:flex;gap:8px;margin-top:10px;">
+      <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="startReviewRetry(${moveIdx})">↺ Try again</button>
+      <button class="btn btn-primary btn-sm" style="font-size:11px;" onclick="reviewNextKeyMove()">Next ▶</button>
+    </div>
+  `;
+
+  const container = document.getElementById('feedbackContainer');
+  container.innerHTML = `
+    <div class="feedback-box" style="background:${wpDropToColorDim(wpDrop)};border-left:3px solid ${color};">
+      <div class="feedback-title" style="color:${color}">${title}</div>
+      <div class="feedback-text">${body}${navHtml}</div>
+    </div>
+  `;
 }
 
 function showReviewComplete() {
@@ -8547,6 +8670,7 @@ function exitContLineReview() {
   contLineReviewMode = false;
   contLineReviewKeyMoves = [];
   contLineReviewKeyIdx = -1;
+  contLineReviewRetryIdx = -1;
 }
 
 function startTacticContinuation() {
