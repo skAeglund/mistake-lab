@@ -134,6 +134,29 @@
     pointer-events: none;
     cursor: default;
   }
+  /* Note button: same grayed-out pattern when hidden */
+  #btnNote.hidden {
+    display: inline-block !important;
+    opacity: 0.2;
+    pointer-events: none;
+    cursor: default;
+  }
+  #btnNote.has-note { color: var(--accent); border-color: var(--accent); }
+  /* Note panel */
+  .note-panel {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px; margin-bottom: 10px;
+  }
+  .note-panel textarea {
+    width: 100%; min-height: 60px; max-height: 150px; resize: vertical;
+    background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px; font-family: 'DM Sans', sans-serif; font-size: 12px;
+    box-sizing: border-box;
+  }
+  .note-panel textarea:focus { outline: none; border-color: var(--accent); }
+  .note-panel .note-actions { display: flex; gap: 6px; margin-top: 8px; justify-content: flex-end; }
+  .note-panel .note-hint { font-size: 10px; color: var(--text-muted); margin-top: 6px; }
+  .note-saved-indicator { font-size: 11px; color: var(--text-muted); margin-bottom: 6px; display: flex; align-items: center; gap: 4px; }
   .btn-inline {
     background: none; border: 1px solid var(--border); color: var(--text-secondary);
     font-family: 'DM Sans', sans-serif; font-size: 10px; font-weight: 600;
@@ -897,6 +920,8 @@
     .feedback-title { font-size: 13px; }
     .feedback-text { font-size: 12px; }
     .info-card { padding: 10px 12px; }
+    .note-panel { padding: 10px; }
+    .note-panel textarea { min-height: 50px; font-size: 13px; }
     .info-card h4 { margin-bottom: 6px; }
     .engine-line { padding: 10px; }
 
@@ -1167,7 +1192,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Maia defaults: 2000 ELO, 0.75 precision</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add position notes with saved arrows</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1290,6 +1315,7 @@
       </span>
       <button class="btn btn-ghost btn-sm" onclick="skipPosition()" title="Skip this position">Skip</button>
       <button class="btn btn-ghost btn-sm hidden" id="btnHint" onclick="showHint()" title="Show a hint for this position (H)">💡 Hint</button>
+      <button class="btn btn-ghost btn-sm hidden" id="btnNote" onclick="toggleNotePanel()" title="Add or view a note for this position (N)">📝 Note</button>
       <button class="btn btn-ghost btn-sm hidden" id="btnRetry" onclick="retryPosition()" style="border-color:var(--accent);color:var(--accent)">↺ Retry</button>
       <button class="btn btn-ghost btn-sm hidden" id="btnLichess" onclick="openLichessAnalysis()" title="Open in Lichess analysis board">🔍 Analysis</button>
       <button class="btn btn-ghost btn-sm hidden" id="btnViewGame" onclick="openGameOnSite()" title="View the original game on Lichess or Chess.com">♟ View Game</button>
@@ -1343,6 +1369,7 @@
           <span class="maia-slider-value" id="maiaPrecisionValue">0.75</span>
         </div>
       </div>
+      <div id="notePanel" class="note-panel" style="display:none"></div>
       <div id="feedbackContainer"></div>
       <div id="contLineContainer"></div>
     </div>
@@ -1487,6 +1514,9 @@ let hintLevel = 0;               // 0=no hint, 1=piece shown, 2=full move shown
 let hintUsed = false;            // true if hint was used this position (forces SRS Again)
 let hintMove = null;             // frozen UCI string of the best move when hint was first used
 let hintArrow = null;            // { from, to } for hint arrow drawn on second press
+let noteArrows = [];             // [{from, to, color}] arrows from saved note
+let noteCircles = [];            // [{square, color}] circles from saved note
+let notePanelOpen = false;       // true when note editing panel is visible
 let reviewMode = false;          // true = show only due SRS positions
 let reviewQueue = [];            // positions due for review
 
@@ -1648,7 +1678,7 @@ function getCardForPosition(pid) {
 function recordReview(pid, grade) {
   const card = getCardForPosition(pid);
   const updated = fsrs_review(card, grade);
-  if (!gistData) gistData = { positions: {}, version: 1 };
+  if (!gistData) gistData = { positions: {}, notes: {}, version: 1 };
   if (!gistData.positions[pid]) gistData.positions[pid] = {};
   gistData.positions[pid].completed = true;
   gistData.positions[pid].lastSeen = new Date().toISOString();
@@ -1736,7 +1766,7 @@ function markCompleted(pid) {
   s.add(pid);
   localStorage.setItem(getCompletedKey(), JSON.stringify([...s]));
   // Update gist data and schedule sync
-  if (!gistData) gistData = { positions: {}, version: 1 };
+  if (!gistData) gistData = { positions: {}, notes: {}, version: 1 };
   gistData.positions[pid] = {
     ...gistData.positions[pid],
     completed: true,
@@ -1755,7 +1785,7 @@ function getInvalidatedTactics() {
   return s;
 }
 function invalidateTactic(pid) {
-  if (!gistData) gistData = { positions: {}, version: 1 };
+  if (!gistData) gistData = { positions: {}, notes: {}, version: 1 };
   if (!gistData.positions[pid]) gistData.positions[pid] = {};
   gistData.positions[pid].invalidated = true;
   debounceSyncToGist();
@@ -1771,7 +1801,7 @@ function getInvalidatedMistakes() {
   return s;
 }
 function invalidateMistake(pid) {
-  if (!gistData) gistData = { positions: {}, version: 1 };
+  if (!gistData) gistData = { positions: {}, notes: {}, version: 1 };
   if (!gistData.positions[pid]) gistData.positions[pid] = {};
   gistData.positions[pid].invalidated = true;
   debounceSyncToGist();
@@ -1780,6 +1810,7 @@ function invalidateMistake(pid) {
 /** Migrate legacy localStorage invalidations into gistData (one-time) */
 function migrateInvalidationsToGist() {
   if (!gistData) return;
+  if (!gistData.notes) gistData.notes = {};
   let dirty = false;
   // Migrate invalidated tactics
   try {
@@ -1823,7 +1854,7 @@ function getInvalidatedLines(pid) {
   return new Set(gistData.positions[pid].invalidatedLines);
 }
 function invalidateLine(pid, fingerprint) {
-  if (!gistData) gistData = { positions: {}, version: 1 };
+  if (!gistData) gistData = { positions: {}, notes: {}, version: 1 };
   if (!gistData.positions[pid]) gistData.positions[pid] = {};
   const lines = gistData.positions[pid].invalidatedLines || [];
   if (!lines.includes(fingerprint)) {
@@ -5160,6 +5191,8 @@ function renderReviewList() {
       statusText = '<span style="color:var(--yellow)">Due</span>';
     }
 
+    const hasNote = gistData?.notes && gistData.notes[fenPositionKey(m.fenBefore)];
+
     const moveLabel = isAdvantage
       ? `${ICON_ADVANTAGE} Move ${m.moveNumber}${m.playerColor==='white'?'.':'…'} <span style="color:#4caf50">+${(m.peakCp/100).toFixed(1)}</span>`
       : isTactic
@@ -5168,7 +5201,7 @@ function renderReviewList() {
 
     item.innerHTML = `
       <div class="review-item-top">
-        <span>${moveLabel}</span>
+        <span>${moveLabel}${hasNote ? ' <span style="font-size:11px" title="Has note">📝</span>' : ''}</span>
         ${statusText}
       </div>
       <div class="review-item-opening">${escHtml(opening)}</div>
@@ -5567,6 +5600,7 @@ function loadPosition(globalIdx) {
   hintBtn.textContent = '💡 Hint';
   hintBtn.style.borderColor = '';
   hintBtn.style.color = '';
+  document.getElementById('btnNote').classList.remove('hidden');
   closeMobileFeedback();
   preAnalysisPaused = false;
   continuationMode = false;
@@ -5729,6 +5763,7 @@ function loadPosition(globalIdx) {
     startPreAnalysis(m.fenBefore);
     sfLog('loadPosition', `idx=${globalIdx} startPreAnalysis called, newSession=${preAnalysisSession}`);
   }
+  checkForNote(m.fenBefore);
 }
 
 // ─── Board interaction ───
@@ -6311,6 +6346,7 @@ function goToTacticLineMove(idx) {
   moveEls.forEach((el, i) => {
     el.classList.toggle('active', i === idx);
   });
+  updateNoteButton();
 }
 
 function tacticLineStep(delta) {
@@ -7501,6 +7537,9 @@ function goToLineMove(idx, animate = true) {
     const evalFen = idx === -1 ? engineLine.baseFen : getEngineLineFen();
     if (evalFen) requestEvalWorkerAnalysis(evalFen);
   }
+  // Check for position notes at navigated position
+  const noteFen = idx === -1 ? engineLine.baseFen : getEngineLineFen();
+  if (noteFen) updateNoteButton();
 }
 
 /** Click handler for main line moves — switches activeAlt to main */
@@ -7716,6 +7755,7 @@ function goToContLineMove(idx) {
 
   renderContLine();
   updateEvalBar();
+  updateNoteButton();
 }
 
 function contLineStep(delta) {
@@ -8483,6 +8523,8 @@ function clearArrows() {
   ghostCircleWasColor = null;
   bestMoveArrow = null;
   analysisArrow = null;
+  noteArrows = [];
+  noteCircles = [];
   renderArrows();
 }
 
@@ -8491,7 +8533,7 @@ function renderArrows() {
     const boardEl = document.querySelector('#board [class^="board-"]');
     if (!boardEl) return;
 
-    const hasSomething = activeArrows.size > 0 || activeCircles.size > 0 || ghostCircle || ghostArrow || bestMoveArrow || analysisArrow || hintArrow || filterArrows.length > 0;
+    const hasSomething = activeArrows.size > 0 || activeCircles.size > 0 || ghostCircle || ghostArrow || bestMoveArrow || analysisArrow || hintArrow || filterArrows.length > 0 || noteArrows.length > 0 || noteCircles.length > 0;
     svg.classList.toggle('hidden', !hasSomething);
     if (!hasSomething) { svg.innerHTML = ''; return; }
 
@@ -8557,6 +8599,11 @@ function renderArrows() {
     // Best move arrow first (behind user arrows)
     if (analysisArrow) drawOne(analysisArrow.from, analysisArrow.to, 'rgba(100, 160, 255, 0.5)', 1);
     if (bestMoveArrow) drawOne(bestMoveArrow.from, bestMoveArrow.to, 'rgba(62, 207, 142, 0.7)', 1);
+    // Note arrows (semi-transparent, behind hint/user arrows)
+    for (const na of noteArrows) {
+      const c = DRAW_COLOR_MAP[na.color] || DRAW_COLOR_MAP.green;
+      drawOne(na.from, na.to, c.arrow, 0.55);
+    }
     // Hint arrow
     if (hintArrow) drawOne(hintArrow.from, hintArrow.to, 'rgba(66, 133, 244, 0.7)', 1);
     // User-drawn arrows
@@ -8572,6 +8619,14 @@ function renderArrows() {
       const r = sqSize * 0.46;
       html += `<circle cx="${center.x}" cy="${center.y}" r="${r}" fill="none" stroke="${DRAW_COLOR_MAP[color].circle}" stroke-width="${circleStroke}" opacity="0.9" />`;
     });
+    // Note circles (semi-transparent)
+    for (const nc of noteCircles) {
+      const center = sqCenter(nc.square);
+      if (!center) continue;
+      const r = sqSize * 0.46;
+      const c = DRAW_COLOR_MAP[nc.color] || DRAW_COLOR_MAP.green;
+      html += `<circle cx="${center.x}" cy="${center.y}" r="${r}" fill="none" stroke="${c.circle}" stroke-width="${circleStroke}" opacity="0.55" />`;
+    }
     // Ghost circle (preview while right-click held, before drag)
     if (ghostCircle) {
       const center = sqCenter(ghostCircle);
@@ -8721,6 +8776,220 @@ function closeMobileFeedback() {
   clearTimeout(_mobilePopupTimer);
 }
 
+// ─── Position Notes ───
+function getCurrentNoteFen() {
+  // Get the FEN of the position currently displayed on the board
+  if (engineLine) {
+    if (engineLine.currentIdx === -1) return engineLine.baseFen;
+    const fen = typeof getEngineLineFen === 'function' ? getEngineLineFen() : null;
+    if (fen) return fen;
+    return engineLine.baseFen;
+  }
+  if (contLine && contLine.currentIdx >= 0 && contLine.moves[contLine.currentIdx]) {
+    return contLine.moves[contLine.currentIdx].fen;
+  }
+  if (tacticLine && tacticLine.currentIdx >= 0 && tacticLine.moves[tacticLine.currentIdx]) {
+    return tacticLine.moves[tacticLine.currentIdx].fen;
+  }
+  if (continuationMode && currentSolveFen) return currentSolveFen;
+  if (currentMistakeIdx >= 0 && filteredMistakes[currentMistakeIdx]) {
+    return filteredMistakes[currentMistakeIdx].fenBefore;
+  }
+  if (typeof gameEngine !== 'undefined' && gameEngine) return gameEngine.fen();
+  return null;
+}
+
+function getNoteForFen(fen) {
+  if (!fen || !gistData?.notes) return null;
+  const key = fenPositionKey(fen);
+  return gistData.notes[key] || null;
+}
+
+function updateNoteButton() {
+  const btn = document.getElementById('btnNote');
+  if (!btn) return;
+  const fen = getCurrentNoteFen();
+  const note = getNoteForFen(fen);
+  if (note) {
+    btn.classList.add('has-note');
+    btn.textContent = '📝 Note';
+  } else {
+    btn.classList.remove('has-note');
+    btn.textContent = '📝 Note';
+  }
+}
+
+function showNoteArrows(note) {
+  noteArrows = (note.arrows || []).slice();
+  noteCircles = (note.circles || []).slice();
+  renderArrows();
+}
+
+function hideNoteArrows() {
+  noteArrows = [];
+  noteCircles = [];
+  renderArrows();
+}
+
+function toggleNotePanel() {
+  if (notePanelOpen) {
+    closeNotePanel();
+  } else {
+    openNotePanel();
+  }
+}
+
+function openNotePanel() {
+  const panel = document.getElementById('notePanel');
+  if (!panel) return;
+  notePanelOpen = true;
+
+  const fen = getCurrentNoteFen();
+  if (!fen) return;
+  const key = fenPositionKey(fen);
+  const note = getNoteForFen(fen);
+
+  // If note has saved arrows/circles, restore them to the board for editing
+  if (note) {
+    // Set active arrows/circles from saved note so user can see/edit them
+    activeArrows.clear();
+    activeCircles.clear();
+    for (const a of (note.arrows || [])) {
+      activeArrows.set(a.from + a.to, a.color || 'green');
+    }
+    for (const c of (note.circles || [])) {
+      activeCircles.set(c.square, c.color || 'green');
+    }
+    // Clear note overlay arrows (user arrows are now live)
+    noteArrows = [];
+    noteCircles = [];
+    renderArrows();
+  }
+
+  panel.style.display = 'block';
+  panel.innerHTML = `
+    <div class="note-saved-indicator">${note ? '📝 Editing note' : '📝 New note'}</div>
+    <textarea id="noteText" maxlength="500" placeholder="Write a note about this position… (arrows on the board will be saved too)">${note?.text ? escHtml(note.text) : ''}</textarea>
+    <div class="note-hint">Arrows and circles drawn on the board will be saved with this note.</div>
+    <div class="note-actions">
+      ${note ? '<button class="btn btn-ghost btn-sm" onclick="deleteNote()" style="color:var(--red);border-color:var(--red)">🗑 Delete</button>' : ''}
+      <button class="btn btn-ghost btn-sm" onclick="closeNotePanel()">Cancel</button>
+      <button class="btn btn-ghost btn-sm" onclick="saveNote()" style="border-color:var(--accent);color:var(--accent)">💾 Save</button>
+    </div>
+  `;
+
+  // Focus textarea
+  const ta = document.getElementById('noteText');
+  if (ta) ta.focus();
+}
+
+function closeNotePanel() {
+  notePanelOpen = false;
+  const panel = document.getElementById('notePanel');
+  if (panel) { panel.style.display = 'none'; panel.innerHTML = ''; }
+  // Clear user-drawn arrows (they were for note editing)
+  activeArrows.clear();
+  activeCircles.clear();
+  // Re-show saved note arrows if a note exists
+  const fen = getCurrentNoteFen();
+  const note = getNoteForFen(fen);
+  if (note) {
+    showNoteArrows(note);
+  } else {
+    renderArrows();
+  }
+}
+
+function saveNote() {
+  const fen = getCurrentNoteFen();
+  if (!fen) return;
+  const key = fenPositionKey(fen);
+  const ta = document.getElementById('noteText');
+  const text = ta ? ta.value.trim() : '';
+
+  // Capture current arrows and circles from the board
+  const arrows = [];
+  activeArrows.forEach((color, k) => {
+    arrows.push({ from: k.substring(0, 2), to: k.substring(2, 4), color });
+  });
+  const circles = [];
+  activeCircles.forEach((color, sq) => {
+    circles.push({ square: sq, color });
+  });
+
+  // Must have text or at least one annotation
+  if (!text && arrows.length === 0 && circles.length === 0) {
+    // Empty note = delete it
+    deleteNote();
+    return;
+  }
+
+  if (!gistData) return;
+  if (!gistData.notes) gistData.notes = {};
+
+  const now = new Date().toISOString();
+  const existing = gistData.notes[key];
+  gistData.notes[key] = {
+    text: text || '',
+    arrows,
+    circles,
+    created: existing?.created || now,
+    updated: now
+  };
+
+  // Trigger sync
+  if (isGistConfigured()) {
+    clearTimeout(syncDebounceTimer);
+    syncDebounceTimer = setTimeout(() => syncToGist(), 3000);
+  }
+
+  // Close panel and show the saved note overlay
+  notePanelOpen = false;
+  const panel = document.getElementById('notePanel');
+  if (panel) { panel.style.display = 'none'; panel.innerHTML = ''; }
+  activeArrows.clear();
+  activeCircles.clear();
+  showNoteArrows(gistData.notes[key]);
+  updateNoteButton();
+  // Re-render review list if visible (to update 📝 icons)
+  if (reviewMode) renderReviewList();
+}
+
+function deleteNote() {
+  const fen = getCurrentNoteFen();
+  if (!fen || !gistData?.notes) return;
+  const key = fenPositionKey(fen);
+  if (!gistData.notes[key]) { closeNotePanel(); return; }
+
+  delete gistData.notes[key];
+
+  // Trigger sync
+  if (isGistConfigured()) {
+    clearTimeout(syncDebounceTimer);
+    syncDebounceTimer = setTimeout(() => syncToGist(), 3000);
+  }
+
+  notePanelOpen = false;
+  const panel = document.getElementById('notePanel');
+  if (panel) { panel.style.display = 'none'; panel.innerHTML = ''; }
+  activeArrows.clear();
+  activeCircles.clear();
+  hideNoteArrows();
+  updateNoteButton();
+  if (reviewMode) renderReviewList();
+}
+
+function checkForNote(fen) {
+  // Called on position changes — update button state and show note arrows if present
+  hideNoteArrows();
+  if (notePanelOpen) closeNotePanel();
+  updateNoteButton();
+  const note = getNoteForFen(fen);
+  if (note) {
+    showNoteArrows(note);
+  }
+}
+
 // ─── Keyboard shortcuts ───
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
@@ -8733,7 +9002,7 @@ document.addEventListener('keydown', (e) => {
     if (browsingLine) { exitEngineLine(); return; }
     closeSettings();
   }
-  if (e.target.tagName === 'INPUT') return;
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
   // Opening filter mode — arrow keys undo/redo, block other shortcuts
   if (openingFilterMode) {
     if (e.key === 'ArrowLeft') { filterUndoMove(); e.preventDefault(); }
@@ -8757,6 +9026,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'r' || e.key === 'R') { if (!document.getElementById('btnRetry').classList.contains('hidden')) retryPosition(); }
   if (e.key === 'h' || e.key === 'H') { const hb = document.getElementById('btnHint'); if (hb && !hb.classList.contains('hidden') && !hb.disabled) showHint(); }
   if (e.key === 'e' || e.key === 'E') toggleEvalBar();
+  if (e.key === 'n' || e.key === 'N') { const nb = document.getElementById('btnNote'); if (nb && !nb.classList.contains('hidden')) toggleNotePanel(); }
 });
 
 // Flush pending sync before page unload
