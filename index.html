@@ -4319,16 +4319,14 @@ function updateAnalysisPvArrows() {
     const gap = Math.abs(bestCp - pv.cp);
     if (i > 0 && gap > MAX_GAP) continue;
 
-    if (i === 0) {
-      // Best move: oversized teal arrow
-      arrows.push({ from, to, opacity: 0.8, scale: 1.25, color: 'rgb(0, 180, 164)' });
-    } else {
-      // Alternatives: green, lerp down aggressively
-      const t = Math.min(gap / MAX_GAP, 1);
-      const opacity = 0.55 - t * 0.43;  // 0.55 → 0.12
-      const scale = 0.75 - t * 0.35;    // 0.75 → 0.4
-      arrows.push({ from, to, opacity, scale, color: 'rgb(21, 120, 27)' });
-    }
+    const t = Math.min(gap / MAX_GAP, 1); // 0 = equal to best, 1 = at threshold
+    const opacity = 0.8 - t * 0.68;       // 0.8 → 0.12
+    const scale = 1.25 - t * 0.85;        // 1.25 → 0.4
+    // Lerp color: teal (0,180,164) → green (21,120,27)
+    const r = Math.round(0 + t * 21);
+    const g = Math.round(180 - t * 60);
+    const b = Math.round(164 - t * 137);
+    arrows.push({ from, to, opacity, scale, color: `rgb(${r},${g},${b})` });
   }
   analysisPvArrows = arrows;
 }
@@ -4337,11 +4335,15 @@ function analysisPvHover(pvIdx) {
   if (pvIdx < 0 || pvIdx >= analysisPvs.length) return;
   const pv = analysisPvs[pvIdx];
   if (!pv?.move) return;
-  // Show only the hovered arrow at full size
   const from = pv.move.substring(0, 2);
   const to = pv.move.substring(2, 4);
-  const color = pvIdx === 0 ? 'rgb(0, 180, 164)' : 'rgb(21, 120, 27)';
-  analysisPvArrows = [{ from, to, opacity: 0.8, scale: 1.0, color }];
+  const bestCp = analysisPvs[0]?.cp ?? 0;
+  const gap = Math.abs(bestCp - pv.cp);
+  const t = Math.min(gap / 250, 1);
+  const r = Math.round(t * 21);
+  const g = Math.round(180 - t * 60);
+  const b = Math.round(164 - t * 137);
+  analysisPvArrows = [{ from, to, opacity: 0.8, scale: 1.0, color: `rgb(${r},${g},${b})` }];
   renderArrows();
 }
 
