@@ -7737,6 +7737,17 @@ function renderTacticLine() {
 function goToTacticLineMove(idx) {
   if (!tacticLine) return;
   if (idx < -1 || idx >= tacticLine.moves.length) return;
+
+  // If the engine line is active (user was browsing a wrong-move refutation),
+  // dismiss it so that subsequent arrow-key navigation operates on the tactic line.
+  if (engineLine) {
+    engineLine = null;
+    const elBox = document.getElementById('engineLineBox');
+    if (elBox) elBox.remove();
+    stopEvalWorkerSearch();
+    updateLineNavBar();
+  }
+
   tacticLine.currentIdx = idx;
 
   const atEnd = idx === tacticLine.moves.length - 1;
@@ -8384,7 +8395,7 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
     if (shouldAdvance) {
       // Advantage mode: track eval progression
       if (advantageMode && (wpDrop <= 10 || silentContinuation)) {
-        updateAdvantageTracking(afterCpPlayer);
+        updateAdvantageTracking(afterCpPlayer, wpDrop);
         if (!advantageMode) return; // finishAdvantage was called (collapse)
       }
       // Record user's move in the continuation line (with eval data if in silent mode)
@@ -9381,9 +9392,11 @@ function startAdvantageContinuation(m) {
   startPreAnalysis(currentSolveFen);
 }
 
-function updateAdvantageTracking(afterCpPlayer) {
-  // Track the minimum eval reached during the advantage continuation
-  if (advantageMinCpReached === null || afterCpPlayer < advantageMinCpReached) {
+function updateAdvantageTracking(afterCpPlayer, wpDrop = 0) {
+  // Only track dips caused by user mistakes (wpDrop > 2).
+  // Excellent moves don't count as "dipping" — the eval may be low due to engine
+  // horizon effects or a simplified position, not because the user erred.
+  if (wpDrop > 2 && (advantageMinCpReached === null || afterCpPlayer < advantageMinCpReached)) {
     advantageMinCpReached = afterCpPlayer;
   }
 
