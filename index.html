@@ -1204,7 +1204,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix: Miss limited to inaccuracies, wait for engine on fast play</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Low Depth Review option during eval queue wait</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -8760,28 +8760,33 @@ function updateReviewGraphCursor(moveIdx) {
 async function startContLineReview() {
   // Wait for background eval queue to finish
   if (silentEvalProcessing || silentEvalQueue.length > 0) {
+    window._skipEvalQueueWait = false;
     const container = document.getElementById('feedbackContainer');
+    const remaining0 = silentEvalQueue.length + (silentEvalProcessing ? 1 : 0);
     container.innerHTML = `
       <div class="feedback-box" style="background:var(--bg-card);border-left:3px solid var(--accent);">
         <div class="feedback-title" style="color:var(--accent)">📋 Finalizing analysis…</div>
         <div class="feedback-text"><div class="spinner" style="margin:8px 0"></div>
-          <div style="font-size:11px;color:var(--text-muted);">${silentEvalQueue.length + (silentEvalProcessing ? 1 : 0)} move${silentEvalQueue.length !== 0 ? 's' : ''} remaining</div>
+          <div id="evalQueueCount" style="font-size:11px;color:var(--text-muted);">${remaining0} move${remaining0 !== 1 ? 's' : ''} remaining</div>
+          <div style="margin-top:8px;">
+            <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="window._skipEvalQueueWait=true">Low Depth Review</button>
+          </div>
         </div>
       </div>
     `;
     await new Promise(resolve => {
       const poll = setInterval(() => {
-        if (!silentEvalProcessing && silentEvalQueue.length === 0) {
+        if (window._skipEvalQueueWait || (!silentEvalProcessing && silentEvalQueue.length === 0)) {
           clearInterval(poll);
           resolve();
         } else {
-          // Update remaining count
           const remaining = silentEvalQueue.length + (silentEvalProcessing ? 1 : 0);
-          const countEl = container.querySelector('.feedback-text div:last-child');
+          const countEl = document.getElementById('evalQueueCount');
           if (countEl) countEl.textContent = `${remaining} move${remaining !== 1 ? 's' : ''} remaining`;
         }
       }, 200);
     });
+    window._skipEvalQueueWait = false;
   }
 
   const data = buildContLineReviewData();
