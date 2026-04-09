@@ -1204,7 +1204,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Game review: interactive graph, best line, Great/Miss, instant feedback setting, eval queue, bug fixes</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix: Miss limited to inaccuracies, wait for engine on fast play</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1623,8 +1623,9 @@ function classifyWithContext(base, bestCp, pv2Cp, wpDrop) {
   }
 
   // Miss: position was winning (bestCp ≥ 300), there was a clear best move
-  // (pvGap ≥ 10%), but user played something weaker (wpDrop > 5 = inaccuracy+)
-  if (wpDrop > 5 && bestCp >= 300 && pvGap >= 10) {
+  // (pvGap ≥ 10%), user played an inaccuracy (wpDrop 5-10) — not a full mistake/blunder.
+  // Miss = "you were still OK but missed a clear winning continuation"
+  if (base === 'inaccuracy' && bestCp >= 300 && pvGap >= 10) {
     return 'miss';
   }
 
@@ -7080,11 +7081,20 @@ async function evaluateMove(from, to, move) {
   sfLog('evaluateMove', `START move=${move.san} (${from}→${to}) mistakeIdx=${mistakeIdx} fen=${m.fenBefore.split(' ').slice(0,2).join(' ')}… session=${preAnalysisSession}`);
 
   if (!sfReady) {
-    showFeedback('info', 'Engine loading…', 'Stockfish is still initializing. Try again in a moment.');
-    gameEngine.undo();
-    boardObj.position(gameEngine.fen());
-    currentAttempts--;
-    return;
+    // Wait for engine to initialize (up to 5 seconds) instead of bailing
+    sfLog('evaluateMove', 'sfReady=false, waiting for init…');
+    if (!sfWorker) initStockfish();
+    const waitStart = Date.now();
+    while (!sfReady && Date.now() - waitStart < 5000) {
+      await new Promise(r => setTimeout(r, 100));
+    }
+    if (!sfReady) {
+      showFeedback('info', 'Engine loading…', 'Stockfish is still initializing. Try again in a moment.');
+      gameEngine.undo();
+      boardObj.position(gameEngine.fen());
+      currentAttempts--;
+      return;
+    }
   }
 
   // Show loading
