@@ -3930,6 +3930,7 @@ let analysisEngine = null;       // Chess.js instance for analysis board
 let analysisSession = 0;         // Stockfish session counter
 let analysisDepth = 0;
 let analysisComplete = false;
+let analysisCached = false;       // true when showing cached (not live) depth
 let analysisPvs = [];            // [{cp, move, san, uciLine, depth}]
 let analysisListener = null;     // SF message handler
 let analysisNodeId = 0;          // Auto-increment node IDs
@@ -4098,9 +4099,13 @@ function startAnalysisSearch(fen) {
   if (analysisTreeCurrent && analysisTreeCurrent.fen === fen && analysisTreeCurrent.cachedPvs) {
     analysisPvs = analysisTreeCurrent.cachedPvs.map(p => ({...p}));
     analysisDepth = analysisTreeCurrent.cachedDepth;
+    analysisCached = true;
+  } else {
+    analysisCached = false;
   }
 
   renderAnalysisPvs(); // show cached data or "analyzing" state
+  updateAnalysisDepthTag();
 
   // Check eval cache first
   const cachedEval = evalCacheGet(fen, EVAL_CACHE_MIN_DEPTH, 1);
@@ -4170,6 +4175,7 @@ function startAnalysisSearch(fen) {
                 uciLine: pv.moves, depth: pv.depth,
               };
             });
+          analysisCached = false;
           renderAnalysisPvs();
           updateAnalysisDepthTag();
           // Cache on the current tree node for instant restore on navigation
@@ -4224,7 +4230,9 @@ function startAnalysisSearch(fen) {
 function updateAnalysisDepthTag() {
   const tag = document.getElementById('analysisDepthTag');
   if (!tag) return;
-  if (analysisComplete) {
+  if (analysisCached && analysisDepth > 0) {
+    tag.innerHTML = `Depth <span class="depth-num" style="color:var(--blue,#66f)">${analysisDepth}</span> ⟳`;
+  } else if (analysisComplete) {
     tag.innerHTML = `Depth <span class="depth-num">${analysisDepth}</span> ✓`;
   } else {
     tag.innerHTML = `Depth <span class="depth-num">${analysisDepth}</span>…`;
