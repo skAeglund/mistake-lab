@@ -1288,7 +1288,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Analysis mode: in-app board analysis with MultiPV 3 and move tree</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Analysis mode: use current board position, not start position</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3958,8 +3958,23 @@ function enterAnalysisMode() {
     browsingLineState: browsingLine,
   };
 
+  // Determine the current position on the board
+  let startFen;
+  if (browsingLine && engineLine) {
+    startFen = getEngineLineFen() || gameEngine?.fen() || m.fenBefore;
+  } else if (browsingLine && tacticLine && tacticLine.currentIdx >= 0) {
+    startFen = tacticLine.moves[tacticLine.currentIdx]?.fen || gameEngine?.fen() || m.fenBefore;
+  } else if (contLineBrowsing && contLine) {
+    const idx = contLine.currentIdx;
+    startFen = idx >= 0 && idx < contLine.moves.length ? contLine.moves[idx].fen : (gameEngine?.fen() || m.fenBefore);
+  } else if (gameEngine) {
+    startFen = gameEngine.fen();
+  } else {
+    startFen = m.fenBefore;
+  }
+
   analysisMode = true;
-  analysisOrientation = m.playerColor || 'white';
+  analysisOrientation = boardObj ? boardObj.orientation() : (m.playerColor || 'white');
   analysisNodeId = 0;
   analysisNodes = {};
   analysisPvs = [];
@@ -3967,7 +3982,6 @@ function enterAnalysisMode() {
   analysisComplete = false;
 
   // Build initial tree root
-  const startFen = m.fenBefore;
   analysisTree = makeTreeNode(startFen, null, null, null);
   analysisTreeCurrent = analysisTree;
 
@@ -3983,7 +3997,7 @@ function enterAnalysisMode() {
   // Show analysis panel
   document.getElementById('analysisPanel').classList.remove('hidden');
 
-  // Exit any engine line / continuation state
+  // Exit any engine line / continuation / tactic state
   stopPreAnalysis();
   if (engineLine) exitEngineLine();
   if (continuationMode) {
@@ -3991,6 +4005,10 @@ function enterAnalysisMode() {
     contLine = null;
     contLineBrowsing = false;
     hideMaiaControls();
+  }
+  if (tacticMode) {
+    tacticMode = false;
+    tacticLine = null;
   }
   browsingLine = false;
 
