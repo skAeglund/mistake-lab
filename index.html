@@ -1204,7 +1204,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix: Low Depth Review button layout</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Parallel eval queue: both workers process during review wait</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1549,7 +1549,8 @@ const EVAL_WORKER_PHASE2_DEPTH = 30;
 const SILENT_EVAL_DEPTH = 22;        // depth for background re-evaluation of silent cont moves
 const SILENT_REVIEW_MIN_MOVES = 5;   // user moves before "Stop & Review" appears in silent continuation
 let silentEvalQueue = [];             // [{moveIdx, preFen, postFen, userUci}] pending deep evals
-let silentEvalProcessing = false;     // true while processSilentEvalQueue is running
+let silentEvalProcessing = false;     // true while processSilentEvalQueue is running (eval worker)
+let silentEvalMainProcessing = false; // true while main worker is helping with queue
 let hintLevel = 0;               // 0=no hint, 1=piece shown, 2=full move shown
 let hintUsed = false;            // true if hint was used this position (forces SRS Again)
 let hintMove = null;             // frozen UCI string of the best move when hint was first used
@@ -2934,8 +2935,6 @@ async function processSilentEvalQueue() {
       if (!preResult || !contLine || !contLine.moves[item.moveIdx]) continue;
 
       const bestCp = preResult.pvs[0]?.cp ?? 0;
-      const bestMoveSan = uciToSan(item.preFen, preResult.bestMove || '');
-      const sideToMove = item.preFen.split(' ')[1];
 
       // Check if user's move matches a PV
       const matchedPv = preResult.pvs.find(pv => pv.firstMove === item.userUci);
@@ -2946,52 +2945,117 @@ async function processSilentEvalQueue() {
         // Slow path: analyze post-move position
         const postResult = await evalWorkerAnalyzePosition(item.postFen, SILENT_EVAL_DEPTH, 1);
         if (!postResult || !contLine || !contLine.moves[item.moveIdx]) continue;
-        const afterCp = -(postResult.pvs[0]?.cp ?? 0); // negate: opponent's perspective → ours
+        const afterCp = -(postResult.pvs[0]?.cp ?? 0);
         cpLoss = bestCp - afterCp;
       }
 
-      // Compute win% drop and reclassify
-      const wpBefore = cpToWinPct(bestCp);
-      const wpAfter = cpToWinPct(bestCp - cpLoss);
-      const wpDrop = wpBefore - wpAfter;
-      const userUci = item.userUci;
-      const isLiteralBest = preResult.bestMove === userUci;
-      const isExactBest = isLiteralBest || wpDrop < 0.5;
-      const baseClass = classifyWpDrop(wpDrop, isExactBest);
-      const pv2Cp = preResult.pvs[1]?.cp ?? null;
-      const newClassification = classifyWithContext(baseClass, bestCp, pv2Cp, wpDrop);
-
-      // Update the contLine move
-      const mv = contLine.moves[item.moveIdx];
-      mv.classification = newClassification;
-      mv.wpDrop = Math.round(wpDrop * 10) / 10;
-      mv.cpLoss = Math.round(cpLoss);
-      mv.bestMoveSan = bestMoveSan;
-      mv.bestMoveUci = preResult.bestMove || null;
-      mv.bestCp = bestCp;
-      mv.afterCp = bestCp - cpLoss;
-
-      // Also retroactively classify the preceding opponent move if possible
-      if (item.moveIdx > 0) {
-        const prevMv = contLine.moves[item.moveIdx - 1];
-        if (prevMv && !prevMv.isUser && prevMv._prevUserAfterCp != null) {
-          const oppCpLoss = prevMv._prevUserAfterCp - bestCp;
-          const oppWpBefore = cpToWinPct(-prevMv._prevUserAfterCp);
-          const oppWpAfter = cpToWinPct(-bestCp);
-          const oppWpDrop = oppWpBefore - oppWpAfter;
-          prevMv.classification = classifyWpDrop(Math.max(0, oppWpDrop), oppWpDrop < 0.5);
-          prevMv.wpDrop = Math.round(Math.max(0, oppWpDrop) * 10) / 10;
-          prevMv.cpLoss = Math.round(Math.max(0, oppCpLoss));
-        }
-      }
-
-      renderContLine();
+      applySilentEvalToMove(item, preResult, cpLoss);
     } catch (err) {
       console.warn('[SilentEval] Error processing queue item:', err);
     }
   }
 
   silentEvalProcessing = false;
+}
+
+/** Shared: apply deep eval classification to a contLine move. */
+function applySilentEvalToMove(item, preResult, cpLoss) {
+  if (!contLine || !contLine.moves[item.moveIdx]) return;
+  const bestCp = preResult.pvs[0]?.cp ?? 0;
+  const bestMoveSan = uciToSan(item.preFen, preResult.bestMove || '');
+  const wpBefore = cpToWinPct(bestCp);
+  const wpAfter = cpToWinPct(bestCp - cpLoss);
+  const wpDrop = wpBefore - wpAfter;
+  const isLiteralBest = preResult.bestMove === item.userUci;
+  const isExactBest = isLiteralBest || wpDrop < 0.5;
+  const baseClass = classifyWpDrop(wpDrop, isExactBest);
+  const pv2Cp = preResult.pvs[1]?.cp ?? null;
+  const classification = classifyWithContext(baseClass, bestCp, pv2Cp, wpDrop);
+
+  const mv = contLine.moves[item.moveIdx];
+  mv.classification = classification;
+  mv.wpDrop = Math.round(wpDrop * 10) / 10;
+  mv.cpLoss = Math.round(cpLoss);
+  mv.bestMoveSan = bestMoveSan;
+  mv.bestMoveUci = preResult.bestMove || null;
+  mv.bestCp = bestCp;
+  mv.afterCp = bestCp - cpLoss;
+
+  // Retroactively classify preceding opponent move
+  if (item.moveIdx > 0) {
+    const prevMv = contLine.moves[item.moveIdx - 1];
+    if (prevMv && !prevMv.isUser && prevMv._prevUserAfterCp != null) {
+      const oppCpLoss = prevMv._prevUserAfterCp - bestCp;
+      const oppWpBefore = cpToWinPct(-prevMv._prevUserAfterCp);
+      const oppWpAfter = cpToWinPct(-bestCp);
+      const oppWpDrop = oppWpBefore - oppWpAfter;
+      prevMv.classification = classifyWpDrop(Math.max(0, oppWpDrop), oppWpDrop < 0.5);
+      prevMv.wpDrop = Math.round(Math.max(0, oppWpDrop) * 10) / 10;
+      prevMv.cpLoss = Math.round(Math.max(0, oppCpLoss));
+    }
+  }
+  renderContLine();
+}
+
+/** Main worker helps with eval queue when idle (after pre-analysis completes). */
+async function processQueueOnMainWorker() {
+  if (silentEvalMainProcessing || silentEvalQueue.length === 0) return;
+  silentEvalMainProcessing = true;
+
+  while (silentEvalQueue.length > 0 && sfReady && !sfSearchActive && contLine) {
+    const item = silentEvalQueue.shift();
+    if (!contLine || !contLine.moves[item.moveIdx]) continue;
+
+    try {
+      // Race sfAnalyze against worker termination (user plays → worker killed)
+      const preResult = await new Promise((resolve) => {
+        let done = false;
+        const cancel = setInterval(() => {
+          if (!sfReady || !contLine) {
+            clearInterval(cancel);
+            if (!done) { done = true; resolve(null); }
+          }
+        }, 200);
+        sfAnalyze(item.preFen, SILENT_EVAL_DEPTH, 3).then(r => {
+          clearInterval(cancel);
+          if (!done) { done = true; resolve(r); }
+        });
+      });
+
+      if (!preResult || !contLine || !contLine.moves[item.moveIdx]) break;
+
+      const bestCp = preResult.pvs[0]?.cp ?? 0;
+      const matchedPv = preResult.pvs.find(pv => pv.firstMove === item.userUci);
+
+      if (matchedPv) {
+        // Fast path: user's move in PVs
+        applySilentEvalToMove(item, preResult, bestCp - matchedPv.cp);
+      } else {
+        // Slow path: analyze post-move position on main worker too
+        const postResult = await new Promise((resolve) => {
+          let done = false;
+          const cancel = setInterval(() => {
+            if (!sfReady || !contLine) {
+              clearInterval(cancel);
+              if (!done) { done = true; resolve(null); }
+            }
+          }, 200);
+          sfAnalyze(item.postFen, SILENT_EVAL_DEPTH, 1).then(r => {
+            clearInterval(cancel);
+            if (!done) { done = true; resolve(r); }
+          });
+        });
+        if (!postResult || !contLine || !contLine.moves[item.moveIdx]) break;
+        const afterCp = -(postResult.pvs[0]?.cp ?? 0);
+        applySilentEvalToMove(item, preResult, bestCp - afterCp);
+      }
+    } catch (err) {
+      console.warn('[SilentEval-Main] Error:', err);
+      break;
+    }
+  }
+
+  silentEvalMainProcessing = false;
 }
 
 function sfAnalyze(fen, depth = 16, multiPv = 1) {
@@ -3378,6 +3442,8 @@ function launchPreAnalysisSearch(fen, session) {
             preAnalysis.pvs.map(pv => ({ cp: pv.cp, move: pv.move, san: pv.san, uciLine: pv.uciLine })),
             3);
         }
+        // Main worker is now idle — help with eval queue if items are pending
+        if (silentEvalQueue.length > 0) processQueueOnMainWorker();
       } else {
         sfLog('startPreAnalysis', `session=${session} bestmove arrived but session is stale (current=${preAnalysisSession}), DISCARDING`);
       }
@@ -6111,6 +6177,7 @@ function loadPosition(globalIdx) {
   lastContUserAfterCp = null;
   silentEvalQueue = [];
   silentEvalProcessing = false;
+  silentEvalMainProcessing = false;
   if (evalSfSearchActive && evalSfWorker) {
     evalSfWorker.terminate();
     evalSfWorker = null;
@@ -8759,10 +8826,15 @@ function updateReviewGraphCursor(moveIdx) {
 
 async function startContLineReview() {
   // Wait for background eval queue to finish
-  if (silentEvalProcessing || silentEvalQueue.length > 0) {
+  if (silentEvalProcessing || silentEvalMainProcessing || silentEvalQueue.length > 0) {
     window._skipEvalQueueWait = false;
+    // Start both workers processing the queue in parallel
+    if (silentEvalQueue.length > 0) {
+      if (!silentEvalProcessing) processSilentEvalQueue();
+      if (!silentEvalMainProcessing && sfReady && !sfSearchActive) processQueueOnMainWorker();
+    }
     const container = document.getElementById('feedbackContainer');
-    const remaining0 = silentEvalQueue.length + (silentEvalProcessing ? 1 : 0);
+    const remaining0 = silentEvalQueue.length + (silentEvalProcessing ? 1 : 0) + (silentEvalMainProcessing ? 1 : 0);
     container.innerHTML = `
       <div class="feedback-box" style="background:var(--bg-card);border-left:3px solid var(--accent);">
         <div class="feedback-title" style="color:var(--accent)">📋 Finalizing analysis…</div>
@@ -8777,11 +8849,12 @@ async function startContLineReview() {
     `;
     await new Promise(resolve => {
       const poll = setInterval(() => {
-        if (window._skipEvalQueueWait || (!silentEvalProcessing && silentEvalQueue.length === 0)) {
+        const done = !silentEvalProcessing && !silentEvalMainProcessing && silentEvalQueue.length === 0;
+        if (window._skipEvalQueueWait || done) {
           clearInterval(poll);
           resolve();
         } else {
-          const remaining = silentEvalQueue.length + (silentEvalProcessing ? 1 : 0);
+          const remaining = silentEvalQueue.length + (silentEvalProcessing ? 1 : 0) + (silentEvalMainProcessing ? 1 : 0);
           const countEl = document.getElementById('evalQueueCount');
           if (countEl) countEl.textContent = `${remaining} move${remaining !== 1 ? 's' : ''} remaining`;
         }
