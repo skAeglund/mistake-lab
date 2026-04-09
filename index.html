@@ -4320,14 +4320,14 @@ function updateAnalysisPvArrows() {
     if (i > 0 && gap > MAX_GAP) continue;
 
     if (i === 0) {
-      // Best move: oversized arrow
-      arrows.push({ from, to, opacity: 1.0, scale: 1.25 });
+      // Best move: oversized teal arrow
+      arrows.push({ from, to, opacity: 0.8, scale: 1.25, color: 'rgb(0, 180, 164)' });
     } else {
-      // Alternatives: lerp down aggressively
+      // Alternatives: green, lerp down aggressively
       const t = Math.min(gap / MAX_GAP, 1);
-      const opacity = 0.7 - t * 0.55;  // 0.7 → 0.15
-      const scale = 0.75 - t * 0.35;   // 0.75 → 0.4
-      arrows.push({ from, to, opacity, scale });
+      const opacity = 0.55 - t * 0.43;  // 0.55 → 0.12
+      const scale = 0.75 - t * 0.35;    // 0.75 → 0.4
+      arrows.push({ from, to, opacity, scale, color: 'rgb(21, 120, 27)' });
     }
   }
   analysisPvArrows = arrows;
@@ -4340,7 +4340,8 @@ function analysisPvHover(pvIdx) {
   // Show only the hovered arrow at full size
   const from = pv.move.substring(0, 2);
   const to = pv.move.substring(2, 4);
-  analysisPvArrows = [{ from, to, opacity: 1.0, scale: 1.0 }];
+  const color = pvIdx === 0 ? 'rgb(0, 180, 164)' : 'rgb(21, 120, 27)';
+  analysisPvArrows = [{ from, to, opacity: 0.8, scale: 1.0, color }];
   renderArrows();
 }
 
@@ -10917,7 +10918,7 @@ function renderArrows() {
     if (analysisPvArrows.length > 0) {
       for (let i = analysisPvArrows.length - 1; i >= 0; i--) {
         const a = analysisPvArrows[i];
-        drawOne(a.from, a.to, 'rgba(62, 207, 142, 0.85)', a.opacity, a.scale);
+        drawOne(a.from, a.to, a.color, a.opacity, a.scale);
       }
     } else if (bestMoveArrow) {
       drawOne(bestMoveArrow.from, bestMoveArrow.to, 'rgba(62, 207, 142, 0.7)', 1);
