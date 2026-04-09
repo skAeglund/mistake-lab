@@ -1204,7 +1204,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hide Evaluating feedback in silent continuation</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix: eval queue timeouts (10s per analysis, 15s review wait)</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3007,11 +3007,12 @@ async function processQueueOnMainWorker() {
     if (!contLine || !contLine.moves[item.moveIdx]) continue;
 
     try {
-      // Race sfAnalyze against worker termination (user plays → worker killed)
+      // Race sfAnalyze against worker termination or 10s timeout
       const preResult = await new Promise((resolve) => {
         let done = false;
+        const startTime = Date.now();
         const cancel = setInterval(() => {
-          if (!sfReady || !contLine) {
+          if (!sfReady || !contLine || Date.now() - startTime > 10000) {
             clearInterval(cancel);
             if (!done) { done = true; resolve(null); }
           }
@@ -3028,14 +3029,14 @@ async function processQueueOnMainWorker() {
       const matchedPv = preResult.pvs.find(pv => pv.firstMove === item.userUci);
 
       if (matchedPv) {
-        // Fast path: user's move in PVs
         applySilentEvalToMove(item, preResult, bestCp - matchedPv.cp);
       } else {
         // Slow path: analyze post-move position on main worker too
         const postResult = await new Promise((resolve) => {
           let done = false;
+          const startTime = Date.now();
           const cancel = setInterval(() => {
-            if (!sfReady || !contLine) {
+            if (!sfReady || !contLine || Date.now() - startTime > 10000) {
               clearInterval(cancel);
               if (!done) { done = true; resolve(null); }
             }
@@ -8850,10 +8851,13 @@ async function startContLineReview() {
       </div>
     `;
     await new Promise(resolve => {
+      const waitStart = Date.now();
       const poll = setInterval(() => {
         const done = !silentEvalProcessing && !silentEvalMainProcessing && silentEvalQueue.length === 0;
-        if (window._skipEvalQueueWait || done) {
+        const timedOut = Date.now() - waitStart > 15000;
+        if (window._skipEvalQueueWait || done || timedOut) {
           clearInterval(poll);
+          if (timedOut) console.warn('[Review] Queue wait timed out after 15s, proceeding with available data');
           resolve();
         } else {
           const remaining = silentEvalQueue.length + (silentEvalProcessing ? 1 : 0) + (silentEvalMainProcessing ? 1 : 0);
