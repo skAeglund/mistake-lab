@@ -1204,7 +1204,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix: eval queue timeouts (10s per analysis, 15s review wait)</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Review: Show refutation button for mistake punishment lines</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -8981,6 +8981,7 @@ function showReviewKeyMoveInfo(moveIdx) {
           <button class="btn btn-primary btn-sm" style="font-size:11px;" onclick="startReviewRetry(${moveIdx})">↺ Retry</button>
           ${mv.bestMoveUci ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewBestArrow(${moveIdx})">Show best</button>` : ''}
           ${mv.bestMoveUci ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewBestLine(${moveIdx})">Show line</button>` : ''}
+          <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewRefutation(${moveIdx})">Show refutation</button>
         </div>
         ${navHtml}
       </div>
@@ -9152,6 +9153,120 @@ function exitReviewBestLine(moveIdx) {
   window._reviewBestLine = null;
   goToContLineMove(moveIdx);
   showReviewKeyMoveInfo(moveIdx);
+}
+
+async function showReviewRefutation(moveIdx) {
+  if (!contLine || !contLine.moves[moveIdx]) return;
+  const mv = contLine.moves[moveIdx];
+  const postFen = mv.fen; // position after the bad move
+
+  // Show loading
+  const container = document.getElementById('feedbackContainer');
+  container.innerHTML = `
+    <div class="feedback-box" style="background:var(--bg-card);border-left:3px solid #ef5f5f;">
+      <div class="feedback-title" style="color:#ef5f5f">Analyzing refutation…</div>
+      <div class="feedback-text"><div class="spinner" style="margin:8px 0"></div></div>
+    </div>
+  `;
+
+  // Navigate to the position after the bad move
+  goToContLineMove(moveIdx);
+
+  // Analyze: opponent's best response to the bad move
+  const result = await sfAnalyze(postFen, 20, 1);
+  if (!result || !result.pvs || !result.pvs[0]) {
+    showReviewKeyMoveInfo(moveIdx);
+    return;
+  }
+
+  const pv = result.pvs[0];
+  const pvMoves = (pv.moves || '').trim().split(/\s+/).filter(Boolean);
+  if (pvMoves.length === 0) {
+    showReviewKeyMoveInfo(moveIdx);
+    return;
+  }
+
+  // Build the refutation line
+  const chess = new Chess(postFen);
+  const lineMoves = [];
+  const fenParts = postFen.split(' ');
+  let isWhite = fenParts[1] === 'w';
+
+  for (const uci of pvMoves.slice(0, 10)) {
+    const from = uci.substring(0, 2);
+    const to = uci.substring(2, 4);
+    const promo = uci.length > 4 ? uci[4] : undefined;
+    const m = chess.move({ from, to, promotion: promo });
+    if (!m) break;
+    lineMoves.push({ san: m.san, uci, fen: chess.fen(), isWhite });
+    if (!isWhite) isWhite = true; else isWhite = false;
+  }
+
+  if (lineMoves.length === 0) {
+    showReviewKeyMoveInfo(moveIdx);
+    return;
+  }
+
+  // Play opponent's first response on the board
+  const firstMove = lineMoves[0];
+  gameEngine.load(postFen);
+  const fm = gameEngine.move({ from: firstMove.uci.substring(0, 2), to: firstMove.uci.substring(2, 4), promotion: firstMove.uci.length > 4 ? firstMove.uci[4] : undefined });
+  if (fm) {
+    boardObj.position(gameEngine.fen(), true);
+    showLastMoveHighlightDeferred(firstMove.uci.substring(0, 2), firstMove.uci.substring(2, 4));
+  }
+  bestMoveArrow = null;
+  moveClassBadge = null;
+  renderArrows();
+
+  // Build move list HTML — include user's bad move as context
+  const preFenParts = postFen.split(' ');
+  let mn = parseInt(preFenParts[5]) || 1;
+  let wt = preFenParts[1] === 'w';
+
+  // Start with user's bad move for context
+  let movesHtml = '';
+  const badMoveNum = mv.fen ? parseInt(mv.fen.split(' ')[5]) || mn : mn;
+  const preMoveWhite = postFen.split(' ')[1] !== 'w'; // user moved before this FEN
+  if (preMoveWhite) {
+    movesHtml += `<span class="move-num">${badMoveNum > 1 ? badMoveNum - 1 : badMoveNum}.</span>`;
+  } else {
+    movesHtml += `<span class="move-num">${badMoveNum}…</span>`;
+  }
+  const cls = MOVE_CLASSIFICATION[mv.classification] || {};
+  const sym = mv.classification === 'good' ? '✓' : (mv.classification === 'best' ? '★' : cls.symbol || '');
+  movesHtml += `<span class="move" style="color:${cls.color || 'var(--text-muted)'}">${escHtml(mv.san)}${sym ? `<span class="move-class" style="color:${cls.color}">${sym}</span>` : ''}</span> `;
+
+  // Then the refutation line
+  for (let i = 0; i < lineMoves.length; i++) {
+    const lm = lineMoves[i];
+    const activeClass = i === 0 ? ' active' : '';
+    if (wt) {
+      movesHtml += `<span class="move-num">${mn}.</span>`;
+    } else if (i === 0 && !wt) {
+      movesHtml += `<span class="move-num">${mn}…</span>`;
+    }
+    movesHtml += `<span class="move${activeClass}" onclick="goToReviewLine(${moveIdx},${i})">${escHtml(lm.san)}</span> `;
+    if (!wt) mn++;
+    wt = !wt;
+  }
+
+  // Store for navigation (reuse same system as best line)
+  window._reviewBestLine = { moveIdx, lineMoves, preFen: postFen, currentIdx: 0 };
+
+  container.innerHTML = `
+    <div class="feedback-box" style="background:rgba(239,95,95,0.06);border-left:3px solid #ef5f5f;">
+      <div class="feedback-title" style="color:#ef5f5f">Refutation of <code>${escHtml(mv.san)}</code></div>
+      <div class="feedback-text">
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">How the opponent punishes this move</div>
+        <div class="engine-line-moves" style="margin:6px 0;">${movesHtml}</div>
+        <div style="font-size:11px;color:var(--text-muted);">← → to step through</div>
+        <div style="margin-top:8px;">
+          <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="exitReviewBestLine(${moveIdx})">← Back to review</button>
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 function startReviewRetry(moveIdx) {
