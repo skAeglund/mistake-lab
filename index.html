@@ -1288,7 +1288,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Analysis mode: use current board position, not start position</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Analysis mode: multi-PV arrows with lerped opacity and scale</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3936,6 +3936,7 @@ let analysisTree = null;         // Root node
 let analysisTreeCurrent = null;  // Current node
 let analysisSavedState = null;   // Saved review-mode state for restoration
 let analysisOrientation = 'white';
+let analysisPvArrows = [];       // [{from, to, opacity, scale}] — multi-PV arrows
 
 function makeTreeNode(fen, san, uci, parent) {
   const id = ++analysisNodeId;
@@ -4161,11 +4162,6 @@ function startAnalysisSearch(fen) {
             });
           renderAnalysisPvs();
           updateAnalysisDepthTag();
-          // Draw best move arrow
-          if (analysisPvs[0]?.move) {
-            bestMoveArrow = { from: analysisPvs[0].move.substring(0, 2), to: analysisPvs[0].move.substring(2, 4) };
-            renderArrows();
-          }
         }
       }
 
@@ -4252,6 +4248,8 @@ function renderAnalysisPvs() {
     </div>`;
   }
   container.innerHTML = html;
+  updateAnalysisPvArrows();
+  renderArrows();
   updateEvalBar();
 }
 
@@ -4296,20 +4294,52 @@ function uciLineToSansHtml(baseFen, uciLine, pvIndex) {
   return html;
 }
 
+/** Compute multi-PV arrows with lerped opacity/scale based on eval gap */
+function updateAnalysisPvArrows() {
+  if (!analysisMode || analysisPvs.length === 0) {
+    analysisPvArrows = [];
+    bestMoveArrow = null;
+    return;
+  }
+  bestMoveArrow = null; // replaced by analysisPvArrows
+  const MAX_GAP = 300; // cp — beyond this, don't show arrow
+  const bestCp = analysisPvs[0].cp;
+  const arrows = [];
+  const seen = new Set(); // deduplicate same-square arrows
+
+  for (let i = 0; i < analysisPvs.length; i++) {
+    const pv = analysisPvs[i];
+    if (!pv?.move) continue;
+    const from = pv.move.substring(0, 2);
+    const to = pv.move.substring(2, 4);
+    const key = from + to;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const gap = Math.abs(bestCp - pv.cp);
+    if (i > 0 && gap > MAX_GAP) continue;
+
+    const t = Math.min(gap / MAX_GAP, 1); // 0 = equal to best, 1 = at threshold
+    const opacity = 1.0 - t * 0.8;   // 1.0 → 0.2
+    const scale = 1.0 - t * 0.5;     // 1.0 → 0.5
+    arrows.push({ from, to, opacity, scale });
+  }
+  analysisPvArrows = arrows;
+}
+
 function analysisPvHover(pvIdx) {
   if (pvIdx < 0 || pvIdx >= analysisPvs.length) return;
   const pv = analysisPvs[pvIdx];
   if (!pv?.move) return;
-  bestMoveArrow = { from: pv.move.substring(0, 2), to: pv.move.substring(2, 4) };
+  // Show only the hovered arrow at full size
+  const from = pv.move.substring(0, 2);
+  const to = pv.move.substring(2, 4);
+  analysisPvArrows = [{ from, to, opacity: 1.0, scale: 1.0 }];
   renderArrows();
 }
 
 function analysisPvLeave() {
-  if (analysisPvs[0]?.move) {
-    bestMoveArrow = { from: analysisPvs[0].move.substring(0, 2), to: analysisPvs[0].move.substring(2, 4) };
-  } else {
-    bestMoveArrow = null;
-  }
+  updateAnalysisPvArrows();
   renderArrows();
 }
 
@@ -10767,6 +10797,7 @@ function clearArrows() {
   moveClassBadge = null;
   noteArrows = [];
   noteCircles = [];
+  analysisPvArrows = [];
   renderArrows();
 }
 
@@ -10775,7 +10806,7 @@ function renderArrows() {
     const boardEl = document.querySelector('#board [class^="board-"]');
     if (!boardEl) return;
 
-    const hasSomething = activeArrows.size > 0 || activeCircles.size > 0 || ghostCircle || ghostArrow || bestMoveArrow || analysisArrow || hintArrow || filterArrows.length > 0 || noteArrows.length > 0 || noteCircles.length > 0 || moveClassBadge;
+    const hasSomething = activeArrows.size > 0 || activeCircles.size > 0 || ghostCircle || ghostArrow || bestMoveArrow || analysisArrow || hintArrow || filterArrows.length > 0 || noteArrows.length > 0 || noteCircles.length > 0 || moveClassBadge || analysisPvArrows.length > 0;
     svg.classList.toggle('hidden', !hasSomething);
     if (!hasSomething) { svg.innerHTML = ''; return; }
 
@@ -10805,27 +10836,31 @@ function renderArrows() {
     const headWidth = shaftWidth * 3.5;
     const headLength = headWidth * 0.75;
 
-    const drawOne = (from, to, color, opacity) => {
+    const drawOne = (from, to, color, opacity, scale) => {
       const start = sqCenter(from);
       const end = sqCenter(to);
       if (!start || !end) return;
+      const s = scale || 1;
+      const sw = shaftWidth * s;
+      const hw = headWidth * s;
+      const hl = headLength * s;
       const angle = Math.atan2(end.y - start.y, end.x - start.x);
 
       // Tiny overlap to prevent transparent gap between shaft and head
       const overlap = 0.1;
-      const shaftEndX = end.x - (headLength - overlap) * Math.cos(angle);
-      const shaftEndY = end.y - (headLength - overlap) * Math.sin(angle);
+      const shaftEndX = end.x - (hl - overlap) * Math.cos(angle);
+      const shaftEndY = end.y - (hl - overlap) * Math.sin(angle);
 
       const p1x = end.x, p1y = end.y;
-      const p2x = end.x - headLength * Math.cos(angle) + (headWidth / 2) * Math.sin(angle);
-      const p2y = end.y - headLength * Math.sin(angle) - (headWidth / 2) * Math.cos(angle);
-      const p3x = end.x - headLength * Math.cos(angle) - (headWidth / 2) * Math.sin(angle);
-      const p3y = end.y - headLength * Math.sin(angle) + (headWidth / 2) * Math.cos(angle);
+      const p2x = end.x - hl * Math.cos(angle) + (hw / 2) * Math.sin(angle);
+      const p2y = end.y - hl * Math.sin(angle) - (hw / 2) * Math.cos(angle);
+      const p3x = end.x - hl * Math.cos(angle) - (hw / 2) * Math.sin(angle);
+      const p3y = end.y - hl * Math.sin(angle) + (hw / 2) * Math.cos(angle);
 
       html += `
         <g opacity="${opacity}">
           <line x1="${start.x}" y1="${start.y}" x2="${shaftEndX}" y2="${shaftEndY}"
-                stroke="${color}" stroke-width="${shaftWidth}" stroke-linecap="butt" />
+                stroke="${color}" stroke-width="${sw}" stroke-linecap="butt" />
           <polygon points="${p1x},${p1y} ${p2x},${p2y} ${p3x},${p3y}" fill="${color}" />
         </g>`;
     };
@@ -10840,7 +10875,15 @@ function renderArrows() {
     if (hoverFilterArrow) drawOne(hoverFilterArrow.from, hoverFilterArrow.to, 'rgba(66, 133, 244, 0.8)', 1);
     // Best move arrow first (behind user arrows)
     if (analysisArrow) drawOne(analysisArrow.from, analysisArrow.to, 'rgba(100, 160, 255, 0.5)', 1);
-    if (bestMoveArrow) drawOne(bestMoveArrow.from, bestMoveArrow.to, 'rgba(62, 207, 142, 0.7)', 1);
+    // Analysis mode: multi-PV arrows (draw weaker ones first so strongest is on top)
+    if (analysisPvArrows.length > 0) {
+      for (let i = analysisPvArrows.length - 1; i >= 0; i--) {
+        const a = analysisPvArrows[i];
+        drawOne(a.from, a.to, 'rgba(62, 207, 142, 0.85)', a.opacity, a.scale);
+      }
+    } else if (bestMoveArrow) {
+      drawOne(bestMoveArrow.from, bestMoveArrow.to, 'rgba(62, 207, 142, 0.7)', 1);
+    }
     // Note arrows (semi-transparent, behind hint/user arrows)
     for (const na of noteArrows) {
       const c = DRAW_COLOR_MAP[na.color] || DRAW_COLOR_MAP.green;
