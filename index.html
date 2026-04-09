@@ -1460,6 +1460,8 @@
         <div class="analysis-tree-moves" id="analysisTreeMoves"></div>
       </div>
       <div class="analysis-controls">
+        <button class="btn btn-ghost btn-sm" onclick="analysisLineStep(-1)">‹</button>
+        <button class="btn btn-ghost btn-sm" onclick="analysisLineStep(1)">›</button>
         <button class="btn btn-ghost btn-sm" onclick="exitAnalysisMode()" style="border-color:var(--red);color:var(--red)">✕ Exit</button>
         <span class="hint">← → navigate · make moves to explore</span>
       </div>
@@ -4061,6 +4063,7 @@ function exitAnalysisMode() {
   analysisNodes = {};
   analysisSavedState = null;
   updateEvalBar();
+  updateLineNavBar();
 }
 
 function openLichessAnalysisFromMode() {
@@ -4514,6 +4517,7 @@ function renderAnalysisTree() {
   // Scroll active move into view
   const active = container.querySelector('.active');
   if (active) active.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  updateLineNavBar();
 }
 
 function analysisGoToNode(nodeId) {
@@ -9302,7 +9306,8 @@ function contLineGoToEnd() {
 
 // ─── Mobile line nav bar ───
 function lineNavStep(delta) {
-  if (window._reviewBestLine) stepReviewBestLine(delta);
+  if (analysisMode) analysisLineStep(delta);
+  else if (window._reviewBestLine) stepReviewBestLine(delta);
   else if (engineLine) lineStep(delta);
   else if (tacticLine) tacticLineStep(delta);
   else if (contLine) contLineStep(delta);
@@ -9311,7 +9316,8 @@ function lineNavStep(delta) {
 function updateLineNavBar() {
   const bar = document.getElementById('lineNavBar');
   if (!bar) return;
-  const active = !!(engineLine || tacticLine || contLine);
+  const hasAnalysisMoves = analysisMode && analysisTreeCurrent && analysisTreeCurrent !== analysisTree;
+  const active = !!(engineLine || tacticLine || contLine || hasAnalysisMoves);
   bar.classList.toggle('visible', active);
   document.body.classList.toggle('line-nav-active', active);
   document.body.classList.toggle('cont-info-merged', !!(contLineSubtitle && contLine));
