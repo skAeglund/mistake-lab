@@ -1204,7 +1204,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Parallel eval queue: both workers process during review wait</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hide Evaluating feedback in silent continuation</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -7164,12 +7164,14 @@ async function evaluateMove(from, to, move) {
     }
   }
 
-  // Show loading
+  // Show loading (hidden in silent mode — no feedback during game-like play)
   const loadingId = 'eval-loading-' + Date.now();
-  container.innerHTML = `<div id="${loadingId}" class="feedback-box info">
-    <div class="feedback-title">Evaluating…</div>
-    <div class="feedback-text"><div class="spinner" style="margin:8px 0"></div></div>
-  </div>` + container.innerHTML;
+  if (!silentContinuation) {
+    container.innerHTML = `<div id="${loadingId}" class="feedback-box info">
+      <div class="feedback-title">Evaluating…</div>
+      <div class="feedback-text"><div class="spinner" style="margin:8px 0"></div></div>
+    </div>` + container.innerHTML;
+  }
 
   try {
     let bestCp, bestMoveUci, bestMoveSan;
