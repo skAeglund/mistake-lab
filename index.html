@@ -3940,7 +3940,7 @@ let analysisPvArrows = [];       // [{from, to, opacity, scale}] — multi-PV ar
 
 function makeTreeNode(fen, san, uci, parent) {
   const id = ++analysisNodeId;
-  const node = { id, fen, san, uci, parent, children: [] };
+  const node = { id, fen, san, uci, parent, children: [], cachedPvs: null, cachedDepth: 0 };
   analysisNodes[id] = node;
   return node;
 }
@@ -4090,7 +4090,14 @@ function startAnalysisSearch(fen) {
   analysisDepth = 0;
   analysisComplete = false;
   const session = ++analysisSession;
-  renderAnalysisPvs(); // show "analyzing" state
+
+  // Seed from tree node cache for instant display on navigation
+  if (analysisTreeCurrent && analysisTreeCurrent.fen === fen && analysisTreeCurrent.cachedPvs) {
+    analysisPvs = analysisTreeCurrent.cachedPvs.map(p => ({...p}));
+    analysisDepth = analysisTreeCurrent.cachedDepth;
+  }
+
+  renderAnalysisPvs(); // show cached data or "analyzing" state
 
   // Check eval cache first
   const cachedEval = evalCacheGet(fen, EVAL_CACHE_MIN_DEPTH, 1);
@@ -4162,6 +4169,11 @@ function startAnalysisSearch(fen) {
             });
           renderAnalysisPvs();
           updateAnalysisDepthTag();
+          // Cache on the current tree node for instant restore on navigation
+          if (analysisTreeCurrent && analysisTreeCurrent.fen === fen) {
+            analysisTreeCurrent.cachedPvs = analysisPvs.map(p => ({...p}));
+            analysisTreeCurrent.cachedDepth = analysisDepth;
+          }
         }
       }
 
