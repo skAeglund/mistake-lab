@@ -1288,7 +1288,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Analysis mode: multi-PV arrows with lerped opacity and scale</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Analysis mode: fix click-to-move and move routing via analysisEngine</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -6589,6 +6589,28 @@ function onBoardClick(e) {
       clearSelection();
     } else {
       if (piece && piece.color === turn) selectSquare(sq);
+    }
+    return;
+  }
+
+  // Analysis mode — handle click-to-move via analysisEngine
+  if (analysisMode && analysisEngine) {
+    const squareEl = e.target.closest('[data-square]');
+    if (!squareEl) return;
+    const sq = squareEl.getAttribute('data-square');
+    if (!sq) return;
+    const turn = analysisEngine.turn();
+    const piece = analysisEngine.get(sq);
+    if (selectedSquare) {
+      if (sq === selectedSquare) { deselectionPending = true; return; }
+      if (piece && piece.color === turn) { clearSelection(); selectSquare(sq, analysisEngine); return; }
+      e.stopPropagation(); e.preventDefault();
+      const fromSq = selectedSquare;
+      clearSelection();
+      const result = analysisOnDrop(fromSq, sq);
+      if (result !== 'snapback' && analysisEngine) boardObj.position(analysisEngine.fen(), false);
+    } else {
+      if (piece && piece.color === turn) selectSquare(sq, analysisEngine);
     }
     return;
   }
