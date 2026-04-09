@@ -1288,7 +1288,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Analysis mode: fix click-to-move and move routing via analysisEngine</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Analysis: preserve PV arrows on click, exaggerate size differences</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -4302,7 +4302,7 @@ function updateAnalysisPvArrows() {
     return;
   }
   bestMoveArrow = null; // replaced by analysisPvArrows
-  const MAX_GAP = 300; // cp — beyond this, don't show arrow
+  const MAX_GAP = 250; // cp — beyond this, don't show arrow
   const bestCp = analysisPvs[0].cp;
   const arrows = [];
   const seen = new Set(); // deduplicate same-square arrows
@@ -4319,10 +4319,16 @@ function updateAnalysisPvArrows() {
     const gap = Math.abs(bestCp - pv.cp);
     if (i > 0 && gap > MAX_GAP) continue;
 
-    const t = Math.min(gap / MAX_GAP, 1); // 0 = equal to best, 1 = at threshold
-    const opacity = 1.0 - t * 0.8;   // 1.0 → 0.2
-    const scale = 1.0 - t * 0.5;     // 1.0 → 0.5
-    arrows.push({ from, to, opacity, scale });
+    if (i === 0) {
+      // Best move: oversized arrow
+      arrows.push({ from, to, opacity: 1.0, scale: 1.25 });
+    } else {
+      // Alternatives: lerp down aggressively
+      const t = Math.min(gap / MAX_GAP, 1);
+      const opacity = 0.7 - t * 0.55;  // 0.7 → 0.15
+      const scale = 0.75 - t * 0.35;   // 0.75 → 0.4
+      arrows.push({ from, to, opacity, scale });
+    }
   }
   analysisPvArrows = arrows;
 }
@@ -6548,7 +6554,17 @@ function onBoardClick(e) {
 
   // Left click / tap clears arrows
   if (!isRightClicking) {
-    clearArrows();
+    if (analysisMode) {
+      // Only clear user-drawn annotations, preserve PV arrows
+      activeArrows.clear();
+      activeCircles.clear();
+      ghostArrow = null;
+      ghostCircle = null;
+      ghostCircleWasColor = null;
+      renderArrows();
+    } else {
+      clearArrows();
+    }
   }
   
   // Right click starts drawing 
