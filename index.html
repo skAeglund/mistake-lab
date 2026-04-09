@@ -1204,7 +1204,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Silent eval queue: deep re-evaluation on eval worker</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Game review: interactive graph, best line, Great/Miss, instant feedback setting, eval queue, bug fixes</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1424,6 +1424,19 @@
     <input type="text" id="settingsGistId" placeholder="Auto-created if empty">
     <div class="hint">The ID from your Gist URL. Leave empty to create a new one.</div>
     <div id="settingsMsg" style="font-size:12px;margin-top:12px;min-height:18px;"></div>
+    <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
+      <label style="font-size:13px;font-weight:600;color:var(--text-primary);margin-top:0;margin-bottom:2px;">Training</label>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin:8px 0 0;">
+        <div>
+          <span style="font-size:13px;">Instant Feedback</span>
+          <div class="hint" style="margin-top:2px;">Show move quality after each move in continuation practice. Turn off for a game-like experience with post-game review.</div>
+        </div>
+        <label class="toggle-switch" style="flex-shrink:0;margin-left:12px;">
+          <input type="checkbox" id="settingsInstantFeedback">
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+    </div>
     <div id="mobileDepthSetting" style="display:none;margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
       <label style="font-size:13px;font-weight:600;color:var(--text-primary);margin-top:0;margin-bottom:2px;">Engine</label>
       <label style="margin-top:8px;">Search Depth Offset</label>
@@ -1534,6 +1547,7 @@ let evalSfCurrentFen = null;     // FEN being analyzed (for phase 2 continuity)
 const EVAL_WORKER_PHASE1_DEPTH = 16;
 const EVAL_WORKER_PHASE2_DEPTH = 30;
 const SILENT_EVAL_DEPTH = 22;        // depth for background re-evaluation of silent cont moves
+const SILENT_REVIEW_MIN_MOVES = 5;   // user moves before "Stop & Review" appears in silent continuation
 let silentEvalQueue = [];             // [{moveIdx, preFen, postFen, userUci}] pending deep evals
 let silentEvalProcessing = false;     // true while processSilentEvalQueue is running
 let hintLevel = 0;               // 0=no hint, 1=piece shown, 2=full move shown
@@ -1570,12 +1584,14 @@ let lastContUserAfterCp = null;         // afterCpPlayer of last user move — u
 
 // Move classification thresholds and display data
 const MOVE_CLASSIFICATION = {
-  best:       { symbol: '★',  label: 'Best',       color: '#62cf8e' },
-  excellent:  { symbol: '!',  label: 'Excellent',   color: '#96c84a' },
-  good:       { symbol: '✓',  label: 'Good',        color: '#96bc4b' },
-  inaccuracy: { symbol: '?!', label: 'Inaccuracy',  color: '#e8a62d' },
-  mistake:    { symbol: '?',  label: 'Mistake',     color: '#e07a3a' },
-  blunder:    { symbol: '??', label: 'Blunder',     color: '#ef5f5f' },
+  great:      { symbol: '!',  label: 'Great',       color: '#5b9bd5' },
+  best:       { symbol: '★',  label: 'Best',        color: '#62cf8e' },
+  excellent:  { symbol: '!',  label: 'Excellent',    color: '#96c84a' },
+  good:       { symbol: '✓',  label: 'Good',         color: '#96bc4b' },
+  miss:       { symbol: '✕',  label: 'Miss',         color: '#e04040' },
+  inaccuracy: { symbol: '?!', label: 'Inaccuracy',   color: '#e8a62d' },
+  mistake:    { symbol: '?',  label: 'Mistake',      color: '#e07a3a' },
+  blunder:    { symbol: '??', label: 'Blunder',      color: '#ef5f5f' },
 };
 function classifyWpDrop(wpDrop, isExactBest) {
   if (isExactBest || wpDrop < 0.5) return 'best';
@@ -1584,6 +1600,35 @@ function classifyWpDrop(wpDrop, isExactBest) {
   if (wpDrop <= 10) return 'inaccuracy';
   if (wpDrop <= 15) return 'mistake';
   return 'blunder';
+}
+/**
+ * Upgrade a base classification using MultiPV context.
+ * @param {string} base - result of classifyWpDrop
+ * @param {number} bestCp - eval of PV1 (player perspective)
+ * @param {number|null} pv2Cp - eval of PV2 (player perspective), null if unavailable
+ * @param {number} wpDrop - win% drop of user's move
+ * @returns {string} upgraded classification
+ */
+function classifyWithContext(base, bestCp, pv2Cp, wpDrop) {
+  if (pv2Cp == null) return base;
+
+  const pv1Wp = cpToWinPct(bestCp);
+  const pv2Wp = cpToWinPct(pv2Cp);
+  const pvGap = pv1Wp - pv2Wp; // how much worse PV2 is than PV1
+
+  // Great Move: user played best/excellent, and it was the ONLY good option
+  // PV2 is ≥15% wp worse, and position wasn't already trivially won
+  if ((base === 'best' || base === 'excellent') && pvGap >= 15 && bestCp < 1000) {
+    return 'great';
+  }
+
+  // Miss: position was winning (bestCp ≥ 300), there was a clear best move
+  // (pvGap ≥ 10%), but user played something weaker (wpDrop > 5 = inaccuracy+)
+  if (wpDrop > 5 && bestCp >= 300 && pvGap >= 10) {
+    return 'miss';
+  }
+
+  return base;
 }
 
 let gameListDisplayLimit = 50;
@@ -1771,6 +1816,7 @@ let gistId = localStorage.getItem('mistakelab_gist_id') || '';
 let gistData = null; // { positions: { posId: { completed, ... } }, version: 1 }
 let airplaneMode = localStorage.getItem('airplaneMode') === 'true';
 let postProgressOnReturn = localStorage.getItem('postProgressOnReturn') !== 'false';
+let instantFeedback = localStorage.getItem('instantFeedback') !== 'false'; // default true
 let syncDebounceTimer = null;
 let appShown = false; // guard to prevent double showMainApp()
 const GIST_FILENAME = 'mistakelab_progress.json';
@@ -2415,6 +2461,13 @@ function openSettings() {
     postProgressOnReturn = this.checked;
     localStorage.setItem('postProgressOnReturn', postProgressOnReturn);
   };
+  // Instant Feedback toggle
+  const instantFeedbackToggle = document.getElementById('settingsInstantFeedback');
+  instantFeedbackToggle.checked = instantFeedback;
+  instantFeedbackToggle.onchange = function() {
+    instantFeedback = this.checked;
+    localStorage.setItem('instantFeedback', instantFeedback);
+  };
   // Show mobile depth offset setting only on mobile
   const depthSetting = document.getElementById('mobileDepthSetting');
   if (isMobileView()) {
@@ -2903,7 +2956,9 @@ async function processSilentEvalQueue() {
       const userUci = item.userUci;
       const isLiteralBest = preResult.bestMove === userUci;
       const isExactBest = isLiteralBest || wpDrop < 0.5;
-      const newClassification = classifyWpDrop(wpDrop, isExactBest);
+      const baseClass = classifyWpDrop(wpDrop, isExactBest);
+      const pv2Cp = preResult.pvs[1]?.cp ?? null;
+      const newClassification = classifyWithContext(baseClass, bestCp, pv2Cp, wpDrop);
 
       // Update the contLine move
       const mv = contLine.moves[item.moveIdx];
@@ -5682,6 +5737,12 @@ function onBoardClick(e) {
   
   // Right click starts drawing 
   else {
+    // Cancel any in-progress piece drag by resetting board position
+    if (boardObj) {
+      clearSelection();
+      onSnapEnd();
+    }
+
     const sq = getSquareFromMouseEvent(e);
     if (sq) {
       arrowStartSquare = sq;
@@ -5796,6 +5857,12 @@ function onBoardClick(e) {
         if (contLineReviewRetryIdx >= 0) {
           currentAttempts++;
           evaluateMove(move.from, move.to, move);
+          return;
+        }
+        // In review mode (not retrying) — block moves that would truncate contLine
+        if (contLineReviewMode) {
+          gameEngine.undo();
+          boardObj.position(gameEngine.fen(), false);
           return;
         }
 
@@ -6054,6 +6121,7 @@ function loadPosition(globalIdx) {
   contLineReviewKeyMoves = [];
   contLineReviewKeyIdx = -1;
   contLineReviewRetryIdx = -1;
+  window._reviewBestLine = null;
   hideMaiaControls();
   engineLine = null;
   browsingLine = false;
@@ -6295,6 +6363,10 @@ function onDrop(source, target) {
       currentAttempts++;
       evaluateMove(source, target, move);
       return;
+    }
+    // In review mode (not retrying) — block moves that would truncate contLine
+    if (contLineReviewMode) {
+      return 'snapback';
     }
 
     // Truncate line after the current browsed position
@@ -7207,7 +7279,10 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
     const userUci = from + to + (move.promotion || '');
     const isLiteralBest = move.san === bestMoveSan || (bestMoveUci && userUci === bestMoveUci);
     const isExactBest = isLiteralBest || wpDrop < 0.5;
-    const classification = classifyWpDrop(wpDrop, isExactBest);
+    const baseClass = classifyWpDrop(wpDrop, isExactBest);
+    // Get PV2 cp for context-aware classification (Great/Miss detection)
+    const pv2Cp = preAnalysis?.pvs?.[1]?.cp ?? null;
+    const classification = classifyWithContext(baseClass, bestCp, pv2Cp, wpDrop);
 
     // Retroactively annotate the opponent's previous move (if any)
     if (lastContUserAfterCp !== null && contLine.moves.length > 0) {
@@ -7469,7 +7544,7 @@ function srsTag(gradeLabel, card) {
 
 function bestMoveButton(revealId, bestMoveSan, bestMoveUci, m) {
   // Store reveal data on window so the onclick can access it
-  window['_rev_' + revealId] = { bestMoveSan, bestMoveUci, m };
+  window['_rev_' + revealId] = { bestMoveSan, bestMoveUci, m, solveFen: currentSolveFen };
   return `<div id="${revealId}" style="margin-top:6px;">` +
     `<button class="btn btn-ghost btn-sm" style="font-size:11px;" ` +
     `onclick="onRevealBestMove('${revealId}')">Show engine's best</button></div>`;
@@ -7478,15 +7553,16 @@ function bestMoveButton(revealId, bestMoveSan, bestMoveUci, m) {
 function onRevealBestMove(revealId) {
   const data = window['_rev_' + revealId];
   if (!data) return;
-  const { bestMoveSan, bestMoveUci, m } = data;
+  const { bestMoveSan, bestMoveUci, solveFen, m } = data;
+  const fen = solveFen || m.fenBefore; // use stored solve FEN, fall back to puzzle start
   const el = document.getElementById(revealId);
   if (el) {
     el.innerHTML = `<span style="font-size:12px;">Engine's top pick: <code>${escHtml(bestMoveSan)}</code></span>`;
   }
-  // Reset board to original puzzle position
+  // Reset board to the position where the best move applies
   exitEngineLine();
-  gameEngine = new Chess(m.fenBefore);
-  boardObj.position(m.fenBefore, false);
+  gameEngine = new Chess(fen);
+  boardObj.position(fen, false);
   if (bestMoveUci) {
     const fromSq = bestMoveUci.substring(0, 2);
     const toSq = bestMoveUci.substring(2, 4);
@@ -8196,9 +8272,9 @@ function renderContLine() {
       movesHtml += `<span class="move-num">${moveNum}…</span>`;
     }
 
-    // Classification badge (if annotated)
+    // Classification badge (if annotated — hidden during silent play)
     let classSymbol = '';
-    if (mv.classification && MOVE_CLASSIFICATION[mv.classification]) {
+    if (!silentContinuation && mv.classification && MOVE_CLASSIFICATION[mv.classification]) {
       const cls = MOVE_CLASSIFICATION[mv.classification];
       if (mv.classification !== 'good' && mv.classification !== 'best') {
         classSymbol = `<span class="move-class" style="color:${cls.color}" title="${cls.label} (${mv.wpDrop != null ? '−' + mv.wpDrop + '%' : ''})">${cls.symbol}</span>`;
@@ -8262,6 +8338,12 @@ function goToContLineMove(idx) {
     } else {
       moveClassBadge = null;
     }
+    // Show best move arrow when not in retry mode (arrow would spoil the puzzle)
+    if (contLineReviewRetryIdx < 0 && mv.bestMoveUci && mv.bestMoveUci.length >= 4) {
+      bestMoveArrow = { from: mv.bestMoveUci.substring(0, 2), to: mv.bestMoveUci.substring(2, 4) };
+    } else {
+      bestMoveArrow = null;
+    }
     renderArrows();
   } else {
     clearLastMoveHighlight();
@@ -8301,6 +8383,7 @@ function goToContLineMove(idx) {
   renderContLine();
   updateEvalBar();
   updateNoteButton();
+  updateReviewGraphCursor(idx);
 }
 
 function contLineStep(delta) {
@@ -8318,7 +8401,8 @@ function contLineGoToEnd() {
 
 // ─── Mobile line nav bar ───
 function lineNavStep(delta) {
-  if (engineLine) lineStep(delta);
+  if (window._reviewBestLine) stepReviewBestLine(delta);
+  else if (engineLine) lineStep(delta);
   else if (tacticLine) tacticLineStep(delta);
   else if (contLine) contLineStep(delta);
 }
@@ -8516,7 +8600,7 @@ function buildContLineReviewData() {
     if (tally[mv.classification] !== undefined) tally[mv.classification]++;
   }
   // Accuracy = % of user moves that are good or better
-  const goodOrBetter = (tally.best || 0) + (tally.excellent || 0) + (tally.good || 0);
+  const goodOrBetter = (tally.great || 0) + (tally.best || 0) + (tally.excellent || 0) + (tally.good || 0);
   const accuracy = userMoves.length > 0 ? Math.round((goodOrBetter / userMoves.length) * 100) : 100;
   // Key moves = user mistakes/blunders (wpDrop > 5)
   const keyMoves = [];
@@ -8549,9 +8633,34 @@ function buildContLineReviewData() {
   return { tally, accuracy, keyMoves, totalUserMoves: userMoves.length, evalPoints };
 }
 
+function stopAndReviewContinuation() {
+  if (!continuationMode && !silentContinuation) return;
+  continuationMode = false;
+  silentContinuation = false;
+  hideMaiaControls();
+  stopPreAnalysis();
+
+  document.getElementById('btnRetry').classList.remove('hidden');
+  document.getElementById('btnHint').classList.add('hidden');
+  clearHintHighlights();
+
+  const moveCount = contLine ? contLine.moves.filter(mv => mv.isUser).length : 0;
+  showColorFeedback('var(--accent)', 'rgba(66,133,244,0.08)',
+    'Continuation ended',
+    `${moveCount} moves played.` +
+    `<div style="margin-top:8px;"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="startContLineReview()">📋 Review Game</button></div>`
+  );
+
+  updateSessionProgress();
+  renderContLine(); // re-render to show classification symbols now that silent mode is off
+}
+
 function buildEvalSparkline(evalPoints) {
   if (!evalPoints || evalPoints.length < 2) return '';
-  const W = 260, H = 50, PAD = 4;
+  // Store for click handler
+  window._reviewEvalPoints = evalPoints;
+
+  const W = 280, H = 70, PAD = 6;
   const plotW = W - PAD * 2, plotH = H - PAD * 2;
 
   // Clamp cp values and compute range
@@ -8566,34 +8675,105 @@ function buildEvalSparkline(evalPoints) {
   // Build polyline points
   const pts = evalPoints.map((p, i) => `${toX(i).toFixed(1)},${toY(p.cp).toFixed(1)}`).join(' ');
 
-  // Area fill: line down to bottom, creating a filled area
+  // Area fill above/below zero
   const zeroY = toY(0);
   const areaPts = evalPoints.map((p, i) => `${toX(i).toFixed(1)},${toY(p.cp).toFixed(1)}`).join(' ')
     + ` ${toX(evalPoints.length - 1).toFixed(1)},${zeroY.toFixed(1)} ${toX(0).toFixed(1)},${zeroY.toFixed(1)}`;
 
-  // Mistake dots
+  // Mistake/blunder dots
   let dots = '';
   for (let i = 0; i < evalPoints.length; i++) {
     const p = evalPoints[i];
     if (p.classification && (p.classification === 'mistake' || p.classification === 'blunder' || p.classification === 'inaccuracy')) {
       const cls = MOVE_CLASSIFICATION[p.classification];
-      dots += `<circle cx="${toX(i).toFixed(1)}" cy="${toY(p.cp).toFixed(1)}" r="3" fill="${cls.color}" stroke="var(--bg-card)" stroke-width="1" />`;
+      dots += `<circle cx="${toX(i).toFixed(1)}" cy="${toY(p.cp).toFixed(1)}" r="3.5" fill="${cls.color}" stroke="var(--bg-card)" stroke-width="1" />`;
     }
   }
 
   return `
-    <div style="margin:6px 0 8px;">
-      <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="display:block;border-radius:6px;background:rgba(255,255,255,0.03);">
+    <div style="margin:6px 0 8px;position:relative;cursor:pointer;" id="reviewEvalGraph" onclick="onReviewGraphClick(event)">
+      <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="display:block;border-radius:6px;background:rgba(255,255,255,0.04);">
         <line x1="${PAD}" y1="${zeroY.toFixed(1)}" x2="${W - PAD}" y2="${zeroY.toFixed(1)}" stroke="var(--text-muted)" stroke-width="0.5" stroke-dasharray="3,3" opacity="0.3" />
-        <polygon points="${areaPts}" fill="rgba(62,207,142,0.1)" />
-        <polyline points="${pts}" fill="none" stroke="rgba(62,207,142,0.6)" stroke-width="1.5" stroke-linejoin="round" />
+        <polygon points="${areaPts}" fill="rgba(62,207,142,0.12)" />
+        <polyline points="${pts}" fill="none" stroke="rgba(62,207,142,0.7)" stroke-width="1.5" stroke-linejoin="round" />
         ${dots}
+        <line id="reviewGraphCursor" x1="0" y1="0" x2="0" y2="${H}" stroke="var(--accent)" stroke-width="1" opacity="0" />
       </svg>
     </div>
   `;
 }
 
-function startContLineReview() {
+function onReviewGraphClick(e) {
+  const evalPoints = window._reviewEvalPoints;
+  if (!evalPoints || evalPoints.length < 2 || !contLine) return;
+  const svg = e.currentTarget.querySelector('svg');
+  if (!svg) return;
+  const rect = svg.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const W = rect.width, PAD = 6, plotW = W - PAD * 2;
+
+  // Map click x to nearest eval point index
+  const ratio = Math.max(0, Math.min(1, (x - PAD) / plotW));
+  const pointIdx = Math.round(ratio * (evalPoints.length - 1));
+  const ep = evalPoints[pointIdx];
+  if (ep && ep.idx >= -1) {
+    goToContLineMove(ep.idx);
+    updateReviewGraphCursor(ep.idx);
+    renderContLine();
+  }
+}
+
+function updateReviewGraphCursor(moveIdx) {
+  const cursor = document.getElementById('reviewGraphCursor');
+  const evalPoints = window._reviewEvalPoints;
+  if (!cursor || !evalPoints || evalPoints.length < 2) return;
+
+  // Find the eval point matching this moveIdx
+  let pointIdx = -1;
+  for (let i = 0; i < evalPoints.length; i++) {
+    if (evalPoints[i].idx === moveIdx) { pointIdx = i; break; }
+    if (evalPoints[i].idx <= moveIdx) pointIdx = i; // closest before
+  }
+  if (pointIdx < 0) { cursor.setAttribute('opacity', '0'); return; }
+
+  const svg = cursor.closest('svg');
+  if (!svg) return;
+  const W = parseFloat(svg.getAttribute('viewBox').split(' ')[2]) || 280;
+  const PAD = 6, plotW = W - PAD * 2;
+  const cx = PAD + (pointIdx / (evalPoints.length - 1)) * plotW;
+
+  cursor.setAttribute('x1', cx.toFixed(1));
+  cursor.setAttribute('x2', cx.toFixed(1));
+  cursor.setAttribute('opacity', '0.7');
+}
+
+async function startContLineReview() {
+  // Wait for background eval queue to finish
+  if (silentEvalProcessing || silentEvalQueue.length > 0) {
+    const container = document.getElementById('feedbackContainer');
+    container.innerHTML = `
+      <div class="feedback-box" style="background:var(--bg-card);border-left:3px solid var(--accent);">
+        <div class="feedback-title" style="color:var(--accent)">📋 Finalizing analysis…</div>
+        <div class="feedback-text"><div class="spinner" style="margin:8px 0"></div>
+          <div style="font-size:11px;color:var(--text-muted);">${silentEvalQueue.length + (silentEvalProcessing ? 1 : 0)} move${silentEvalQueue.length !== 0 ? 's' : ''} remaining</div>
+        </div>
+      </div>
+    `;
+    await new Promise(resolve => {
+      const poll = setInterval(() => {
+        if (!silentEvalProcessing && silentEvalQueue.length === 0) {
+          clearInterval(poll);
+          resolve();
+        } else {
+          // Update remaining count
+          const remaining = silentEvalQueue.length + (silentEvalProcessing ? 1 : 0);
+          const countEl = container.querySelector('.feedback-text div:last-child');
+          if (countEl) countEl.textContent = `${remaining} move${remaining !== 1 ? 's' : ''} remaining`;
+        }
+      }, 200);
+    });
+  }
+
   const data = buildContLineReviewData();
   if (!data) return;
 
@@ -8648,6 +8828,7 @@ function startContLineReview() {
 
 function reviewNextKeyMove() {
   if (!contLineReviewMode || contLineReviewKeyMoves.length === 0) return;
+  window._reviewBestLine = null;
   contLineReviewKeyIdx++;
   if (contLineReviewKeyIdx >= contLineReviewKeyMoves.length) {
     contLineReviewKeyIdx = contLineReviewKeyMoves.length; // past end
@@ -8662,6 +8843,7 @@ function reviewNextKeyMove() {
 
 function reviewPrevKeyMove() {
   if (!contLineReviewMode || contLineReviewKeyMoves.length === 0) return;
+  window._reviewBestLine = null;
   contLineReviewKeyIdx--;
   if (contLineReviewKeyIdx < 0) {
     contLineReviewKeyIdx = 0;
@@ -8702,20 +8884,185 @@ function showReviewKeyMoveInfo(moveIdx) {
         ${bestInfo}
         <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;">
           <button class="btn btn-primary btn-sm" style="font-size:11px;" onclick="startReviewRetry(${moveIdx})">↺ Retry</button>
+          ${mv.bestMoveUci ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewBestArrow(${moveIdx})">Show best</button>` : ''}
+          ${mv.bestMoveUci ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewBestLine(${moveIdx})">Show line</button>` : ''}
         </div>
         ${navHtml}
       </div>
     </div>
   `;
 
-  // Badge is already set by goToContLineMove — just clear any stale arrows
+  // Clear any stale arrows
   bestMoveArrow = null;
   analysisArrow = null;
+  renderArrows();
+}
+
+function showReviewBestArrow(moveIdx) {
+  if (!contLine || !contLine.moves[moveIdx]) return;
+  const mv = contLine.moves[moveIdx];
+  if (!mv.bestMoveUci || mv.bestMoveUci.length < 4) return;
+  bestMoveArrow = { from: mv.bestMoveUci.substring(0, 2), to: mv.bestMoveUci.substring(2, 4) };
+  renderArrows();
+}
+
+async function showReviewBestLine(moveIdx) {
+  if (!contLine || !contLine.moves[moveIdx]) return;
+  const mv = contLine.moves[moveIdx];
+  if (!mv.bestMoveUci) return;
+
+  const preFen = moveIdx - 1 >= 0 ? contLine.moves[moveIdx - 1].fen : contLine.baseFen;
+
+  // Show loading state
+  const container = document.getElementById('feedbackContainer');
+  container.innerHTML = `
+    <div class="feedback-box" style="background:var(--bg-card);border-left:3px solid var(--accent);">
+      <div class="feedback-title" style="color:var(--accent)">Analyzing best line…</div>
+      <div class="feedback-text"><div class="spinner" style="margin:8px 0"></div></div>
+    </div>
+  `;
+
+  // Navigate to pre-move position and play the best move
+  goToContLineMove(moveIdx - 1);
+
+  // Analyze the pre-move position to get the full continuation line
+  const result = await sfAnalyze(preFen, 20, 1);
+  if (!result || !result.pvs || !result.pvs[0]) {
+    showReviewKeyMoveInfo(moveIdx);
+    return;
+  }
+
+  const pv = result.pvs[0];
+  const pvMoves = (pv.moves || '').trim().split(/\s+/).filter(Boolean);
+  if (pvMoves.length === 0) {
+    showReviewKeyMoveInfo(moveIdx);
+    return;
+  }
+
+  // Build the line: play through the PV on a temp chess instance
+  const chess = new Chess(preFen);
+  const lineMoves = [];
+  const fenParts = preFen.split(' ');
+  let lineNum = parseInt(fenParts[5]) || 1;
+  let isWhite = fenParts[1] === 'w';
+
+  for (const uci of pvMoves.slice(0, 10)) { // cap at 10 half-moves
+    const from = uci.substring(0, 2);
+    const to = uci.substring(2, 4);
+    const promo = uci.length > 4 ? uci[4] : undefined;
+    const m = chess.move({ from, to, promotion: promo });
+    if (!m) break;
+    lineMoves.push({ san: m.san, uci, fen: chess.fen(), isWhite });
+    if (!isWhite) lineNum++;
+    isWhite = !isWhite;
+  }
+
+  if (lineMoves.length === 0) {
+    showReviewKeyMoveInfo(moveIdx);
+    return;
+  }
+
+  // Play the best move on the board
+  gameEngine.load(preFen);
+  const bestFrom = mv.bestMoveUci.substring(0, 2);
+  const bestTo = mv.bestMoveUci.substring(2, 4);
+  const bestPromo = mv.bestMoveUci.length > 4 ? mv.bestMoveUci[4] : undefined;
+  gameEngine.move({ from: bestFrom, to: bestTo, promotion: bestPromo });
+  boardObj.position(gameEngine.fen(), true);
+  showLastMoveHighlightDeferred(bestFrom, bestTo);
+  bestMoveArrow = null;
+  moveClassBadge = null;
+  renderArrows();
+
+  // Build move list HTML
+  const startFenParts = preFen.split(' ');
+  let mn = parseInt(startFenParts[5]) || 1;
+  let wt = startFenParts[1] === 'w';
+  let movesHtml = '';
+  for (let i = 0; i < lineMoves.length; i++) {
+    const lm = lineMoves[i];
+    const activeClass = i === 0 ? ' active' : '';
+    if (lm.isWhite) {
+      movesHtml += `<span class="move-num">${mn}.</span>`;
+    } else if (i === 0) {
+      movesHtml += `<span class="move-num">${mn}…</span>`;
+    }
+    movesHtml += `<span class="move${activeClass}${i === 0 ? ' user-move' : ''}" onclick="goToReviewLine(${moveIdx},${i})">${escHtml(lm.san)}</span> `;
+    if (!lm.isWhite) mn++;
+  }
+
+  // Store line for navigation
+  window._reviewBestLine = { moveIdx, lineMoves, preFen, currentIdx: 0 };
+
+  const cls = MOVE_CLASSIFICATION[mv.classification] || {};
+  const sym = mv.classification === 'good' ? '✓' : (mv.classification === 'best' ? '★' : cls.symbol || '');
+
+  container.innerHTML = `
+    <div class="feedback-box" style="background:rgba(62,207,142,0.06);border-left:3px solid #62cf8e;">
+      <div class="feedback-title" style="color:#62cf8e">Best line from <code>${escHtml(mv.bestMoveSan || mv.bestMoveUci)}</code></div>
+      <div class="feedback-text">
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">You played <code>${escHtml(mv.san)}</code> ${sym ? `<span style="color:${cls.color}">${sym}</span>` : ''} (−${mv.wpDrop}%)</div>
+        <div class="engine-line-moves" style="margin:6px 0;">${movesHtml}</div>
+        <div style="font-size:11px;color:var(--text-muted);">← → to step through</div>
+        <div style="margin-top:8px;">
+          <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="exitReviewBestLine(${moveIdx})">← Back to review</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function goToReviewLine(moveIdx, lineIdx) {
+  const data = window._reviewBestLine;
+  if (!data || data.moveIdx !== moveIdx || !data.lineMoves[lineIdx]) return;
+  data.currentIdx = lineIdx;
+  const lm = data.lineMoves[lineIdx];
+  gameEngine.load(lm.fen);
+  boardObj.position(lm.fen, false);
+  if (lm.uci) {
+    showLastMoveHighlight(lm.uci.substring(0, 2), lm.uci.substring(2, 4));
+  }
+  bestMoveArrow = null;
+  moveClassBadge = null;
+  renderArrows();
+
+  // Update active state in the move list
+  const moves = document.querySelectorAll('#feedbackContainer .engine-line-moves .move');
+  moves.forEach((el, i) => el.classList.toggle('active', i === lineIdx));
+}
+
+function stepReviewBestLine(delta) {
+  const data = window._reviewBestLine;
+  if (!data) return;
+  const currentIdx = data.currentIdx ?? 0;
+  const newIdx = currentIdx + delta;
+  if (newIdx < -1 || newIdx >= data.lineMoves.length) return;
+  if (newIdx === -1) {
+    // Back to pre-move position
+    data.currentIdx = -1;
+    gameEngine.load(data.preFen);
+    boardObj.position(data.preFen, false);
+    clearLastMoveHighlight();
+    bestMoveArrow = null;
+    moveClassBadge = null;
+    renderArrows();
+    const moves = document.querySelectorAll('#feedbackContainer .engine-line-moves .move');
+    moves.forEach(el => el.classList.remove('active'));
+  } else {
+    goToReviewLine(data.moveIdx, newIdx);
+  }
+}
+
+function exitReviewBestLine(moveIdx) {
+  window._reviewBestLine = null;
+  goToContLineMove(moveIdx);
+  showReviewKeyMoveInfo(moveIdx);
 }
 
 function startReviewRetry(moveIdx) {
   if (!contLine || !contLine.moves[moveIdx]) return;
   contLineReviewRetryIdx = moveIdx;
+  window._reviewBestLine = null;
 
   // Navigate to position BEFORE the mistake
   goToContLineMove(moveIdx - 1);
@@ -8756,6 +9103,7 @@ function cancelReviewRetry(moveIdx) {
 function handleReviewRetryResult(wpDrop, move, bestMoveSan, isExactBest) {
   const moveIdx = contLineReviewRetryIdx;
   contLineReviewRetryIdx = -1;
+  contLineBrowsing = false; // prevent accidental contLine truncation from board clicks
   stopPreAnalysis();
 
   if (!contLine || !contLine.moves[moveIdx]) return;
@@ -8765,12 +9113,8 @@ function handleReviewRetryResult(wpDrop, move, bestMoveSan, isExactBest) {
   const cls = MOVE_CLASSIFICATION[classification] || {};
   const improved = wpDrop < (originalMv.wpDrop || 100);
 
-  // Undo the retry move — restore pre-move position
-  gameEngine.undo();
-  const preFen = moveIdx - 1 >= 0 ? contLine.moves[moveIdx - 1].fen : contLine.baseFen;
-  boardObj.position(preFen, false);
-
-  // Show the badge on the retry move's destination
+  // Keep the move on the board — show highlight and badge on destination
+  highlightSquaresWithColor(move.from, move.to, wpDropToColor(wpDrop));
   moveClassBadge = { square: move.to, classification };
   renderArrows();
 
@@ -8834,6 +9178,7 @@ function exitContLineReview() {
   contLineReviewKeyMoves = [];
   contLineReviewKeyIdx = -1;
   contLineReviewRetryIdx = -1;
+  window._reviewBestLine = null;
 }
 
 function startTacticContinuation() {
@@ -8891,7 +9236,20 @@ async function showTacticEngineLine() {
 
 function startContinuationMode() {
   continuationMode = true;
-  showMaiaControls();
+
+  // Enter silent mode if instant feedback is disabled (not advantage cap — that's handled separately)
+  if (!instantFeedback && !advantageMode) {
+    silentContinuation = true;
+    // Seed lastContUserAfterCp from the triggering move's eval
+    const m = filteredMistakes[currentMistakeIdx];
+    if (m && afterMoveCpWhite != null) {
+      lastContUserAfterCp = m.playerColor === 'white' ? afterMoveCpWhite : -afterMoveCpWhite;
+    }
+    document.getElementById('btnHint').classList.add('hidden');
+  } else {
+    showMaiaControls();
+  }
+
   updateEvalBar();
   const opts = document.getElementById('continuationOptions');
   if (opts) opts.remove();
@@ -8929,13 +9287,19 @@ async function advanceContinuation(contUci) {
       }
       return;
     }
+    const wasSilent = silentContinuation;
     continuationMode = false;
+    silentContinuation = false;
     hideMaiaControls();
+    const reviewBtn = wasSilent && contLine && contLine.moves.some(mv => mv.classification)
+      ? '<div style="margin-top:8px;"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="startContLineReview()">📋 Review Game</button></div>'
+      : '';
     if (gameEngine.in_checkmate()) {
-      showFeedback('correct', 'Checkmate!', 'You delivered checkmate!');
+      showFeedback('correct', 'Checkmate!', 'You delivered checkmate!' + reviewBtn);
     } else if (gameEngine.in_draw()) {
-      showFeedback('info', 'Draw', 'The position is drawn.');
+      showFeedback('info', 'Draw', 'The position is drawn.' + reviewBtn);
     }
+    if (wasSilent) renderContLine(); // show classification symbols
     document.getElementById('btnRetry').classList.remove('hidden');
     document.getElementById('btnHint').classList.add('hidden');
     clearHintHighlights();
@@ -8965,6 +9329,7 @@ async function advanceContinuation(contUci) {
       const result = await sfAnalyze(gameEngine.fen(), 16, 1);
       if (!result || !result.bestMove) {
         continuationMode = false;
+        silentContinuation = false;
         hideMaiaControls();
         showFeedback('info', 'Continuation ended', 'Could not determine opponent\'s best response.');
         document.getElementById('btnRetry').classList.remove('hidden');
@@ -8984,6 +9349,7 @@ async function advanceContinuation(contUci) {
   const result = gameEngine.move({ from: fromSq, to: toSq, promotion: promo });
   if (!result) {
     continuationMode = false;
+    silentContinuation = false;
     hideMaiaControls();
     showFeedback('info', 'Continuation ended', 'Could not play opponent\'s move.');
     document.getElementById('btnRetry').classList.remove('hidden');
@@ -9012,14 +9378,20 @@ async function advanceContinuation(contUci) {
       }
       return;
     }
+    const wasSilent2 = silentContinuation;
     continuationMode = false;
+    silentContinuation = false;
     hideMaiaControls();
     const m = filteredMistakes[currentMistakeIdx];
+    const reviewBtn2 = wasSilent2 && contLine && contLine.moves.some(mv => mv.classification)
+      ? '<div style="margin-top:8px;"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="startContLineReview()">📋 Review Game</button></div>'
+      : '';
     if (gameEngine.in_checkmate()) {
-      showFeedback('wrong', 'Checkmated', 'The opponent delivered checkmate. Continuation over.');
+      showFeedback('wrong', 'Checkmated', 'The opponent delivered checkmate.' + reviewBtn2);
     } else if (gameEngine.in_draw()) {
-      showFeedback('info', 'Draw', 'The position is drawn. Continuation over.');
+      showFeedback('info', 'Draw', 'The position is drawn.' + reviewBtn2);
     }
+    if (wasSilent2) renderContLine(); // show classification symbols
     document.getElementById('btnRetry').classList.remove('hidden');
     document.getElementById('btnHint').classList.add('hidden');
     clearHintHighlights();
@@ -9031,9 +9403,15 @@ async function advanceContinuation(contUci) {
   const userTurn = (m.playerColor === 'white' && gameEngine.turn() === 'w') ||
                    (m.playerColor === 'black' && gameEngine.turn() === 'b');
   if (!userTurn) {
+    const wasSilent3 = silentContinuation;
     continuationMode = false;
+    silentContinuation = false;
     hideMaiaControls();
-    showFeedback('info', 'Continuation ended', 'Unexpected turn.');
+    const reviewBtn3 = wasSilent3 && contLine && contLine.moves.some(mv => mv.classification)
+      ? '<div style="margin-top:8px;"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="startContLineReview()">📋 Review Game</button></div>'
+      : '';
+    showFeedback('info', 'Continuation ended', 'Unexpected turn.' + reviewBtn3);
+    if (wasSilent3) renderContLine();
     document.getElementById('btnRetry').classList.remove('hidden');
     document.getElementById('btnHint').classList.add('hidden');
     clearHintHighlights();
@@ -9054,14 +9432,22 @@ async function advanceContinuation(contUci) {
     const infoCard = document.getElementById('posInfoCard');
     infoCard.style.display = '';
     const moveCount = contLine ? contLine.moves.filter(mv => mv.isUser).length : 0;
+    const isAdv = advantageMode;
+    const headerHtml = isAdv
+      ? `<div style="color:#4caf50;font-weight:600;">${ICON_ADVANTAGE} Convert the Advantage</div>`
+      : `<div style="color:var(--blue);font-weight:600;">Continuation Practice</div>`;
+    const stopReviewBtn = (!isAdv && moveCount >= SILENT_REVIEW_MIN_MOVES)
+      ? `<div style="margin-top:6px;"><button class="btn btn-ghost btn-sm" style="font-size:11px;border-color:var(--accent);color:var(--accent);" onclick="stopAndReviewContinuation()">📋 Stop & Review</button></div>`
+      : '';
     document.getElementById('posInfoContent').innerHTML = `
       <div style="font-size:13px;line-height:1.7">
-        <div style="color:#4caf50;font-weight:600;">${ICON_ADVANTAGE} Convert the Advantage</div>
+        ${headerHtml}
         <div>Move ${moveCount + 1} · Your turn</div>
         <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
+        ${stopReviewBtn}
       </div>
     `;
-    if (advantageConsecutiveAbove1000 >= 3) showAdvantageClaimButton();
+    if (isAdv && advantageConsecutiveAbove1000 >= 3) showAdvantageClaimButton();
   } else {
     if (hintBtnCont) { hintBtnCont.classList.remove('hidden'); hintBtnCont.disabled = false; hintBtnCont.textContent = '💡 Hint'; hintBtnCont.style.borderColor = ''; hintBtnCont.style.color = ''; }
 
@@ -9171,8 +9557,8 @@ function retryPosition() {
   if (currentMistakeIdx < 0) return;
   const m = filteredMistakes[currentMistakeIdx];
 
-  // For tactics, just reload from scratch (resets all tactic state properly)
-  if (m.type === 'tactic') {
+  // For tactics and advantage items, reload from scratch (resets all state properly)
+  if (m.type === 'tactic' || m.type === 'advantage') {
     loadPosition(currentMistakeIdx);
     return;
   }
@@ -9976,13 +10362,15 @@ document.addEventListener('keydown', (e) => {
   }
   // Arrow keys: engine line takes priority (for wrong-move browsing during tactics)
   if (e.key === 'ArrowLeft') {
-    if (engineLine) { lineStep(-1); e.preventDefault(); }
+    if (window._reviewBestLine) { stepReviewBestLine(-1); e.preventDefault(); }
+    else if (engineLine) { lineStep(-1); e.preventDefault(); }
     else if (tacticLine) { tacticLineStep(-1); e.preventDefault(); }
     else if (contLine) { contLineStep(-1); e.preventDefault(); }
     return;
   }
   if (e.key === 'ArrowRight') {
-    if (engineLine) { lineStep(1); e.preventDefault(); }
+    if (window._reviewBestLine) { stepReviewBestLine(1); e.preventDefault(); }
+    else if (engineLine) { lineStep(1); e.preventDefault(); }
     else if (tacticLine) { tacticLineStep(1); e.preventDefault(); }
     else if (contLine) { contLineStep(1); e.preventDefault(); }
     return;
