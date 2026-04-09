@@ -1204,7 +1204,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Low Depth Review option during eval queue wait</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix: Low Depth Review button layout</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -8766,11 +8766,12 @@ async function startContLineReview() {
     container.innerHTML = `
       <div class="feedback-box" style="background:var(--bg-card);border-left:3px solid var(--accent);">
         <div class="feedback-title" style="color:var(--accent)">📋 Finalizing analysis…</div>
-        <div class="feedback-text"><div class="spinner" style="margin:8px 0"></div>
-          <div id="evalQueueCount" style="font-size:11px;color:var(--text-muted);">${remaining0} move${remaining0 !== 1 ? 's' : ''} remaining</div>
-          <div style="margin-top:8px;">
-            <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="window._skipEvalQueueWait=true">Low Depth Review</button>
+        <div class="feedback-text">
+          <div style="display:flex;align-items:center;gap:10px;margin:6px 0;">
+            <div class="spinner"></div>
+            <div id="evalQueueCount" style="font-size:11px;color:var(--text-muted);">${remaining0} move${remaining0 !== 1 ? 's' : ''} remaining</div>
           </div>
+          <button class="btn btn-ghost btn-sm" style="font-size:11px;margin-top:4px;" onclick="window._skipEvalQueueWait=true">Low Depth Review</button>
         </div>
       </div>
     `;
