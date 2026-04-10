@@ -221,6 +221,10 @@
   }
   .filter-chip:hover:not(.active) { border-color: var(--border-active); color: var(--text-secondary); }
 
+  /* Panel tab bar */
+  .panel-tab { color: var(--text-muted); border-color: transparent; }
+  .panel-tab.active { color: var(--accent); border-color: var(--accent); background: var(--accent-glow); }
+
   /* Opening filter */
   .opening-filter-chip {
     display: inline-flex; align-items: center; gap: 4px;
@@ -1331,16 +1335,18 @@
   <div class="panel-left">
     <div class="panel-header">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-        <h3 style="margin-bottom:0" id="panelTitle">Games</h3>
-        <div style="display:flex;gap:6px;align-items:center;">
-          <button class="btn btn-ghost btn-sm" id="btnRepertoireMode" onclick="toggleRepertoireMode()" style="font-size:11px;">
+        <div style="display:flex;gap:2px;align-items:center;" class="panel-tabs">
+          <button class="btn btn-ghost btn-sm panel-tab active" id="btnGamesMode" onclick="activatePanelTab('games')" style="font-size:11px;padding:4px 8px;">
+            Games
+          </button>
+          <button class="btn btn-ghost btn-sm panel-tab" id="btnRepertoireMode" onclick="activatePanelTab('repertoire')" style="font-size:11px;padding:4px 8px;">
             ♟ Repertoire <span id="repertoireBadgeCount" style="font-size:10px;"></span>
           </button>
-          <button class="btn btn-ghost btn-sm" id="btnReviewMode" onclick="toggleReviewMode()" style="font-size:11px;">
+          <button class="btn btn-ghost btn-sm panel-tab" id="btnReviewMode" onclick="activatePanelTab('review')" style="font-size:11px;padding:4px 8px;">
             ⏰ Review <span id="reviewDueCount"></span>
           </button>
-          <button class="drawer-close-btn" onclick="closeDrawer()" aria-label="Close game list">✕</button>
         </div>
+        <button class="drawer-close-btn" onclick="closeDrawer()" aria-label="Close game list">✕</button>
       </div>
       <div class="filter-row">
         <button class="filter-chip active" data-filter="type" data-value="mistake" onclick="toggleFilter(this)"><svg width="16" height="16" viewBox="0 0 40 40"><circle cx="20" cy="20" r="18" fill="#e8922d"/><text x="20" y="28" text-anchor="middle" fill="#fff" font-size="26" font-weight="700" font-family="sans-serif">?</text></svg> Mistakes</button>
@@ -6524,6 +6530,29 @@ function renderGameList() {
 }
 
 // ─── Review mode ───
+function activatePanelTab(tab) {
+  if (tab === 'games') {
+    if (reviewMode) toggleReviewMode();
+    if (repertoireMode) toggleRepertoireMode();
+  } else if (tab === 'repertoire') {
+    if (reviewMode) toggleReviewMode();
+    if (!repertoireMode) toggleRepertoireMode();
+  } else if (tab === 'review') {
+    if (repertoireMode) toggleRepertoireMode();
+    if (!reviewMode) toggleReviewMode();
+  }
+  updatePanelTabs();
+}
+
+function updatePanelTabs() {
+  const gBtn = document.getElementById('btnGamesMode');
+  const rBtn = document.getElementById('btnRepertoireMode');
+  const vBtn = document.getElementById('btnReviewMode');
+  if (gBtn) gBtn.classList.toggle('active', !reviewMode && !repertoireMode);
+  if (rBtn) rBtn.classList.toggle('active', repertoireMode);
+  if (vBtn) vBtn.classList.toggle('active', reviewMode);
+}
+
 function toggleReviewMode() {
   if (repertoireDrillMode) exitRepertoireDrill();
   if (repertoireMode) { toggleRepertoireMode(); }
@@ -6542,13 +6571,9 @@ function toggleReviewMode() {
     updateOpeningFilterUI();
   }
   reviewMode = !reviewMode;
-  const btn = document.getElementById('btnReviewMode');
-  const title = document.getElementById('panelTitle');
   const filterRows = document.querySelectorAll('.panel-header .filter-row');
 
   if (reviewMode) {
-    btn.classList.add('btn-review-active');
-    title.textContent = 'Review';
     filterRows.forEach(r => r.style.display = 'none');
     buildReviewQueue();
     reviewListDisplayLimit = 50;
@@ -6559,12 +6584,11 @@ function toggleReviewMode() {
       if (globalIdx >= 0) loadPosition(globalIdx);
     }
   } else {
-    btn.classList.remove('btn-review-active');
-    title.textContent = 'Games';
     filterRows.forEach(r => r.style.display = '');
     gameListDisplayLimit = 50;
     renderGameList();
   }
+  updatePanelTabs();
 }
 
 function renderReviewList() {
@@ -12047,12 +12071,11 @@ function updateRepertoireBadge() {
 function toggleRepertoireMode() {
   repertoireMode = !repertoireMode;
   if (!repertoireMode && repertoireDrillMode) exitRepertoireDrill();
-  const btn = document.getElementById('btnRepertoireMode');
-  if (btn) btn.classList.toggle('active', repertoireMode);
 
   if (repertoireMode) {
-    // Show repertoire panel, hide game list
+    // Show repertoire panel, hide game list and filters
     document.getElementById('gameList').style.display = 'none';
+    document.querySelectorAll('.panel-header .filter-row').forEach(r => r.style.display = 'none');
     let panel = document.getElementById('repertoirePanel');
     if (!panel) {
       panel = document.createElement('div');
@@ -12061,14 +12084,14 @@ function toggleRepertoireMode() {
       document.getElementById('gameList').parentElement.insertBefore(panel, document.getElementById('gameList'));
     }
     panel.style.display = '';
-    document.getElementById('panelTitle').textContent = 'Repertoire';
     renderRepertoirePanel();
   } else {
     const panel = document.getElementById('repertoirePanel');
     if (panel) panel.style.display = 'none';
     document.getElementById('gameList').style.display = '';
-    document.getElementById('panelTitle').textContent = reviewMode ? 'Review' : 'Games';
+    if (!reviewMode) document.querySelectorAll('.panel-header .filter-row').forEach(r => r.style.display = '');
   }
+  updatePanelTabs();
 }
 
 function renderRepertoirePanel() {
@@ -12241,7 +12264,6 @@ function startRepertoireDrill() {
   filteredMistakes = repertoireDrillQueue;
 
   closeDrawer();
-  document.getElementById('panelTitle').textContent = 'Repertoire Drill';
 
   loadPosition(0);
 }
@@ -12254,7 +12276,7 @@ function exitRepertoireDrill() {
     savedFilteredMistakes = null;
   }
   currentMistakeIdx = -1;
-  document.getElementById('panelTitle').textContent = repertoireMode ? 'Repertoire' : reviewMode ? 'Review' : 'Games';
+  updatePanelTabs();
   updateSessionProgress();
   if (repertoireMode) renderRepertoirePanel();
 }
