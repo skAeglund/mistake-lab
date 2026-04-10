@@ -11947,7 +11947,10 @@ function detectRepertoireDeviations() {
     item.game = allGames.find(g => g.id === item.gameId) || null;
   }
 
+  // Filter out dismissed positions
+  const dismissed = getRepertoireDismissed();
   repertoireDeviations = Array.from(devMap.values())
+    .filter(d => !dismissed.has(d.positionKey))
     .sort((a, b) => b.gameCount - a.gameCount); // most frequent first
   repertoireGaps = Array.from(gapMap.values()).sort((a, b) => b.count - a.count);
 
@@ -12144,21 +12147,38 @@ function renderRepertoirePanel() {
     }
     const done = getCompletedSet();
     for (const [opening, devs] of byOpening) {
-      html += `<div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin:6px 0 3px;">${opening} (${devs.length})</div>`;
+      const escapedOpening = opening.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+      html += `<div style="display:flex;justify-content:space-between;align-items:center;margin:6px 0 3px;">
+        <span style="font-size:11px;font-weight:600;color:var(--text-secondary);">${opening} (${devs.length})</span>
+        <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();dismissRepertoireOpening('${escapedOpening}')" style="font-size:9px;padding:1px 5px;color:var(--text-muted);" title="Dismiss all deviations in this opening">✕ all</button>
+      </div>`;
       for (const d of devs.slice(0, 20)) {
         const isDone = done.has(posId(d));
         const gameRef = allGames.find(g => g.id === d.gameId);
         const opponent = gameRef ? getOpponentName(gameRef, d.playerColor) : '?';
         const countBadge = d.gameCount > 1 ? `<span style="font-size:10px;background:var(--bg-secondary);padding:1px 5px;border-radius:8px;margin-left:4px;">${d.gameCount}×</span>` : '';
         const chapterTag = d.repertoireMove?.chapterTitle ? `<div style="font-size:10px;opacity:0.4;margin-top:1px;">📖 ${d.repertoireMove.chapterTitle}</div>` : '';
-        html += `<div class="game-card${isDone ? ' completed' : ''}" style="padding:6px 8px;margin:2px 0;cursor:pointer;font-size:12px;" onclick="showRepertoireDeviation('${d.positionKey.replace(/'/g, "\\'")}')">
-          <span>Played <strong style="color:var(--red)">${d.playedMove.san}</strong> instead of <strong style="color:var(--green)">${d.repertoireMove.san}</strong>${countBadge}</span>
-          <span style="opacity:0.5;font-size:11px;"> vs ${opponent}</span>
-          ${chapterTag}
+        const dismissBtn = `<button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();dismissRepertoirePosition('${d.positionKey.replace(/'/g, "\\'")}')" style="font-size:9px;padding:1px 4px;color:var(--text-muted);flex-shrink:0;" title="Dismiss this deviation">✕</button>`;
+        html += `<div class="game-card${isDone ? ' completed' : ''}" style="padding:6px 8px;margin:2px 0;cursor:pointer;font-size:12px;display:flex;align-items:flex-start;gap:4px;" onclick="showRepertoireDeviation('${d.positionKey.replace(/'/g, "\\'")}')">
+          <div style="flex:1;min-width:0;">
+            <span>Played <strong style="color:var(--red)">${d.playedMove.san}</strong> instead of <strong style="color:var(--green)">${d.repertoireMove.san}</strong>${countBadge}</span>
+            <span style="opacity:0.5;font-size:11px;"> vs ${opponent}</span>
+            ${chapterTag}
+          </div>
+          ${dismissBtn}
         </div>`;
       }
     }
     html += `</div>`;
+
+    // Show dismissed count with restore
+    const dismissedCount = gistData?.repertoire?.dismissed?.length || 0;
+    if (dismissedCount > 0) {
+      html += `<div style="padding:4px 12px;font-size:11px;color:var(--text-muted);display:flex;justify-content:space-between;align-items:center;">
+        <span>${dismissedCount} dismissed</span>
+        <button class="btn btn-ghost btn-sm" onclick="restoreDismissedRepertoire()" style="font-size:10px;padding:2px 6px;">Restore all</button>
+      </div>`;
+    }
   } else if (repertoireTrie && repertoireTrie.size) {
     html += `<div style="padding:12px;font-size:12px;color:var(--text-secondary);">No deviations found — you're following your repertoire!</div>`;
   }
@@ -12190,6 +12210,60 @@ function renderRepertoirePanel() {
 
   panel.innerHTML = html;
   renderRepertoireConfig();
+}
+
+function getRepertoireDismissed() {
+  if (!gistData?.repertoire?.dismissed) return new Set();
+  return new Set(gistData.repertoire.dismissed);
+}
+
+function dismissRepertoirePosition(posKey) {
+  if (!gistData) return;
+  if (!gistData.repertoire) gistData.repertoire = {};
+  if (!gistData.repertoire.dismissed) gistData.repertoire.dismissed = [];
+  if (!gistData.repertoire.dismissed.includes(posKey)) {
+    gistData.repertoire.dismissed.push(posKey);
+    debounceSyncToGist();
+  }
+  detectRepertoireDeviations();
+  updateRepertoireBadge();
+  if (repertoireMode) renderRepertoirePanel();
+}
+
+function dismissRepertoireOpening(opening) {
+  // Dismiss all deviations that match this opening name
+  // We need to find all positionKeys from the full (unfiltered) detection
+  // Re-run detection to get the full list before filtering
+  if (!gistData) return;
+  if (!gistData.repertoire) gistData.repertoire = {};
+  if (!gistData.repertoire.dismissed) gistData.repertoire.dismissed = [];
+
+  // Find positions with this opening from current deviations
+  const toDismiss = repertoireDeviations
+    .filter(d => (d.opening || 'Unknown opening') === opening)
+    .map(d => d.positionKey);
+
+  let added = 0;
+  for (const pk of toDismiss) {
+    if (!gistData.repertoire.dismissed.includes(pk)) {
+      gistData.repertoire.dismissed.push(pk);
+      added++;
+    }
+  }
+  if (added > 0) debounceSyncToGist();
+
+  detectRepertoireDeviations();
+  updateRepertoireBadge();
+  if (repertoireMode) renderRepertoirePanel();
+}
+
+function restoreDismissedRepertoire() {
+  if (!gistData?.repertoire?.dismissed) return;
+  gistData.repertoire.dismissed = [];
+  debounceSyncToGist();
+  detectRepertoireDeviations();
+  updateRepertoireBadge();
+  if (repertoireMode) renderRepertoirePanel();
 }
 
 function getOpponentName(game, playerColor) {
