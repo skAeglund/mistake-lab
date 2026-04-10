@@ -11387,6 +11387,7 @@ async function lichessOAuthStart() {
     redirect_uri: LICHESS_REDIRECT_URI,
     code_challenge_method: 'S256',
     code_challenge: codeChallenge,
+    scope: 'study:read',
     state,
   });
 
