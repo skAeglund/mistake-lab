@@ -6939,6 +6939,8 @@ function onBoardClick(e) {
       currentAttempts++;
       if (tacticMode) {
         evaluateTacticMove(move.from, move.to, move);
+      } else if (repertoireDrillMode) {
+        evaluateRepertoireMove(move.from, move.to, move);
       } else {
         evaluateMove(move.from, move.to, move);
       }
