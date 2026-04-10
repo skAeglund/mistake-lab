@@ -11841,6 +11841,8 @@ function detectRepertoireDeviations() {
 
     const chess = game.initialFen ? new Chess(game.initialFen) : new Chess();
     let deviated = false;
+    let lastChapterUrl = null;
+    let lastChapterTitle = null;
 
     for (let i = 0; i < moves.length; i++) {
       const fen = chess.fen();
@@ -11852,13 +11854,15 @@ function detectRepertoireDeviations() {
       const move = chess.move(moves[i], { sloppy: true });
       if (!move) break;
 
-      if (!repertoireTrie.has(posKey)) {
-        // Position not in repertoire — stop checking this game
-        break;
-      }
-
       if (isUserTurn) {
+        // User's turn — trie stores these positions
+        if (!repertoireTrie.has(posKey)) {
+          // Position not in repertoire — we're off-book, stop
+          break;
+        }
         const expected = repertoireTrie.get(posKey);
+        lastChapterUrl = expected.chapterUrl || lastChapterUrl;
+        lastChapterTitle = expected.chapterTitle || lastChapterTitle;
         const playedUci = move.from + move.to + (move.promotion || '');
         if (expected.uci !== playedUci && expected.san !== move.san) {
           // Deviation found
@@ -11876,26 +11880,20 @@ function detectRepertoireDeviations() {
             });
             deviated = true;
           }
-          // Check if we transposed back into a known position
-          const newPosKey = fenPositionKey(chess.fen());
-          // Continue walking to find transpositions — but don't break yet
-          // Actually per spec: one deviation per "leaving" event, transposition = new item
-          // Keep walking to check for transpositions
         }
       } else {
-        // Opponent's turn — check for gaps
+        // Opponent's turn — check if the resulting position (user's next turn) is in the trie
         const nextPosKey = fenPositionKey(chess.fen());
-        if (!repertoireTrie.has(nextPosKey) && repertoireTrie.has(posKey)) {
-          // Opponent played a move that takes us out of repertoire
+        if (!repertoireTrie.has(nextPosKey)) {
+          // Opponent played a move our repertoire doesn't cover — gap
           const gapKey = posKey + ':' + move.san;
           if (!gapMap.has(gapKey)) {
-            const trieEntry = repertoireTrie.get(posKey);
             gapMap.set(gapKey, {
               positionKey: posKey,
               fen: fen,
               opponentMove: { san: move.san, uci: move.from + move.to + (move.promotion || '') },
-              chapterUrl: trieEntry?.chapterUrl || null,
-              chapterTitle: trieEntry?.chapterTitle || null,
+              chapterUrl: lastChapterUrl,
+              chapterTitle: lastChapterTitle,
               count: 0,
               games: [],
             });
@@ -11903,6 +11901,8 @@ function detectRepertoireDeviations() {
           const gap = gapMap.get(gapKey);
           gap.count++;
           gap.games.push(game.id);
+          // Opponent went off-book — stop checking this game
+          break;
         }
       }
     }
