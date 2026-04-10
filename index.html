@@ -12274,11 +12274,37 @@ function getOpponentName(game, playerColor) {
 function showRepertoireDeviation(posKey) {
   const dev = repertoireDeviations.find(d => d.positionKey === posKey);
   if (!dev) return;
+
+  // Exit opening filter mode if active (without restoring board state)
+  if (openingFilterMode) {
+    openingFilterMode = false;
+    savedBoardState = null;
+    document.getElementById('openingFilterPanel').classList.add('hidden');
+    document.getElementById('feedbackArea').classList.remove('hidden');
+    document.getElementById('positionNav').style.display = '';
+    const evalBar = document.getElementById('evalBar');
+    const evalBtn = document.getElementById('btnEvalBar');
+    if (evalBar) evalBar.style.display = '';
+    if (evalBtn) evalBtn.style.display = '';
+    document.getElementById('btnOpeningFilter').classList.remove('active');
+    updateOpeningFilterUI();
+  }
+
+  // Clear all arrows
+  filterArrows = [];
+  hoverFilterArrow = null;
+  activeArrows.clear();
+  activeCircles.clear();
+  bestMoveArrow = null;
+  hintArrow = null;
+
   if (boardObj) {
     const orientation = dev.playerColor === 'black' ? 'black' : 'white';
     boardObj.orientation(orientation);
     boardObj.position(dev.fenBefore, false);
   }
+
+  // Show repertoire move arrow
   bestMoveArrow = { from: dev.repertoireMove.uci.slice(0, 2), to: dev.repertoireMove.uci.slice(2, 4) };
   renderArrows();
 
