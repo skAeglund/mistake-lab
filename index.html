@@ -1316,7 +1316,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire: continuation practice, start-from-beginning, manual FEN input, Chessable bookmarklet</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">RepertoireCheck: flip preview for black, fix animation teleport, hide spoiler text, track continuation errors for retry, next deviation skip button, fix badge count</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -6428,6 +6428,8 @@ function updateSessionProgress() {
 
   if (reviewMode) renderReviewList();
   else renderGameList();
+
+  if (repertoireDrillMode) updateRepertoireBadge();
 }
 
 // ─── Game list rendering ───
@@ -7303,7 +7305,6 @@ function loadPosition(globalIdx) {
           <button class="btn btn-ghost btn-sm" onclick="exitRepertoireDrill()" style="font-size:10px;padding:2px 6px;">✕ Exit</button>
         </div>
         <div>Find the move from your repertoire</div>
-        <div style="font-size:11px;color:var(--text-muted);margin-top:2px">You played <code class="mono">${escHtml(m.playedMove.san)}</code> in your game</div>
         <div style="margin-top:4px;"><button class="btn btn-ghost btn-sm" onclick="startRepertoireFromBeginning()" style="font-size:10px;">⏮ Start from beginning</button></div>
       </div>
     `;
@@ -12136,7 +12137,9 @@ async function refreshRepertoire() {
 function updateRepertoireBadge() {
   const badge = document.getElementById('repertoireBadgeCount');
   if (badge) {
-    badge.textContent = repertoireDeviations.length || '';
+    const done = getCompletedSet();
+    const remaining = repertoireDeviations.filter(d => !done.has(posId(d))).length;
+    badge.textContent = remaining || '';
   }
 }
 
@@ -12215,7 +12218,7 @@ function renderRepertoirePanel() {
     html += `<div style="padding:8px 12px;border-bottom:1px solid var(--border);">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
         <span style="font-size:12px;font-weight:600;color:var(--text-primary);">
-          Deviations (${repertoireDeviations.length})
+          Deviations (${(() => { const done = getCompletedSet(); const rem = repertoireDeviations.filter(d => !done.has(posId(d))).length; return rem < repertoireDeviations.length ? rem + '/' + repertoireDeviations.length : repertoireDeviations.length; })()})
         </span>
         <button class="btn btn-primary btn-sm" onclick="startRepertoireDrill()" style="font-size:11px;">▶ Drill</button>
       </div>`;
@@ -12362,7 +12365,7 @@ function getOpponentName(game, playerColor) {
 // ── Position preview tooltip ──
 let posPreviewEl = null;
 
-function showPositionPreview(fen, event) {
+function showPositionPreview(fen, event, playerColor) {
   if (!posPreviewEl) {
     posPreviewEl = document.createElement('div');
     posPreviewEl.className = 'pos-preview';
@@ -12371,19 +12374,30 @@ function showPositionPreview(fen, event) {
 
   const PIECE_MAP = { K: 'wK', Q: 'wQ', R: 'wR', B: 'wB', N: 'wN', P: 'wP',
                       k: 'bK', q: 'bQ', r: 'bR', b: 'bB', n: 'bN', p: 'bP' };
-  const rows = fen.split(' ')[0].split('/');
+  let rows = fen.split(' ')[0].split('/');
+  const flipBoard = playerColor === 'black';
+  if (flipBoard) rows = rows.slice().reverse();
+  if (flipBoard) rows = rows.map(row => {
+    // Expand row to 8 chars, reverse, then iterate
+    let expanded = '';
+    for (const ch of row) {
+      if (/\d/.test(ch)) expanded += '1'.repeat(parseInt(ch));
+      else expanded += ch;
+    }
+    return [...expanded].reverse().join('');
+  });
   let html = '';
   for (let r = 0; r < 8; r++) {
     let col = 0;
     for (const ch of rows[r]) {
       if (/\d/.test(ch)) {
         for (let k = 0; k < parseInt(ch); k++) {
-          const light = (r + col) % 2 === 0;
+          const light = flipBoard ? (r + col) % 2 !== 0 : (r + col) % 2 === 0;
           html += `<div class="pos-preview-sq ${light ? 'light' : 'dark'}"></div>`;
           col++;
         }
       } else {
-        const light = (r + col) % 2 === 0;
+        const light = flipBoard ? (r + col) % 2 !== 0 : (r + col) % 2 === 0;
         const piece = PIECE_MAP[ch];
         html += `<div class="pos-preview-sq ${light ? 'light' : 'dark'}"><img src="https://lichess1.org/assets/piece/cburnett/${piece}.svg"></div>`;
         col++;
@@ -12935,10 +12949,14 @@ function advanceRepertoireContinuation() {
 }
 
 function showRepContPrompt(repertoireMove, extraInfo) {
+  const nextDevBtn = repertoireDrillMode && currentMistakeIdx < filteredMistakes.length - 1
+    ? `<div style="margin-top:6px;"><button class="btn btn-ghost btn-sm" style="font-size:10px;color:var(--text-muted);" onclick="repContActive=false;loadPosition(${currentMistakeIdx + 1})">Skip to next deviation →</button></div>`
+    : '';
   const fb = document.getElementById('feedbackContainer');
   fb.innerHTML = `<div class="feedback-box" style="border-left:3px solid var(--blue);background:rgba(91,155,213,0.06);padding:10px 12px;">
     <div class="feedback-title" style="color:var(--blue);">♟ Continuation Practice</div>
     <div class="feedback-text" style="font-size:12px;">Find the repertoire move${extraInfo}</div>
+    ${nextDevBtn}
   </div>`;
 }
 
@@ -12962,9 +12980,8 @@ function evaluateRepertoireContinuationMove(source, target, move) {
   const isCorrect = (playedUci === expected.uci) || (move.san === expected.san);
 
   if (isCorrect) {
-    // Redo the move
+    // Redo the move (board already shows the correct position from drag)
     gameEngine.move(move.san, { sloppy: true });
-    boardObj.position(gameEngine.fen(), false);
     showLastMoveHighlight(source, target);
 
     showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
@@ -12977,6 +12994,14 @@ function evaluateRepertoireContinuationMove(source, target, move) {
   } else {
     // Wrong — show correct move, let them retry
     boardObj.position(gameEngine.fen(), false); // already undone
+
+    // Track this deviation as failed for the retry loop
+    if (repertoireDrillMode) {
+      const devM = filteredMistakes[currentMistakeIdx];
+      if (devM && devM.positionKey && !repertoireDrillFailed.includes(devM.positionKey)) {
+        repertoireDrillFailed.push(devM.positionKey);
+      }
+    }
 
     showColorFeedback('var(--yellow)', 'rgba(255,193,7,0.08)',
       `<code>${escHtml(move.san)}</code> is not the repertoire move`,
