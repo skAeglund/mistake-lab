@@ -12461,12 +12461,10 @@ function evaluateRepertoireMove(source, target, move) {
 
   if (isCorrect) {
     let grade, gradeLabel;
-    if (hintUsed) {
-      grade = 2; gradeLabel = 'Hard';
-    } else if (currentAttempts <= 1) {
+    if (currentAttempts <= 1 && !hintUsed) {
       grade = 4; gradeLabel = 'Easy';
     } else {
-      grade = 3; gradeLabel = 'Good';
+      grade = 1; gradeLabel = 'Again';
     }
 
     // Track session stats
