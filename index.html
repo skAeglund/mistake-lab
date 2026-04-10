@@ -12304,8 +12304,18 @@ function showRepertoireDeviation(posKey) {
     boardObj.position(dev.fenBefore, false);
   }
 
-  // Show repertoire move arrow
+  // Show repertoire move arrow (green) and deviated moves (red)
   bestMoveArrow = { from: dev.repertoireMove.uci.slice(0, 2), to: dev.repertoireMove.uci.slice(2, 4) };
+  // Draw red arrows for each unique played move
+  const playedMoves = new Set(dev.games.map(g => g.playedMove.uci));
+  for (const uci of playedMoves) {
+    const from = uci.slice(0, 2);
+    const to = uci.slice(2, 4);
+    const key = from + to;
+    if (key !== dev.repertoireMove.uci.slice(0, 4)) { // don't draw red over green
+      activeArrows.set(key, 'red');
+    }
+  }
   renderArrows();
 
   // Show game context in feedback area
