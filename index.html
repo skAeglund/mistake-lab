@@ -1298,7 +1298,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Premove support, retry feedback parity, hide engine arrows in advantage cap</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Persist filter settings across sessions (localStorage)</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1761,6 +1761,27 @@ const ICON_ADVANTAGE = '<svg width="14" height="14" viewBox="0 0 40 40" style="v
 const filters = { color: new Set(['white','black']), severity: new Set(['mistake','blunder']), platform: new Set(['lichess','chesscom']), type: new Set(['mistake','tactic','advantage']), speed: new Set(['bullet','blitz','rapid','classical']), rated: new Set(['rated','casual']) };
 let hideTimeTrouble = false;
 
+function saveFilters() {
+  const obj = {};
+  for (const [k, s] of Object.entries(filters)) obj[k] = [...s];
+  obj.hideTimeTrouble = hideTimeTrouble;
+  try { localStorage.setItem('mistakelab_filters', JSON.stringify(obj)); } catch(e) {}
+}
+function loadSavedFilters() {
+  try {
+    const raw = localStorage.getItem('mistakelab_filters');
+    if (!raw) return;
+    const obj = JSON.parse(raw);
+    for (const [k, s] of Object.entries(filters)) {
+      if (Array.isArray(obj[k]) && obj[k].length > 0) {
+        s.clear();
+        for (const v of obj[k]) s.add(v);
+      }
+    }
+    if (typeof obj.hideTimeTrouble === 'boolean') hideTimeTrouble = obj.hideTimeTrouble;
+  } catch(e) {}
+}
+loadSavedFilters();
 // ─── Opening filter state ───
 let openingFilterMode = false;   // true when the board is in filter-input mode
 let openingFilterFen = null;     // position key (first 4 FEN fields) when filter is active
@@ -5521,6 +5542,7 @@ function toggleFilter(el) {
     el.classList.add('active');
   }
   applyFilters();
+  saveFilters();
   gameListDisplayLimit = 50;
   updateSessionProgress();
   if (activeGameId) selectGame(activeGameId);
@@ -5531,6 +5553,7 @@ function toggleTimeTroubleFilter() {
   const btn = document.getElementById('btnHideTimeTrouble');
   btn.classList.toggle('active', hideTimeTrouble);
   applyFilters();
+  saveFilters();
   gameListDisplayLimit = 50;
   updateSessionProgress();
   if (activeGameId) selectGame(activeGameId);
@@ -6269,6 +6292,14 @@ function applyFilters() {
 function showMainApp() {
   if (appShown) return; // prevent double initialization
   appShown = true;
+
+  // Sync filter chip UI with saved filter state
+  document.querySelectorAll('.filter-chip[data-filter]').forEach(el => {
+    const set = filters[el.dataset.filter];
+    if (set) el.classList.toggle('active', set.has(el.dataset.value));
+  });
+  const ttBtn = document.getElementById('btnHideTimeTrouble');
+  if (ttBtn) ttBtn.classList.toggle('active', hideTimeTrouble);
 
   document.getElementById('loginScreen').classList.add('hidden');
   document.getElementById('mainApp').classList.remove('hidden');
