@@ -32,6 +32,8 @@
 //   --rescan-tactics Reset _tacticsScanned flags and re-scan all games
 //   --maia-model    Path to Maia ONNX model for human-like opponent lines (optional)
 //   --rescan-clocks Re-extract clock data for all games (re-fetches Lichess, re-parses Chess.com PGN)
+//   --no-tactics    Skip automatic tactic scanning in a normal analysis run
+//   --no-clocks     Skip automatic clock stamping in a normal analysis run
 //
 // Examples:
 //   node analyze.js --username DrNykterstein --stockfish ./stockfish
@@ -92,6 +94,8 @@ const CONFIG = {
   maiaModel:      args['maia-model'] || null,
   // Clock data
   rescanClocks:   args['rescan-clocks'] === 'true' || args['rescan-clocks'] === true,
+  noTactics:      args['no-tactics'] === 'true' || args['no-tactics'] === true,
+  noClocks:       args['no-clocks'] === 'true' || args['no-clocks'] === true,
 };
 
 if (CONFIG.rescanClocks) {
@@ -1417,10 +1421,16 @@ async function main() {
   for (const g of existingGames) {
     if (g.analysis && g.analysis.length > 0) existingIds.add(g.id);
     // Stamp player color on older games that don't have it yet
-    if (g.analysis && g.analysis.length > 0 && !g._playerColor && CONFIG.username) {
-      const isW = g.players?.white?.user?.name?.toLowerCase() === CONFIG.username.toLowerCase()
-               || g.players?.white?.user?.id?.toLowerCase() === CONFIG.username.toLowerCase();
-      g._playerColor = isW ? 'white' : 'black';
+    if (g.analysis && g.analysis.length > 0 && !g._playerColor) {
+      const allNames = gistUsernames.length > 0 ? gistUsernames : (CONFIG.username ? [CONFIG.username] : []);
+      const wName = (g.players?.white?.user?.name || '').toLowerCase();
+      const wId = (g.players?.white?.user?.id || '').toLowerCase();
+      const bName = (g.players?.black?.user?.name || '').toLowerCase();
+      const bId = (g.players?.black?.user?.id || '').toLowerCase();
+      const isW = allNames.some(u => { const l = u.toLowerCase(); return l === wName || l === wId; });
+      const isB = allNames.some(u => { const l = u.toLowerCase(); return l === bName || l === bId; });
+      if (isW) g._playerColor = 'white';
+      else if (isB) g._playerColor = 'black';
     }
     // Stamp clocks on games that already have raw data (Chess.com PGN, or Lichess centiseconds)
     stampClocks(g);
@@ -1692,21 +1702,6 @@ async function main() {
 
   log(`${toAnalyze.length} games need local analysis`);
 
-  if (toAnalyze.length === 0) {
-    log('Nothing to do! All games are already analyzed.');
-    quitAll();
-    // Still save merged data (may have new _playerColor stamps)
-    await saveAll(existingGames, undefined, `MistakeLab analyzer — no new games, merged data save`);
-    return;
-  }
-
-  // Estimate time
-  const avgMoves = toAnalyze.reduce((sum, g) => sum + g.moves.split(' ').length, 0) / toAnalyze.length;
-  const estSecondsPerPos = 0.3; // rough estimate for native SF at depth 18
-  const estTotal = toAnalyze.length * avgMoves * estSecondsPerPos;
-  log(`Estimated time: ${formatDuration(estTotal)} (${Math.round(avgMoves)} avg moves/game, ~${estSecondsPerPos}s/position)`);
-  log('');
-
   // ── Phase 4: Analyze games ──
   const analyzedGames = [...existingGames];
   let gamesAnalyzed = 0;
@@ -1729,7 +1724,17 @@ async function main() {
     process.exit(0);
   });
 
-  for (let i = 0; i < toAnalyze.length; i++) {
+  if (toAnalyze.length === 0) {
+    log('All games already analyzed — skipping to clocks & tactics.');
+  } else {
+    // Estimate time
+    const avgMoves = toAnalyze.reduce((sum, g) => sum + g.moves.split(' ').length, 0) / toAnalyze.length;
+    const estSecondsPerPos = 0.3;
+    const estTotal = toAnalyze.length * avgMoves * estSecondsPerPos;
+    log(`Estimated time: ${formatDuration(estTotal)} (${Math.round(avgMoves)} avg moves/game, ~${estSecondsPerPos}s/position)`);
+    log('');
+
+    for (let i = 0; i < toAnalyze.length; i++) {
     if (shuttingDown) break;
     const game = toAnalyze[i];
     const moveCount = game.moves.split(' ').length;
@@ -1773,9 +1778,120 @@ async function main() {
       await saveAll(analyzedGames, gamesAnalyzed, `MistakeLab analyzer — ${gamesAnalyzed} games analyzed`);
       savePosCache();
     }
+    } // end for loop
+  } // end else (had games to analyze)
+
+  // ── Phase 5: Stamp clocks on games missing clock data ──
+  if (!CONFIG.noClocks) {
+    // Chess.com games: parse clocks from PGN
+    let chesscomStamped = 0;
+    for (const g of analyzedGames) {
+      if (g._source === 'chesscom' && g.pgn && !g._clocksStamped) {
+        stampClocks(g);
+        if (g._clocksStamped) chesscomStamped++;
+      }
+    }
+    if (chesscomStamped > 0) log(`Extracted clocks from ${chesscomStamped} Chess.com PGNs`);
+
+    // Lichess games without clocks: re-fetch with clocks=true
+    const lichessNeedClocks = analyzedGames.filter(g => g._source !== 'chesscom' && !g._clocksStamped && g.analysis?.length > 0);
+    if (lichessNeedClocks.length > 0) {
+      log(`Re-fetching ${lichessNeedClocks.length} Lichess games for clock data…`);
+      const allUsernames = gistUsernames.length > 0 ? gistUsernames : (CONFIG.username ? [CONFIG.username] : []);
+      const lichessById = new Map(lichessNeedClocks.map(g => [g.id, g]));
+      for (const username of allUsernames) {
+        try {
+          const freshGames = await fetchLichessGames(username, CONFIG.maxGames);
+          let matched = 0;
+          for (const fg of freshGames) {
+            const existing = lichessById.get(fg.id);
+            if (existing && Array.isArray(fg.clocks) && fg.clocks.length > 0) {
+              existing.clocks = fg.clocks;
+              existing._clocksStamped = false;
+              stampClocks(existing);
+              matched++;
+            }
+          }
+          if (matched > 0) log(`  ${username}: matched clocks for ${matched} games`);
+        } catch (err) {
+          logError(`  Failed to re-fetch clocks for ${username}: ${err.message}`);
+        }
+      }
+    }
+    const totalWithClocks = analyzedGames.filter(g => g._clocksStamped).length;
+    log(`Clock data: ${totalWithClocks}/${analyzedGames.length} games`);
   }
 
-  // ── Phase 5: Final save ──
+  // ── Phase 6: Scan tactics on games that haven't been scanned ──
+  if (!CONFIG.noTactics) {
+    const toScanTactics = analyzedGames.filter(g =>
+      g.analysis?.length > 0 && !g._tacticsScanned && g._playerColor
+    );
+    if (toScanTactics.length > 0) {
+      log('');
+      log(`Scanning ${toScanTactics.length} games for tactics (depth ${CONFIG.tacticDepth})…`);
+
+      // Initialize Maia if available
+      let maia = null;
+      if (CONFIG.maiaModel && MaiaEngine) {
+        try {
+          maia = new MaiaEngine();
+          const modelPath = path.resolve(CONFIG.maiaModel);
+          const movesDir = path.dirname(modelPath);
+          await maia.init(modelPath, movesDir);
+          log(`Maia loaded for tactic alt lines`);
+        } catch (e) {
+          logError(`Maia init failed: ${e.message} — continuing without Maia`);
+          maia = null;
+        }
+      }
+
+      let tacticTotal = 0, tacticGamesScanned = 0;
+      let nextScanIdx = 0;
+
+      async function tacticWorkerLoop(sf, workerId) {
+        while (nextScanIdx < toScanTactics.length && !shuttingDown) {
+          const idx = nextScanIdx++;
+          if (idx >= toScanTactics.length) break;
+          const game = toScanTactics[idx];
+          const opening = game.opening?.name || 'Unknown';
+          log(`  [${idx + 1}/${toScanTactics.length}] W${workerId}: tactics — ${opening}`);
+
+          try {
+            await sf.newGame();
+            const tactics = await scanGameForTactics(sf, game, CONFIG.tacticDepth, maia);
+            game.tactics = tactics;
+            game._tacticsScanned = true;
+            tacticGamesScanned++;
+            if (tactics.length > 0) {
+              tacticTotal += tactics.length;
+              for (const t of tactics) {
+                const userMoves = t.moves.filter(m => m.isUser).length;
+                const label = t.found ? '✓ found' : '✗ missed';
+                const moveNum = Math.ceil(t.startPly / 2);
+                const solution = t.moves.filter(m => m.isUser).map(m => m.san).join(' → ');
+                log(`    ⚡ ${userMoves}-move at move ${moveNum} (${label}): ${solution}`);
+              }
+            }
+          } catch (err) {
+            logError(`  Failed to scan ${game.id}: ${err.message}`);
+          }
+
+          if (tacticGamesScanned > 0 && tacticGamesScanned % CONFIG.saveEvery === 0) {
+            log(`  Saving tactic progress (${tacticGamesScanned} scanned)…`);
+            await saveAll(analyzedGames, gamesAnalyzed, `MistakeLab analyzer — ${gamesAnalyzed} analyzed, ${tacticTotal} tactics`);
+          }
+        }
+      }
+
+      await Promise.all(pool.map((sf, i) => tacticWorkerLoop(sf, i + 1)));
+      log(`Tactics: ${tacticTotal} found in ${tacticGamesScanned} games`);
+    } else {
+      log(`Tactics: all ${analyzedGames.filter(g => g._tacticsScanned).length} analyzed games already scanned`);
+    }
+  }
+
+  // ── Phase 7: Final save ──
   log('');
   log('═══════════════════════════════════════════════════');
   log('  Analysis Complete');
