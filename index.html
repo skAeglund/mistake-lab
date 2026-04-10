@@ -752,6 +752,16 @@
     50% { opacity: 1; }
   }
 
+  /* Premove highlight (transparent red) */
+  .square-premove::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: rgba(220, 50, 50, 0.45);
+    pointer-events: none;
+    z-index: -1;
+  }
+
   /* Click-to-move selection overlay */
   .square-selected::before {
     content: '';
@@ -1288,7 +1298,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Analysis: preserve PV arrows on click, exaggerate size differences</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Premove support, retry feedback parity, hide engine arrows in advantage cap</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1632,6 +1642,7 @@ let contLineSubtitle = '';     // "Opponent played Nf3 (Maia)" — shown in cont
 let afterMoveCpWhite = null;    // cp from white's POV after user's move (for eval bar during line browsing)
 let continuationMode = false;   // true when in continuation practice
 let contWrongMovePending = false; // true when showing refutation engine line during continuation
+let premoveData = null;           // { from, to, promotion } — queued premove during opponent's turn
 let continuationContUci = '';   // stored for deferred engine line display
 let currentSolveFen = null;     // FEN the user is solving (differs from m.fenBefore in continuation)
 let firstAttemptFailed = false;  // tracks if first try on current position was wrong
@@ -6581,6 +6592,7 @@ function onBoardClick(e) {
 
   // Left click / tap clears arrows
   if (!isRightClicking) {
+    clearPremove(); // left click cancels premove (like Lichess)
     if (analysisMode) {
       // Only clear user-drawn annotations, preserve PV arrows
       activeArrows.clear();
@@ -6601,6 +6613,7 @@ function onBoardClick(e) {
       clearSelection();
       onSnapEnd();
     }
+    clearPremove(); // right-click cancels premove
 
     const sq = getSquareFromMouseEvent(e);
     if (sq) {
@@ -6974,6 +6987,7 @@ function loadPosition(globalIdx) {
   preAnalysisPaused = false;
   continuationMode = false;
   contWrongMovePending = false;
+  clearPremove();
   tacticMode = false;
   tacticStepIdx = 0;
   tacticMoves = [];
@@ -7193,13 +7207,21 @@ function onDragStart(source, piece) {
   const m = filteredMistakes[currentMistakeIdx];
   if (!m) return false;
   if (gameEngine.game_over()) return false;
+
+  // Premove: allow dragging user's pieces when it's the opponent's turn during continuation
+  const userPrefix = m.playerColor === 'white' ? 'w' : 'b';
+  if (continuationMode && isOpponentTurn() && piece.charAt(0) === userPrefix) {
+    if (selectedSquare !== source) clearSelection();
+    selectSquare(source);
+    return true;
+  }
+
   // Check it's the right color's turn
   if ((gameEngine.turn() === 'w' && piece.search(/^b/) !== -1) ||
       (gameEngine.turn() === 'b' && piece.search(/^w/) !== -1)) {
     return false;
   }
   // Only allow moving the user's own pieces — except during continuation line browsing
-  const userPrefix = m.playerColor === 'white' ? 'w' : 'b';
   if (piece.charAt(0) !== userPrefix && !contLineBrowsing) return false;
   // Ensure selection highlights are visible while dragging
   if (selectedSquare !== source) clearSelection();
@@ -7246,6 +7268,14 @@ function onDrop(source, target) {
 
   deselectionPending = false; // real drag happened — suppress mouseup deselection
   clearArrows();
+
+  // Premove: queue move when it's opponent's turn during continuation
+  if (continuationMode && isOpponentTurn()) {
+    clearSelection();
+    setPremove(source, target, 'q'); // always assume queen promotion for premoves
+    return 'snapback';
+  }
+
   const move = gameEngine.move({
     from: source,
     to: target,
@@ -10199,6 +10229,16 @@ function handleReviewRetryResult(wpDrop, move, bestMoveSan, isExactBest) {
     body += `<div style="margin-top:4px;font-size:12px;color:var(--text-muted);">Better than your original <code>${escHtml(originalMv.san)}</code> (−${originalMv.wpDrop}%)</div>`;
   }
 
+  // Show exploration buttons for bad moves (same as key move view)
+  const showExplore = wpDrop > 5 && originalMv.bestMoveUci;
+  const exploreBtns = showExplore ? `
+    <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">
+      ${originalMv.bestMoveUci ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewBestArrow(${moveIdx})">Show best</button>` : ''}
+      ${originalMv.bestMoveUci ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewBestLine(${moveIdx})">Show line</button>` : ''}
+      <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewRefutation(${moveIdx})">Show refutation</button>
+    </div>
+  ` : '';
+
   const navHtml = `
     <div style="display:flex;gap:8px;margin-top:10px;">
       <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="startReviewRetry(${moveIdx})">↺ Try again</button>
@@ -10210,7 +10250,7 @@ function handleReviewRetryResult(wpDrop, move, bestMoveSan, isExactBest) {
   container.innerHTML = `
     <div class="feedback-box" style="background:${wpDropToColorDim(wpDrop)};border-left:3px solid ${color};">
       <div class="feedback-title" style="color:${color}">${title}</div>
-      <div class="feedback-text">${body}${navHtml}</div>
+      <div class="feedback-text">${body}${exploreBtns}${navHtml}</div>
     </div>
   `;
 }
@@ -10537,6 +10577,29 @@ async function advanceContinuation(contUci) {
       `;
     }
   }
+
+  // Execute queued premove if one exists
+  if (premoveData) {
+    const pm = premoveData;
+    clearPremove();
+    // Small delay so the user sees the opponent's move land first
+    setTimeout(() => {
+      if (!continuationMode || !gameEngine || gameEngine.game_over()) return;
+      const testMove = gameEngine.move({ from: pm.from, to: pm.to, promotion: pm.promotion || 'q' });
+      if (testMove) {
+        clearSelection();
+        showLastMoveHighlight(pm.from, pm.to);
+        boardObj.position(gameEngine.fen(), true);
+        currentAttempts++;
+        if (tacticMode) {
+          evaluateTacticMove(pm.from, pm.to, testMove);
+        } else {
+          evaluateMove(pm.from, pm.to, testMove);
+        }
+      }
+      // If illegal, silently clear (premoveData already null)
+    }, 150);
+  }
 }
 
 // ─── Navigation ───
@@ -10627,6 +10690,7 @@ function retryPosition() {
   hintMove = null;
   continuationMode = false;
   contWrongMovePending = false;
+  clearPremove();
   hideMaiaControls();
   closeMobileFeedback();
   document.getElementById('btnRetry').classList.add('hidden');
@@ -10746,6 +10810,31 @@ function clearHighlights() {
     el.style.removeProperty('--hl-color');
   });
   clearSelection();
+}
+
+function clearPremove() {
+  if (!premoveData) return;
+  premoveData = null;
+  document.querySelectorAll('.square-premove').forEach(el => el.classList.remove('square-premove'));
+}
+
+function setPremove(from, to, promotion) {
+  clearPremove();
+  premoveData = { from, to, promotion: promotion || null };
+  const boardEl = document.getElementById('board');
+  if (!boardEl) return;
+  const fromEl = boardEl.querySelector(`[data-square="${from}"]`);
+  const toEl = boardEl.querySelector(`[data-square="${to}"]`);
+  if (fromEl) fromEl.classList.add('square-premove');
+  if (toEl) toEl.classList.add('square-premove');
+}
+
+function isOpponentTurn() {
+  if (!gameEngine || currentMistakeIdx < 0) return false;
+  const m = filteredMistakes[currentMistakeIdx];
+  if (!m) return false;
+  const userTurnChar = m.playerColor === 'white' ? 'w' : 'b';
+  return gameEngine.turn() !== userTurnChar;
 }
 
 function highlightSquaresWithColor(from, to, color) {
@@ -10954,14 +11043,16 @@ function renderArrows() {
     // Hovered move arrow (blue, high opacity)
     if (hoverFilterArrow) drawOne(hoverFilterArrow.from, hoverFilterArrow.to, 'rgba(66, 133, 244, 0.8)', 1);
     // Best move arrow first (behind user arrows)
-    if (analysisArrow) drawOne(analysisArrow.from, analysisArrow.to, 'rgba(100, 160, 255, 0.5)', 1);
+    // Hide engine arrows during active advantage cap play (no visual hints)
+    const suppressEngineArrows = advantageMode && continuationMode;
+    if (analysisArrow && !suppressEngineArrows) drawOne(analysisArrow.from, analysisArrow.to, 'rgba(100, 160, 255, 0.5)', 1);
     // Analysis mode: multi-PV arrows (draw weaker ones first so strongest is on top)
     if (analysisPvArrows.length > 0) {
       for (let i = analysisPvArrows.length - 1; i >= 0; i--) {
         const a = analysisPvArrows[i];
         drawOne(a.from, a.to, a.color, a.opacity, a.scale);
       }
-    } else if (bestMoveArrow) {
+    } else if (bestMoveArrow && !suppressEngineArrows) {
       drawOne(bestMoveArrow.from, bestMoveArrow.to, 'rgba(62, 207, 142, 0.7)', 1);
     }
     // Note arrows (semi-transparent, behind hint/user arrows)
