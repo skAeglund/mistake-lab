@@ -1298,7 +1298,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Persist filter settings across sessions (localStorage)</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">RepertoireCheck: study-based deviation drill, gap detection, Lichess OAuth, study comments as notes</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1333,6 +1333,9 @@
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
         <h3 style="margin-bottom:0" id="panelTitle">Games</h3>
         <div style="display:flex;gap:6px;align-items:center;">
+          <button class="btn btn-ghost btn-sm" id="btnRepertoireMode" onclick="toggleRepertoireMode()" style="font-size:11px;">
+            ♟ Repertoire <span id="repertoireBadgeCount" style="font-size:10px;"></span>
+          </button>
           <button class="btn btn-ghost btn-sm" id="btnReviewMode" onclick="toggleReviewMode()" style="font-size:11px;">
             ⏰ Review <span id="reviewDueCount"></span>
           </button>
@@ -1796,6 +1799,23 @@ let filterArrows = [];           // [{from, to, opacity}] frequency arrows in fi
 let hoverFilterArrow = null;     // {from, to} arrow to highlight on stats row hover
 let savedFilterOrientation = null; // board orientation to restore when re-entering filter mode
 
+// ─── Repertoire state ───
+let repertoireTrie = null;       // Map<positionKey, {san, uci}> — one correct move per position
+let repertoireDeviations = [];   // [{gameId, movePly, fenBefore, playedMove:{san,uci}, repertoireMove:{san,uci}, positionKey, opening}]
+let repertoireGaps = [];         // [{positionKey, opponentMove:{san,uci}, count, games:[], fen}]
+let repertoireMode = false;      // true when repertoire panel is active
+let repertoireDrillMode = false; // true when actively drilling repertoire deviations
+let repertoireDrillQueue = [];   // deviation items formatted for loadPosition
+let repertoireDrillCorrect = 0;  // positions solved on first attempt
+let repertoireDrillWrong = 0;    // positions that needed >1 attempt or reveal
+let repertoireDrillFailed = [];  // positionKeys of failed items for retry loop
+let savedFilteredMistakes = null; // original filteredMistakes, restored when exiting drill
+let repertoireStudyCache = null; // localStorage cached: {studies:[{id,color,name,pgnHash,trie:{}}], lastUpdated}
+const REPERTOIRE_CACHE_KEY = 'mistakelab_repertoire';
+const LICHESS_CLIENT_ID = 'mistakelab';
+const LICHESS_REDIRECT_URI = location.origin + location.pathname;
+let lichessToken = localStorage.getItem('mistakelab_lichess_token') || null;
+
 // ─── Maia 3 state ───
 let maiaSession = null;       // ONNX InferenceSession
 let maiaReady = false;
@@ -1975,7 +1995,12 @@ const MISTAKES_CACHE_VERSION = 6;
 const MISTAKES_CACHE_PARAMS = { wpDropThreshold: 10, advantageThreshold: 300, advantageMinMoves: 2 };
 
 // Populate login fields from saved config + auto-load
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+  // Handle Lichess OAuth callback (redirect back from lichess.org)
+  if (window.location.search.includes('code=')) {
+    await lichessOAuthCallback();
+  }
+
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
@@ -2119,6 +2144,7 @@ function tacticHasValidLines(m) {
 }
 
 function posId(m) {
+  if (m.type === 'repertoire') return `r_${m.positionKey}`;
   const prefix = m.type === 'tactic' ? 't' : m.type === 'advantage' ? 'a' : '';
   return `${m.gameId}_${prefix}${m.movePly}`;
 }
@@ -3867,6 +3893,29 @@ async function showHint() {
       if (btn) { btn.disabled = true; btn.textContent = '💡 Hint'; }
     }
     return;
+  }
+
+  // ── Repertoire mode hint: use repertoire move ──
+  if (repertoireDrillMode && currentMistakeIdx >= 0) {
+    const m = filteredMistakes[currentMistakeIdx];
+    if (m && m.type === 'repertoire' && m.repertoireMove) {
+      hintUsed = true;
+      const fromSq = m.repertoireMove.uci.substring(0, 2);
+      const toSq = m.repertoireMove.uci.substring(2, 4);
+      if (hintLevel === 0) {
+        clearHintHighlights();
+        const fromEl = document.querySelector(`.square-${fromSq}`);
+        if (fromEl) fromEl.classList.add('square-hint');
+        hintLevel = 1;
+        if (btn) { btn.disabled = false; btn.textContent = '💡 Hint (2/2)'; btn.style.borderColor = 'var(--blue)'; btn.style.color = 'var(--blue)'; }
+      } else if (hintLevel === 1) {
+        hintArrow = { from: fromSq, to: toSq };
+        renderArrows();
+        hintLevel = 2;
+        if (btn) { btn.disabled = true; btn.textContent = '💡 Hint'; }
+      }
+      return;
+    }
   }
 
   if (hintLevel === 0) {
@@ -6322,6 +6371,12 @@ function showMainApp() {
   initStockfish();
   initMaia(); // loads in background — non-blocking
 
+  // Load repertoire studies in background
+  loadRepertoireTrie().then(() => {
+    detectRepertoireDeviations();
+    updateRepertoireBadge();
+  });
+
   // Start with the opening explorer open
   enterOpeningFilter();
 }
@@ -6470,6 +6525,8 @@ function renderGameList() {
 
 // ─── Review mode ───
 function toggleReviewMode() {
+  if (repertoireDrillMode) exitRepertoireDrill();
+  if (repertoireMode) { toggleRepertoireMode(); }
   // Exit opening filter mode (keep the filter active)
   if (openingFilterMode) {
     openingFilterMode = false;
@@ -6960,6 +7017,8 @@ function renderQueue() {
       queueLabel = `<span style="color:#4caf50">♛ +${(m.peakCp/100).toFixed(1)}</span>`;
     } else if (m.type === 'tactic') {
       queueLabel = `<span style="color:var(--yellow)">+${Math.abs(m.wpSwing)}%</span>`;
+    } else if (m.type === 'repertoire') {
+      queueLabel = `<span style="color:var(--blue)">♟ ${m.repertoireMove?.san || '?'}</span>`;
     } else {
       queueLabel = `<span class="loss ${lossClass}">−${m.wpDrop}%${m.timeTrouble ? ' <span style="color:var(--text-muted)" title="Time trouble">⏱</span>' : ''}</span>`;
     }
@@ -7171,6 +7230,33 @@ function loadPosition(globalIdx) {
 
     // Enter continuation mode — user plays first (peakFen is before user's move)
     startAdvantageContinuation(m);
+  } else if (m.type === 'repertoire') {
+    // ── Repertoire deviation mode setup ──
+    const drillProgress = repertoireDrillMode ? `<span style="font-size:11px;color:var(--text-muted);float:right;">${currentMistakeIdx + 1} / ${filteredMistakes.length}</span>` : '';
+    const countInfo = m.gameCount > 1 ? ` <span style="font-size:10px;color:var(--text-muted)">(${m.gameCount} games)</span>` : '';
+    document.getElementById('posInfoContent').innerHTML = `
+      <div style="font-size:13px;line-height:1.7">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <span>♟ <strong>Repertoire Check</strong>${countInfo}</span>
+          ${drillProgress}
+          <button class="btn btn-ghost btn-sm" onclick="exitRepertoireDrill()" style="font-size:10px;padding:2px 6px;">✕ Exit</button>
+        </div>
+        <div>Find the move from your repertoire</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:2px">You played <code class="mono">${escHtml(m.playedMove.san)}</code> in your game</div>
+      </div>
+    `;
+    stopPreAnalysis();
+    if (sfSearchActive && sfWorker) {
+      sfWorker.terminate();
+      sfWorker = null;
+      sfReady = false;
+      sfSearchActive = false;
+      initStockfish();
+    }
+    document.getElementById('feedbackContainer').innerHTML = '';
+    document.getElementById('contLineContainer').innerHTML = '';
+    renderQueue();
+    updateSessionProgress();
   } else {
     // ── Mistake mode setup ──
     const clockInfo = m.clockRemaining != null
@@ -7388,6 +7474,8 @@ function onDrop(source, target) {
   currentAttempts++;
   if (tacticMode) {
     evaluateTacticMove(source, target, move);
+  } else if (repertoireDrillMode) {
+    evaluateRepertoireMove(source, target, move);
   } else {
     evaluateMove(source, target, move);
   }
@@ -11281,6 +11369,1076 @@ function closeMobileFeedback() {
   clearTimeout(_mobilePopupTimer);
 }
 
+// ─── Repertoire Check ───
+
+// ── Lichess OAuth2 PKCE ──
+
+async function lichessOAuthStart() {
+  const codeVerifier = generateRandomString(128);
+  const state = generateRandomString(32);
+  const codeChallenge = await sha256Base64url(codeVerifier);
+
+  sessionStorage.setItem('lichess_code_verifier', codeVerifier);
+  sessionStorage.setItem('lichess_oauth_state', state);
+
+  const params = new URLSearchParams({
+    response_type: 'code',
+    client_id: LICHESS_CLIENT_ID,
+    redirect_uri: LICHESS_REDIRECT_URI,
+    code_challenge_method: 'S256',
+    code_challenge: codeChallenge,
+    state,
+  });
+
+  window.location.href = `https://lichess.org/oauth?${params}`;
+}
+
+async function lichessOAuthCallback() {
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get('code');
+  const state = params.get('state');
+  if (!code || !state) return false;
+
+  const savedState = sessionStorage.getItem('lichess_oauth_state');
+  const codeVerifier = sessionStorage.getItem('lichess_code_verifier');
+  sessionStorage.removeItem('lichess_oauth_state');
+  sessionStorage.removeItem('lichess_code_verifier');
+
+  if (state !== savedState || !codeVerifier) {
+    console.error('[Lichess OAuth] State mismatch or missing verifier');
+    return false;
+  }
+
+  // Clean the URL
+  window.history.replaceState({}, '', LICHESS_REDIRECT_URI);
+
+  try {
+    const resp = await fetch('https://lichess.org/api/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code,
+        code_verifier: codeVerifier,
+        redirect_uri: LICHESS_REDIRECT_URI,
+        client_id: LICHESS_CLIENT_ID,
+      }),
+    });
+    if (!resp.ok) throw new Error(`Token exchange failed: ${resp.status}`);
+    const data = await resp.json();
+    lichessToken = data.access_token;
+    localStorage.setItem('mistakelab_lichess_token', lichessToken);
+    console.log('[Lichess OAuth] Authenticated successfully');
+    return true;
+  } catch (e) {
+    console.error('[Lichess OAuth] Token exchange error:', e);
+    return false;
+  }
+}
+
+function lichessOAuthDisconnect() {
+  if (lichessToken) {
+    // Revoke token
+    fetch('https://lichess.org/api/token', {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${lichessToken}` },
+    }).catch(() => {});
+  }
+  lichessToken = null;
+  localStorage.removeItem('mistakelab_lichess_token');
+}
+
+function generateRandomString(length) {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+  const arr = new Uint8Array(length);
+  crypto.getRandomValues(arr);
+  return Array.from(arr, b => chars[b % chars.length]).join('');
+}
+
+async function sha256Base64url(str) {
+  const buf = new TextEncoder().encode(str);
+  const hash = await crypto.subtle.digest('SHA-256', buf);
+  const b64 = btoa(String.fromCharCode(...new Uint8Array(hash)));
+  return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// Parse PGN with variations into a repertoire trie
+// Returns { trie, warnings, comments: Map<positionKey, string> }
+function parseRepertoirePGN(pgnText, repertoireColor) {
+  const trie = new Map();
+  const warnings = [];
+  const comments = new Map(); // positionKey (after move) → comment text
+
+  const games = pgnText.split(/\n\n(?=\[Event )/);
+  for (const gamePgn of games) {
+    const movetext = gamePgn.replace(/\[[^\]]*\]\s*/g, '').trim();
+    if (!movetext) continue;
+
+    // Check for FEN header (non-standard starting position)
+    const fenMatch = gamePgn.match(/\[FEN "([^"]+)"\]/);
+    const startFen = fenMatch ? fenMatch[1] : undefined;
+
+    // Extract chapter URL from [Site] header (e.g. "https://lichess.org/study/abc123/def456")
+    const siteMatch = gamePgn.match(/\[Site "([^"]+)"\]/);
+    const chapterUrl = siteMatch ? siteMatch[1] : null;
+
+    // Extract chapter title from [Event] header
+    const eventMatch = gamePgn.match(/\[Event "([^"]+)"\]/);
+    const chapterTitle = eventMatch ? eventMatch[1] : null;
+
+    // Skip chapters tagged [SKIP], [OLD], or [ALT] (case-insensitive)
+    if (chapterTitle && /\[(skip|old|alt)\]/i.test(chapterTitle)) {
+      continue;
+    }
+
+    const chapterMeta = { chapterUrl, chapterTitle };
+
+    const tokens = tokenizePGN(movetext);
+    const chess = startFen ? new Chess(startFen) : new Chess();
+    walkPGNTokens(chess, tokens, { idx: 0 }, trie, repertoireColor, warnings, true, chapterMeta, comments);
+  }
+
+  return { trie, warnings, comments };
+}
+
+function tokenizePGN(movetext) {
+  const tokens = [];
+  let i = 0;
+  while (i < movetext.length) {
+    const ch = movetext[i];
+    // Skip whitespace
+    if (/\s/.test(ch)) { i++; continue; }
+    // Comment
+    if (ch === '{') {
+      const end = movetext.indexOf('}', i);
+      const commentText = end < 0 ? movetext.slice(i + 1) : movetext.slice(i + 1, end);
+      // Strip engine annotations like [%eval ...] and [%clk ...]
+      const cleaned = commentText.replace(/\[%[^\]]*\]/g, '').trim();
+      if (cleaned) tokens.push({ type: 'comment', text: cleaned });
+      i = end < 0 ? movetext.length : end + 1;
+      continue;
+    }
+    // Variation start/end
+    if (ch === '(') { tokens.push({ type: 'varStart' }); i++; continue; }
+    if (ch === ')') { tokens.push({ type: 'varEnd' }); i++; continue; }
+    // NAG ($1, $2, etc.)
+    if (ch === '$') {
+      let j = i + 1;
+      while (j < movetext.length && /\d/.test(movetext[j])) j++;
+      i = j;
+      continue;
+    }
+    // Move number (e.g. "1." or "1...")
+    if (/\d/.test(ch)) {
+      let j = i;
+      while (j < movetext.length && /[\d.]/.test(movetext[j])) j++;
+      i = j;
+      continue;
+    }
+    // Result token
+    if (movetext.slice(i).match(/^(1-0|0-1|1\/2-1\/2|\*)/)) {
+      const m = movetext.slice(i).match(/^(1-0|0-1|1\/2-1\/2|\*)/);
+      i += m[1].length;
+      continue;
+    }
+    // SAN move — grab until whitespace or ( ) { }
+    let j = i;
+    while (j < movetext.length && !/[\s(){}]/.test(movetext[j])) j++;
+    const san = movetext.slice(i, j);
+    if (san) tokens.push({ type: 'move', san });
+    i = j;
+  }
+  return tokens;
+}
+
+function walkPGNTokens(chess, tokens, cursor, trie, repertoireColor, warnings, isMainLine, chapterMeta, comments) {
+  let lastMoveFen = chess.fen(); // FEN before the most recent move (for variation branching)
+  let lastMoveObj = null;
+
+  while (cursor.idx < tokens.length) {
+    const tok = tokens[cursor.idx];
+
+    if (tok.type === 'varEnd') {
+      cursor.idx++;
+      return; // exit this variation level
+    }
+
+    if (tok.type === 'varStart') {
+      cursor.idx++;
+      // Branch from the position before the last move
+      if (lastMoveObj) {
+        const branchChess = new Chess(lastMoveFen);
+        walkPGNTokens(branchChess, tokens, cursor, trie, repertoireColor, warnings, false, chapterMeta, comments);
+      } else {
+        // Variation at very start — branch from current position
+        const branchChess = new Chess(chess.fen());
+        walkPGNTokens(branchChess, tokens, cursor, trie, repertoireColor, warnings, false, chapterMeta, comments);
+      }
+      continue;
+    }
+
+    if (tok.type === 'comment') {
+      // Comment after a move — store for the position after the last move
+      if (lastMoveObj && comments) {
+        const afterPosKey = fenPositionKey(chess.fen());
+        if (!comments.has(afterPosKey)) {
+          comments.set(afterPosKey, tok.text);
+        } else {
+          // Append if multiple comments for the same position (from different chapters)
+          const existing = comments.get(afterPosKey);
+          if (!existing.includes(tok.text)) {
+            comments.set(afterPosKey, existing + '\n\n' + tok.text);
+          }
+        }
+      }
+      cursor.idx++;
+      continue;
+    }
+
+    if (tok.type === 'move') {
+      lastMoveFen = chess.fen();
+      const posKey = fenPositionKey(lastMoveFen);
+      const turn = chess.turn();
+      const isRepertoireTurn = (turn === 'w' && repertoireColor === 'white') ||
+                                (turn === 'b' && repertoireColor === 'black');
+
+      const move = chess.move(tok.san, { sloppy: true });
+      if (!move) {
+        console.warn(`[Repertoire] Invalid move: ${tok.san} at ${lastMoveFen}`);
+        cursor.idx++;
+        continue;
+      }
+
+      lastMoveObj = move;
+
+      if (isRepertoireTurn) {
+        const uci = move.from + move.to + (move.promotion || '');
+        if (trie.has(posKey)) {
+          const existing = trie.get(posKey);
+          if (existing.san !== move.san) {
+            if (isMainLine) {
+              warnings.push(`Multiple repertoire moves at one position: using ${move.san} (main line) over ${existing.san}`);
+              trie.set(posKey, { san: move.san, uci, ...chapterMeta });
+            } else {
+              warnings.push(`Variation move ${move.san} differs from main line ${existing.san} — keeping ${existing.san}`);
+            }
+          }
+        } else {
+          trie.set(posKey, { san: move.san, uci, ...chapterMeta });
+        }
+      }
+
+      cursor.idx++;
+      continue;
+    }
+
+    cursor.idx++;
+  }
+}
+
+// ── Study fetch & cache ──
+
+function getRepertoireConfig() {
+  // Stored in gistData.repertoire.studies
+  if (!gistData) return [];
+  return gistData.repertoire?.studies || [];
+}
+
+function setRepertoireConfig(studies) {
+  if (!gistData) gistData = { positions: {}, notes: {}, version: 1 };
+  if (!gistData.repertoire) gistData.repertoire = {};
+  gistData.repertoire.studies = studies;
+  debounceSyncToGist();
+}
+
+async function fetchStudyPGN(studyId) {
+  const url = `https://lichess.org/api/study/${studyId}.pgn?clocks=false&orientation=true`;
+  const headers = {};
+  if (lichessToken) headers['Authorization'] = `Bearer ${lichessToken}`;
+  try {
+    const resp = await fetch(url, { headers });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return await resp.text();
+  } catch (e) {
+    console.error(`[Repertoire] Failed to fetch study ${studyId}:`, e);
+    return null;
+  }
+}
+
+async function hashString(str) {
+  const buf = new TextEncoder().encode(str);
+  const hash = await crypto.subtle.digest('SHA-256', buf);
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function loadRepertoireTrie() {
+  const studies = getRepertoireConfig();
+  if (!studies.length) {
+    repertoireTrie = null;
+    repertoireDeviations = [];
+    repertoireGaps = [];
+    return;
+  }
+
+  // Load cache
+  let cache;
+  try { cache = JSON.parse(localStorage.getItem(REPERTOIRE_CACHE_KEY)); } catch { cache = null; }
+  if (!cache) cache = { studies: {} };
+
+  const mergedTrie = new Map();
+  const allWarnings = [];
+  const allComments = new Map(); // positionKey → comment text
+  let anyChanged = false;
+
+  for (const study of studies) {
+    const cached = cache.studies[study.id];
+    let pgn = null;
+    let pgnHash = null;
+    let studyTrie = null;
+    let studyComments = null;
+
+    // Try to fetch fresh PGN
+    pgn = await fetchStudyPGN(study.id);
+    if (pgn) {
+      pgnHash = await hashString(pgn);
+      if (cached && cached.pgnHash === pgnHash && cached.trie) {
+        // No change — restore cached trie and comments
+        studyTrie = new Map(Object.entries(cached.trie).map(([k, v]) => [k, v]));
+        studyComments = cached.comments ? new Map(Object.entries(cached.comments)) : new Map();
+        console.log(`[Repertoire] Study ${study.id} unchanged (hash match)`);
+      } else {
+        // Parse fresh
+        const result = parseRepertoirePGN(pgn, study.color);
+        studyTrie = result.trie;
+        studyComments = result.comments;
+        allWarnings.push(...result.warnings);
+        anyChanged = true;
+        console.log(`[Repertoire] Parsed study ${study.id}: ${studyTrie.size} positions, ${studyComments.size} comments`);
+      }
+      // Update cache
+      cache.studies[study.id] = {
+        pgnHash,
+        color: study.color,
+        trie: Object.fromEntries(studyTrie),
+        comments: Object.fromEntries(studyComments),
+        lastFetched: Date.now()
+      };
+    } else if (cached && cached.trie) {
+      // Fetch failed — fall back to cache
+      studyTrie = new Map(Object.entries(cached.trie).map(([k, v]) => [k, v]));
+      studyComments = cached.comments ? new Map(Object.entries(cached.comments)) : new Map();
+      console.warn(`[Repertoire] Fetch failed for ${study.id}, using cache`);
+    } else {
+      console.error(`[Repertoire] No data for study ${study.id}`);
+      continue;
+    }
+
+    // Merge into main trie (first study wins per position)
+    for (const [posKey, move] of studyTrie) {
+      if (!mergedTrie.has(posKey)) {
+        mergedTrie.set(posKey, move);
+      }
+    }
+
+    // Merge comments (first study wins per position)
+    for (const [posKey, text] of studyComments) {
+      if (!allComments.has(posKey)) {
+        allComments.set(posKey, text);
+      }
+    }
+  }
+
+  // Remove stale cache entries
+  const studyIds = new Set(studies.map(s => s.id));
+  for (const id of Object.keys(cache.studies)) {
+    if (!studyIds.has(id)) delete cache.studies[id];
+  }
+
+  try { localStorage.setItem(REPERTOIRE_CACHE_KEY, JSON.stringify(cache)); } catch {}
+
+  if (allWarnings.length) {
+    console.warn(`[Repertoire] Warnings:`, allWarnings);
+  }
+
+  repertoireTrie = mergedTrie;
+  console.log(`[Repertoire] Merged trie: ${mergedTrie.size} positions`);
+
+  // Import study comments as position notes (don't overwrite user-created notes)
+  if (allComments.size > 0 && gistData) {
+    if (!gistData.notes) gistData.notes = {};
+    let imported = 0;
+    for (const [posKey, text] of allComments) {
+      const existing = gistData.notes[posKey];
+      if (existing && existing.source !== 'study') continue; // don't overwrite user notes
+      const now = new Date().toISOString();
+      gistData.notes[posKey] = {
+        text,
+        arrows: [],
+        circles: [],
+        source: 'study', // marks this as auto-imported, safe to overwrite on refresh
+        created: existing?.created || now,
+        updated: now,
+      };
+      imported++;
+    }
+    // Clean up study notes for positions no longer in any study
+    for (const [key, note] of Object.entries(gistData.notes)) {
+      if (note.source === 'study' && !allComments.has(key)) {
+        delete gistData.notes[key];
+      }
+    }
+    if (imported > 0) {
+      console.log(`[Repertoire] Imported ${imported} study comments as notes`);
+      debounceSyncToGist();
+    }
+  }
+}
+
+// ── Deviation & Gap Detection ──
+
+function detectRepertoireDeviations() {
+  if (!repertoireTrie || !repertoireTrie.size || !allGames.length) {
+    repertoireDeviations = [];
+    repertoireGaps = [];
+    return;
+  }
+
+  const deviations = [];
+  const gapMap = new Map(); // posKey:san → {positionKey, opponentMove, count, games, fen}
+
+  for (const game of allGames) {
+    if (game.id.startsWith('_test_')) continue;
+    const playerColor = detectPlayerColor(game);
+    if (!playerColor) continue;
+
+    const moves = game.moves?.split(' ');
+    if (!moves || moves.length < 4) continue;
+
+    const chess = game.initialFen ? new Chess(game.initialFen) : new Chess();
+    let deviated = false;
+
+    for (let i = 0; i < moves.length; i++) {
+      const fen = chess.fen();
+      const posKey = fenPositionKey(fen);
+      const turn = chess.turn();
+      const isUserTurn = (turn === 'w' && playerColor === 'white') ||
+                          (turn === 'b' && playerColor === 'black');
+
+      const move = chess.move(moves[i], { sloppy: true });
+      if (!move) break;
+
+      if (!repertoireTrie.has(posKey)) {
+        // Position not in repertoire — stop checking this game
+        break;
+      }
+
+      if (isUserTurn) {
+        const expected = repertoireTrie.get(posKey);
+        const playedUci = move.from + move.to + (move.promotion || '');
+        if (expected.uci !== playedUci && expected.san !== move.san) {
+          // Deviation found
+          if (!deviated) {
+            deviations.push({
+              gameId: game.id,
+              movePly: i + 1,
+              fenBefore: fen,
+              playedMove: { san: move.san, uci: playedUci },
+              repertoireMove: expected,
+              positionKey: posKey,
+              opening: game.opening?.name || '',
+              playerColor,
+              createdAt: game.createdAt,
+            });
+            deviated = true;
+          }
+          // Check if we transposed back into a known position
+          const newPosKey = fenPositionKey(chess.fen());
+          // Continue walking to find transpositions — but don't break yet
+          // Actually per spec: one deviation per "leaving" event, transposition = new item
+          // Keep walking to check for transpositions
+        }
+      } else {
+        // Opponent's turn — check for gaps
+        const nextPosKey = fenPositionKey(chess.fen());
+        if (!repertoireTrie.has(nextPosKey) && repertoireTrie.has(posKey)) {
+          // Opponent played a move that takes us out of repertoire
+          const gapKey = posKey + ':' + move.san;
+          if (!gapMap.has(gapKey)) {
+            const trieEntry = repertoireTrie.get(posKey);
+            gapMap.set(gapKey, {
+              positionKey: posKey,
+              fen: fen,
+              opponentMove: { san: move.san, uci: move.from + move.to + (move.promotion || '') },
+              chapterUrl: trieEntry?.chapterUrl || null,
+              chapterTitle: trieEntry?.chapterTitle || null,
+              count: 0,
+              games: [],
+            });
+          }
+          const gap = gapMap.get(gapKey);
+          gap.count++;
+          gap.games.push(game.id);
+        }
+      }
+    }
+  }
+
+  // Deduplicate deviations by positionKey
+  const devMap = new Map();
+  for (const d of deviations) {
+    const key = d.positionKey;
+    if (!devMap.has(key)) {
+      devMap.set(key, {
+        type: 'repertoire',
+        positionKey: d.positionKey,
+        fenBefore: d.fenBefore,
+        repertoireMove: d.repertoireMove,
+        playerColor: d.playerColor,
+        opening: d.opening,
+        games: [],
+      });
+    }
+    const item = devMap.get(key);
+    item.games.push({
+      gameId: d.gameId,
+      movePly: d.movePly,
+      playedMove: d.playedMove,
+      createdAt: d.createdAt,
+    });
+    // Use most common played move for display
+    if (!item.playedMove) item.playedMove = d.playedMove;
+  }
+
+  // Sort games within each deviation by recency, set gameCount
+  for (const item of devMap.values()) {
+    item.games.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    item.gameCount = item.games.length;
+    // Use most recent game for display fields
+    item.gameId = item.games[0].gameId;
+    item.movePly = item.games[0].movePly;
+    item.playedMove = item.games[0].playedMove;
+    item.createdAt = item.games[0].createdAt;
+    item.moveNumber = Math.floor(item.movePly / 2) + 1;
+    item.game = allGames.find(g => g.id === item.gameId) || null;
+  }
+
+  repertoireDeviations = Array.from(devMap.values())
+    .sort((a, b) => b.gameCount - a.gameCount); // most frequent first
+  repertoireGaps = Array.from(gapMap.values()).sort((a, b) => b.count - a.count);
+
+  console.log(`[Repertoire] Found ${deviations.length} deviations, ${repertoireGaps.length} gaps`);
+}
+
+// ── Repertoire UI ──
+
+function getStudyIdFromInput(input) {
+  // Accept: full URL, study ID, or URL with chapter
+  // https://lichess.org/study/abc123 → abc123
+  // https://lichess.org/study/abc123/chapter456 → abc123
+  // abc123 → abc123
+  const m = input.match(/lichess\.org\/study\/([a-zA-Z0-9]+)/);
+  if (m) return m[1];
+  const trimmed = input.trim();
+  if (/^[a-zA-Z0-9]{8}$/.test(trimmed)) return trimmed;
+  return null;
+}
+
+function renderRepertoireConfig() {
+  const container = document.getElementById('repertoireStudyList');
+  if (!container) return;
+  const studies = getRepertoireConfig();
+
+  if (!studies.length) {
+    container.innerHTML = `<div class="hint" style="padding:8px 0;">
+      <div>No studies added yet.</div>
+      <div style="margin-top:4px;">Go to <a href="https://lichess.org/study" target="_blank" style="color:var(--blue);">lichess.org/study</a>, open a study, and copy the URL or 8-character ID from the address bar.</div>
+      <div style="margin-top:2px;">Assign it as your White or Black repertoire above.</div>
+    </div>`;
+    return;
+  }
+
+  container.innerHTML = studies.map((s, i) => `
+    <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);">
+      <span style="flex:1;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+        ${s.name || s.id} <span style="opacity:0.5">(${s.color})</span>
+      </span>
+      <button class="btn btn-ghost btn-sm" onclick="removeRepertoireStudy(${i})" style="font-size:11px;padding:2px 6px;">✕</button>
+    </div>
+  `).join('');
+}
+
+async function addRepertoireStudy() {
+  const input = document.getElementById('repertoireStudyInput');
+  const colorSelect = document.getElementById('repertoireStudyColor');
+  if (!input || !colorSelect) return;
+
+  const studyId = getStudyIdFromInput(input.value);
+  if (!studyId) {
+    alert('Invalid study ID or URL. Use a Lichess study URL or 8-character ID.');
+    return;
+  }
+
+  const color = colorSelect.value;
+  const studies = getRepertoireConfig();
+
+  if (studies.some(s => s.id === studyId)) {
+    alert('This study is already added.');
+    return;
+  }
+
+  // Try fetching to validate
+  const statusEl = document.getElementById('repertoireStatus');
+  if (statusEl) statusEl.textContent = 'Fetching study...';
+
+  const pgn = await fetchStudyPGN(studyId);
+  if (!pgn) {
+    if (statusEl) statusEl.textContent = 'Failed to fetch study. Check the ID and make sure it\'s public.';
+    return;
+  }
+
+  // Extract study name from PGN headers
+  const nameMatch = pgn.match(/\[Event "([^"]+)"\]/);
+  const name = nameMatch ? nameMatch[1] : studyId;
+
+  studies.push({ id: studyId, color, name });
+  setRepertoireConfig(studies);
+
+  input.value = '';
+  if (statusEl) statusEl.textContent = `Added "${name}" (${color})`;
+  renderRepertoireConfig();
+
+  // Rebuild trie
+  await refreshRepertoire();
+}
+
+function removeRepertoireStudy(index) {
+  const studies = getRepertoireConfig();
+  if (index < 0 || index >= studies.length) return;
+  const removed = studies.splice(index, 1)[0];
+  setRepertoireConfig(studies);
+  renderRepertoireConfig();
+  const statusEl = document.getElementById('repertoireStatus');
+  if (statusEl) statusEl.textContent = `Removed "${removed.name || removed.id}"`;
+  refreshRepertoire();
+}
+
+async function refreshRepertoire() {
+  const statusEl = document.getElementById('repertoireStatus');
+  if (statusEl) statusEl.textContent = 'Loading studies...';
+  await loadRepertoireTrie();
+  detectRepertoireDeviations();
+  if (statusEl) {
+    const n = repertoireTrie?.size || 0;
+    statusEl.textContent = `${n} repertoire positions loaded. ${repertoireDeviations.length} deviations, ${repertoireGaps.length} gaps.`;
+  }
+  if (repertoireMode) renderRepertoirePanel();
+  // Update the badge count
+  updateRepertoireBadge();
+}
+
+function updateRepertoireBadge() {
+  const badge = document.getElementById('repertoireBadgeCount');
+  if (badge) {
+    badge.textContent = repertoireDeviations.length || '';
+  }
+}
+
+function toggleRepertoireMode() {
+  repertoireMode = !repertoireMode;
+  if (!repertoireMode && repertoireDrillMode) exitRepertoireDrill();
+  const btn = document.getElementById('btnRepertoireMode');
+  if (btn) btn.classList.toggle('active', repertoireMode);
+
+  if (repertoireMode) {
+    // Show repertoire panel, hide game list
+    document.getElementById('gameList').style.display = 'none';
+    let panel = document.getElementById('repertoirePanel');
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = 'repertoirePanel';
+      panel.className = 'game-list';
+      document.getElementById('gameList').parentElement.insertBefore(panel, document.getElementById('gameList'));
+    }
+    panel.style.display = '';
+    document.getElementById('panelTitle').textContent = 'Repertoire';
+    renderRepertoirePanel();
+  } else {
+    const panel = document.getElementById('repertoirePanel');
+    if (panel) panel.style.display = 'none';
+    document.getElementById('gameList').style.display = '';
+    document.getElementById('panelTitle').textContent = reviewMode ? 'Review' : 'Games';
+  }
+}
+
+function renderRepertoirePanel() {
+  const panel = document.getElementById('repertoirePanel');
+  if (!panel) return;
+
+  const studies = getRepertoireConfig();
+
+  let html = '';
+
+  // Config section
+  html += `<div style="padding:10px 12px;border-bottom:1px solid var(--border);">`;
+  html += `<div style="display:flex;gap:6px;margin-bottom:8px;">
+    <input type="text" id="repertoireStudyInput" placeholder="Study URL or ID" style="flex:1;font-size:12px;padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);">
+    <select id="repertoireStudyColor" style="font-size:12px;padding:4px;border-radius:6px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);">
+      <option value="white">White</option>
+      <option value="black">Black</option>
+    </select>
+    <button class="btn btn-primary btn-sm" onclick="addRepertoireStudy()" style="font-size:11px;padding:4px 8px;">Add</button>
+  </div>`;
+  html += `<div id="repertoireStudyList"></div>`;
+  html += `<div id="repertoireStatus" class="hint" style="margin-top:4px;min-height:14px;"></div>`;
+  html += `<div style="display:flex;gap:6px;margin-top:6px;align-items:center;">`;
+  html += `<button class="btn btn-ghost btn-sm" onclick="refreshRepertoire()" style="font-size:11px;">↻ Refresh</button>`;
+  if (lichessToken) {
+    html += `<span style="font-size:11px;color:var(--green);">● Lichess connected</span>`;
+    html += `<button class="btn btn-ghost btn-sm" onclick="lichessOAuthDisconnect();renderRepertoirePanel()" style="font-size:10px;color:var(--text-muted);">Disconnect</button>`;
+  } else {
+    html += `<button class="btn btn-ghost btn-sm" onclick="lichessOAuthStart()" style="font-size:11px;">🔗 Connect Lichess</button>`;
+    html += `<span style="font-size:10px;color:var(--text-muted);">for private studies</span>`;
+  }
+  html += `</div>`;
+  html += `</div>`;
+
+  // Deviations list
+  if (repertoireDeviations.length) {
+    html += `<div style="padding:8px 12px;border-bottom:1px solid var(--border);">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+        <span style="font-size:12px;font-weight:600;color:var(--text-primary);">
+          Deviations (${repertoireDeviations.length})
+        </span>
+        <button class="btn btn-primary btn-sm" onclick="startRepertoireDrill()" style="font-size:11px;">▶ Drill</button>
+      </div>`;
+    // Group by opening
+    const byOpening = new Map();
+    for (const d of repertoireDeviations) {
+      const key = d.opening || 'Unknown opening';
+      if (!byOpening.has(key)) byOpening.set(key, []);
+      byOpening.get(key).push(d);
+    }
+    const done = getCompletedSet();
+    for (const [opening, devs] of byOpening) {
+      html += `<div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin:6px 0 3px;">${opening} (${devs.length})</div>`;
+      for (const d of devs.slice(0, 20)) {
+        const isDone = done.has(posId(d));
+        const gameRef = allGames.find(g => g.id === d.gameId);
+        const opponent = gameRef ? getOpponentName(gameRef, d.playerColor) : '?';
+        const countBadge = d.gameCount > 1 ? `<span style="font-size:10px;background:var(--bg-secondary);padding:1px 5px;border-radius:8px;margin-left:4px;">${d.gameCount}×</span>` : '';
+        const chapterTag = d.repertoireMove?.chapterTitle ? `<div style="font-size:10px;opacity:0.4;margin-top:1px;">📖 ${d.repertoireMove.chapterTitle}</div>` : '';
+        html += `<div class="game-card${isDone ? ' completed' : ''}" style="padding:6px 8px;margin:2px 0;cursor:pointer;font-size:12px;" onclick="showRepertoireDeviation('${d.positionKey.replace(/'/g, "\\'")}')">
+          <span>Played <strong style="color:var(--red)">${d.playedMove.san}</strong> instead of <strong style="color:var(--green)">${d.repertoireMove.san}</strong>${countBadge}</span>
+          <span style="opacity:0.5;font-size:11px;"> vs ${opponent}</span>
+          ${chapterTag}
+        </div>`;
+      }
+    }
+    html += `</div>`;
+  } else if (repertoireTrie && repertoireTrie.size) {
+    html += `<div style="padding:12px;font-size:12px;color:var(--text-secondary);">No deviations found — you're following your repertoire!</div>`;
+  }
+
+  // Gaps list
+  if (repertoireGaps.length) {
+    html += `<div style="padding:8px 12px;">
+      <div style="font-size:12px;font-weight:600;color:var(--text-primary);margin-bottom:6px;">
+        Gaps — uncovered opponent moves (${repertoireGaps.length})
+      </div>`;
+    for (const gap of repertoireGaps.slice(0, 30)) {
+      const gapIdx = repertoireGaps.indexOf(gap);
+      // Extract move number from FEN (6th field = fullmove number)
+      const fenParts = gap.fen.split(' ');
+      const moveNum = fenParts[5] || '?';
+      const side = fenParts[1] === 'w' ? '.' : '…';
+      const studyLink = gap.chapterUrl
+        ? `<a href="${gap.chapterUrl}" target="_blank" onclick="event.stopPropagation()" style="font-size:10px;color:var(--blue);margin-left:4px;" title="${gap.chapterTitle || 'Open study chapter'}">📖</a>`
+        : '';
+      const chapterLabel = gap.chapterTitle ? `<span style="opacity:0.4;font-size:10px;"> · ${gap.chapterTitle}</span>` : '';
+      html += `<div class="game-card" style="padding:6px 8px;margin:2px 0;font-size:12px;cursor:pointer;" onclick="exploreRepertoireGap(${gapIdx})">
+        <span><span style="opacity:0.5;">${moveNum}${side}</span> <strong>${gap.opponentMove.san}</strong>${studyLink}${chapterLabel}</span>
+        <span style="opacity:0.5;"> — ${gap.count} game${gap.count > 1 ? 's' : ''}</span>
+        <span style="float:right;font-size:10px;color:var(--blue);">explore →</span>
+      </div>`;
+    }
+    html += `</div>`;
+  }
+
+  panel.innerHTML = html;
+  renderRepertoireConfig();
+}
+
+function getOpponentName(game, playerColor) {
+  const oppColor = playerColor === 'white' ? 'black' : 'white';
+  return game.players?.[oppColor]?.user?.name || 'Unknown';
+}
+
+function showRepertoireDeviation(posKey) {
+  const dev = repertoireDeviations.find(d => d.positionKey === posKey);
+  if (!dev) return;
+  if (boardObj) {
+    const orientation = dev.playerColor === 'black' ? 'black' : 'white';
+    boardObj.orientation(orientation);
+    boardObj.position(dev.fenBefore, false);
+  }
+  bestMoveArrow = { from: dev.repertoireMove.uci.slice(0, 2), to: dev.repertoireMove.uci.slice(2, 4) };
+  renderArrows();
+
+  // Show game context in feedback area
+  const fb = document.getElementById('feedbackContainer');
+  if (fb && dev.games) {
+    let html = `<div style="padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:12px;margin-top:6px;">`;
+    html += `<div style="font-weight:600;margin-bottom:4px;">Repertoire move: <span style="color:var(--green)">${dev.repertoireMove.san}</span></div>`;
+    if (dev.repertoireMove.chapterTitle) {
+      const link = dev.repertoireMove.chapterUrl
+        ? `<a href="${dev.repertoireMove.chapterUrl}" target="_blank" style="color:var(--blue);">${dev.repertoireMove.chapterTitle}</a>`
+        : dev.repertoireMove.chapterTitle;
+      html += `<div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">📖 ${link}</div>`;
+    }
+    html += `<div style="color:var(--text-secondary);margin-bottom:6px;">Deviated in ${dev.gameCount} game${dev.gameCount > 1 ? 's' : ''}:</div>`;
+    for (const g of dev.games.slice(0, 5)) {
+      const game = allGames.find(gm => gm.id === g.gameId);
+      if (!game) continue;
+      const opp = getOpponentName(game, dev.playerColor);
+      const date = game.createdAt ? new Date(game.createdAt).toLocaleDateString() : '';
+      html += `<div style="padding:2px 0;color:var(--text-muted);">Played <strong style="color:var(--red)">${g.playedMove.san}</strong> vs ${opp} <span style="opacity:0.6">${date}</span></div>`;
+    }
+    if (dev.games.length > 5) html += `<div style="color:var(--text-muted);">… and ${dev.games.length - 5} more</div>`;
+    html += `</div>`;
+    fb.innerHTML = html;
+  }
+}
+
+// ── Repertoire Drill Mode ──
+
+function startRepertoireDrill() {
+  if (!repertoireDeviations.length) return;
+
+  // Build drill queue — deviations are already deduplicated with type:'repertoire'
+  repertoireDrillQueue = repertoireDeviations.map(d => ({ ...d }));
+
+  // Sort: due items first, then unseen, then by game count (more frequent = higher priority)
+  const done = getCompletedSet();
+  repertoireDrillQueue.sort((a, b) => {
+    const aPid = posId(a);
+    const bPid = posId(b);
+    const aDue = isDue(aPid);
+    const bDue = isDue(bPid);
+    const aSeen = done.has(aPid);
+    const bSeen = done.has(bPid);
+    if (aDue !== bDue) return aDue ? -1 : 1;
+    if (aSeen !== bSeen) return aSeen ? 1 : -1;
+    return (b.gameCount || 0) - (a.gameCount || 0);
+  });
+
+  // Enter drill mode
+  repertoireDrillMode = true;
+  repertoireDrillCorrect = 0;
+  repertoireDrillWrong = 0;
+  repertoireDrillFailed = [];
+  savedFilteredMistakes = filteredMistakes;
+  filteredMistakes = repertoireDrillQueue;
+
+  closeDrawer();
+  document.getElementById('panelTitle').textContent = 'Repertoire Drill';
+
+  loadPosition(0);
+}
+
+function exitRepertoireDrill() {
+  if (!repertoireDrillMode) return;
+  repertoireDrillMode = false;
+  if (savedFilteredMistakes) {
+    filteredMistakes = savedFilteredMistakes;
+    savedFilteredMistakes = null;
+  }
+  currentMistakeIdx = -1;
+  document.getElementById('panelTitle').textContent = repertoireMode ? 'Repertoire' : reviewMode ? 'Review' : 'Games';
+  updateSessionProgress();
+  if (repertoireMode) renderRepertoirePanel();
+}
+
+function evaluateRepertoireMove(source, target, move) {
+  const m = filteredMistakes[currentMistakeIdx];
+  if (!m || m.type !== 'repertoire') return;
+
+  const playedUci = source + target + (move.promotion || '');
+  const expected = m.repertoireMove;
+  const isCorrect = (playedUci === expected.uci) || (move.san === expected.san);
+  const isLastItem = currentMistakeIdx >= filteredMistakes.length - 1;
+
+  if (isCorrect) {
+    let grade, gradeLabel;
+    if (hintUsed) {
+      grade = 2; gradeLabel = 'Hard';
+    } else if (currentAttempts <= 1) {
+      grade = 4; gradeLabel = 'Easy';
+    } else {
+      grade = 3; gradeLabel = 'Good';
+    }
+
+    // Track session stats
+    if (currentAttempts <= 1 && !hintUsed) {
+      repertoireDrillCorrect++;
+    } else {
+      repertoireDrillWrong++;
+      if (!repertoireDrillFailed.includes(m.positionKey)) repertoireDrillFailed.push(m.positionKey);
+    }
+
+    const pid = posId(m);
+    let srsInfo = '';
+    if (!srsRecorded) {
+      const srsCard = recordReview(pid, grade);
+      srsRecorded = true;
+      srsInfo = srsTag(gradeLabel, srsCard);
+    }
+
+    const nextBtn = !isLastItem
+      ? `<button class="btn btn-primary btn-sm" id="btnRepNext" style="font-size:12px;margin-top:8px;" onclick="loadPosition(${currentMistakeIdx + 1})">Next →</button>`
+      : '';
+
+    showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
+      `♟ Correct! <code>${escHtml(move.san)}</code>`,
+      `That's your repertoire move.${srsInfo}${nextBtn}`);
+    updateSessionProgress();
+    renderQueue();
+
+    if (isLastItem) showRepertoireDrillSummary();
+  } else {
+    // Wrong move
+    if (currentAttempts >= 3) {
+      repertoireDrillWrong++;
+      if (!repertoireDrillFailed.includes(m.positionKey)) repertoireDrillFailed.push(m.positionKey);
+      revealRepertoireAnswer(m, expected, isLastItem);
+    } else {
+      // Wrong but still has attempts — undo and let them retry
+      gameEngine.undo();
+      boardObj.position(gameEngine.fen(), true);
+
+      const remaining = 3 - currentAttempts;
+      showColorFeedback('var(--yellow)', 'rgba(255,193,7,0.08)',
+        `<code>${escHtml(move.san)}</code> is not the repertoire move`,
+        `Try again — ${remaining} attempt${remaining > 1 ? 's' : ''} left` +
+        `<div style="margin-top:6px"><button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="repertoireRevealAnswer()">Show answer</button></div>`);
+    }
+  }
+}
+
+function revealRepertoireAnswer(m, expected, isLastItem) {
+  const pid = posId(m);
+  let srsInfo = '';
+  if (!srsRecorded) {
+    const srsCard = recordReview(pid, 1); // Again
+    srsRecorded = true;
+    srsInfo = srsTag('Again', srsCard);
+  }
+
+  // Reset to original position if needed (undo returns null if nothing to undo)
+  const currentFen = fenPositionKey(gameEngine.fen());
+  const targetFen = fenPositionKey(m.fenBefore);
+  if (currentFen !== targetFen) {
+    gameEngine.undo();
+  }
+  gameEngine.move(expected.san, { sloppy: true });
+  boardObj.position(gameEngine.fen(), true);
+  bestMoveArrow = { from: expected.uci.slice(0, 2), to: expected.uci.slice(2, 4) };
+  renderArrows();
+  showLastMoveHighlight(expected.uci.slice(0, 2), expected.uci.slice(2, 4));
+
+  const nextBtn = !isLastItem
+    ? `<button class="btn btn-primary btn-sm" id="btnRepNext" style="font-size:12px;margin-top:8px;" onclick="loadPosition(${currentMistakeIdx + 1})">Next →</button>`
+    : '';
+
+  showColorFeedback('var(--red)', 'rgba(239,83,80,0.08)',
+    `♟ The repertoire move is <code>${escHtml(expected.san)}</code>`,
+    `You played <code>${escHtml(m.playedMove.san)}</code>.${srsInfo}${nextBtn}`);
+  updateSessionProgress();
+  renderQueue();
+
+  if (isLastItem) showRepertoireDrillSummary();
+}
+
+function repertoireRevealAnswer() {
+  const m = filteredMistakes[currentMistakeIdx];
+  if (!m || m.type !== 'repertoire') return;
+
+  repertoireDrillWrong++;
+  if (!repertoireDrillFailed.includes(m.positionKey)) repertoireDrillFailed.push(m.positionKey);
+
+  const isLastItem = currentMistakeIdx >= filteredMistakes.length - 1;
+  revealRepertoireAnswer(m, m.repertoireMove, isLastItem);
+}
+
+function showRepertoireDrillSummary() {
+  const total = repertoireDrillCorrect + repertoireDrillWrong;
+  const pct = total > 0 ? Math.round(repertoireDrillCorrect / total * 100) : 0;
+  const failedCount = repertoireDrillFailed.length;
+
+  let summaryHtml = `<div style="margin-top:12px;padding:10px;border-radius:8px;background:var(--bg-secondary);font-size:12px;">`;
+  summaryHtml += `<div style="font-weight:600;margin-bottom:4px;">Drill Complete</div>`;
+  summaryHtml += `<div>${repertoireDrillCorrect} / ${total} correct on first try (${pct}%)</div>`;
+
+  if (failedCount > 0) {
+    summaryHtml += `<div style="margin-top:8px;">`;
+    summaryHtml += `<button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="retryFailedRepertoirePositions()">↺ Retry ${failedCount} failed position${failedCount > 1 ? 's' : ''}</button>`;
+    summaryHtml += `</div>`;
+  }
+
+  summaryHtml += `<div style="margin-top:6px;">`;
+  summaryHtml += `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="exitRepertoireDrill()">Back to Repertoire</button>`;
+  summaryHtml += `</div></div>`;
+
+  // Append summary to existing feedback
+  const fb = document.getElementById('feedbackContainer');
+  if (fb) fb.innerHTML += summaryHtml;
+}
+
+function retryFailedRepertoirePositions() {
+  if (!repertoireDrillFailed.length) { exitRepertoireDrill(); return; }
+
+  // Build a new queue from the failed position keys
+  const failedSet = new Set(repertoireDrillFailed);
+  repertoireDrillQueue = repertoireDeviations
+    .filter(d => failedSet.has(d.positionKey))
+    .map(d => ({ ...d }));
+
+  if (!repertoireDrillQueue.length) { exitRepertoireDrill(); return; }
+
+  // Reset counters for the retry round
+  repertoireDrillCorrect = 0;
+  repertoireDrillWrong = 0;
+  repertoireDrillFailed = [];
+  filteredMistakes = repertoireDrillQueue;
+
+  loadPosition(0);
+}
+
+// ── Gap exploration ──
+
+function exploreRepertoireGap(gapIdx) {
+  if (gapIdx < 0 || gapIdx >= repertoireGaps.length) return;
+  const gap = repertoireGaps[gapIdx];
+
+  // Exit repertoire panel first
+  if (repertoireDrillMode) exitRepertoireDrill();
+  if (repertoireMode) toggleRepertoireMode();
+
+  // Set up filter state so enterOpeningFilter picks it up
+  const fullFen = gap.positionKey + ' 0 1';
+  openingFilterFen = gap.positionKey;
+  filterChess = new Chess(fullFen);
+  filterMoveHistory = [filterChess.fen()];
+  filterMoveIdx = 0;
+
+  // Determine orientation: if it's white to move at the gap, opponent is black → show from white's perspective
+  // But the gap is an opponent move, so the FEN's turn is the user's turn (after opponent moved... no)
+  // gap.fen is BEFORE the opponent's move, so the turn in gap.fen is the opponent's turn
+  const oppTurn = gap.fen.split(' ')[1]; // 'w' or 'b'
+  savedFilterOrientation = oppTurn === 'w' ? 'black' : 'white'; // user's perspective
+
+  enterOpeningFilter();
+}
+
 // ─── Position Notes ───
 function getCurrentNoteFen() {
   // Get the FEN of the position currently displayed on the board
@@ -11582,6 +12740,10 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'e' || e.key === 'E') toggleEvalBar();
   if (e.key === 'a' || e.key === 'A') { if (currentMistakeIdx >= 0 && !analysisMode) enterAnalysisMode(); }
   if (e.key === 'n' || e.key === 'N') { const nb = document.getElementById('btnNote'); if (nb && !nb.classList.contains('hidden')) toggleNotePanel(); }
+  if ((e.key === ' ' || e.key === 'Enter') && repertoireDrillMode) {
+    const nextBtn = document.getElementById('btnRepNext');
+    if (nextBtn) { nextBtn.click(); e.preventDefault(); }
+  }
 });
 
 // Flush pending sync before page unload
