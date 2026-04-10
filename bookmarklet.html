@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>MistakeLab Bookmarklet</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 20px; color: #e0e0e0; background: #1a1a2e; }
+  h1 { font-size: 20px; }
+  h2 { font-size: 16px; margin-top: 24px; }
+  p, li { font-size: 14px; line-height: 1.6; }
+  code { background: #2a2a4a; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+  a.bookmarklet {
+    display: inline-block; padding: 10px 20px; background: #7b61ff; color: white;
+    text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 14px;
+    margin: 12px 0; cursor: grab;
+  }
+  a.bookmarklet:hover { background: #6a50e0; }
+  .note { background: #2a2a4a; padding: 12px; border-radius: 8px; font-size: 13px; margin: 12px 0; }
+</style>
+</head>
+<body>
+<h1>♟ MistakeLab — Position Grabber</h1>
+<p>Drag this button to your bookmarks bar:</p>
+
+<a class="bookmarklet" href="javascript:void(function(){try{var fen=null;var strategies=[function(){var b=document.getElementById('board');if(!b)return null;var k=Object.keys(b).find(function(x){return x.startsWith('__reactFiber')});if(!k)return null;var f=b[k],i=0;while(f&&i++<30){var p=f.memoizedProps||{};if(p.fen)return p.fen;f=f.return}return null},function(){var el=document.querySelector('[data-fen]');if(el)return el.getAttribute('data-fen')},function(){if(window.chess&&window.chess.fen)return window.chess.fen();if(window.game&&window.game.fen)return window.game.fen()},function(){var cg=document.querySelector('cg-board');if(!cg)return null;var k=Object.keys(cg).find(function(x){return x.startsWith('__reactFiber')||x.startsWith('__reactInternalInstance')});if(k){var f=cg[k],i=0;while(f&&i++<30){var p=f.memoizedProps||{};if(p.fen)return p.fen;f=f.return}}return null},function(){var boards=document.querySelectorAll('[id*=board],[class*=board]');for(var bi=0;bi<boards.length;bi++){var b=boards[bi];var k=Object.keys(b).find(function(x){return x.startsWith('__reactFiber')});if(!k)continue;var f=b[k],i=0;while(f&&i++<40){var p=f.memoizedProps||{};if(p.fen)return p.fen;if(p.position&&typeof p.position==='string'&&p.position.includes('/'))return p.position;f=f.return}}return null}];for(var i=0;i<strategies.length;i++){fen=strategies[i]();if(fen&&fen.length>10)break}if(!fen){fen=prompt('Could not auto-detect FEN. Paste it manually:');if(!fen)return}var clean=fen.trim();if(!clean.includes(' '))clean+=' w KQkq - 0 1';navigator.clipboard.writeText(clean).then(function(){alert('FEN copied!\\n\\n'+clean+'\\n\\nPaste in MistakeLab → Repertoire → Add position')}).catch(function(){prompt('Copy this FEN:',clean)})}catch(e){alert('Error: '+e.message)}})()">♟ Grab Position</a>
+
+<h2>How to use</h2>
+<ol>
+  <li><strong>Drag</strong> the "♟ Grab Position" button above to your bookmarks bar</li>
+  <li>Go to <strong>Chessable</strong> (or any chess site) and navigate to a position you got wrong</li>
+  <li>Click the bookmarklet in your bookmarks bar</li>
+  <li>The <strong>FEN</strong> is copied to your clipboard</li>
+  <li>Go to <strong>MistakeLab → Repertoire → Add position</strong> and paste the FEN</li>
+  <li>If the position exists in your repertoire, the correct move is auto-filled!</li>
+</ol>
+
+<h2>How it works</h2>
+<p>The bookmarklet tries several strategies to extract the board position:</p>
+<ol>
+  <li><strong>React fiber on <code>#board</code></strong> — walks the React component tree looking for a <code>fen</code> prop (works on Chessable)</li>
+  <li><code>data-fen</code> attributes in the DOM</li>
+  <li>Global JavaScript chess objects (<code>window.chess</code>, <code>window.game</code>)</li>
+  <li>React fiber on chessground elements (<code>cg-board</code>)</li>
+  <li>React fiber on any element with "board" in its id or class</li>
+  <li>If all else fails, prompts you to paste the FEN manually</li>
+</ol>
+
+<div class="note">
+  <strong>Tip:</strong> If the position exists in your MistakeLab repertoire, the correct move is auto-filled when you paste the FEN. No need to remember it!
+</div>
+
+<h2>Compatibility</h2>
+<p>Confirmed working on: <strong>Chessable</strong> (React fiber extraction). Also supports Lichess, Chess.com analysis board, and any site using chessground, chessboard.js, or React-based chess boards with a <code>fen</code> prop.</p>
+</body>
+</html>

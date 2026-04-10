@@ -1316,7 +1316,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">RepertoireCheck: study-based deviation drill, gap detection, Lichess OAuth, study comments as notes</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire: continuation practice, start-from-beginning, manual FEN input, Chessable bookmarklet</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1830,6 +1830,13 @@ let repertoireDrillCorrect = 0;  // positions solved on first attempt
 let repertoireDrillWrong = 0;    // positions that needed >1 attempt or reveal
 let repertoireDrillFailed = [];  // positionKeys of failed items for retry loop
 let repertoireDrillStartTime = 0; // timestamp when current position was loaded
+let repContActive = false;        // in repertoire continuation mode (ungraded)
+let repContMode = 'random';       // 'random' | 'all'
+let repContPendingBranches = [];  // [{fen, opponentMove, depth}] — unsolved branches for 'all' mode
+let repContDepth = 0;             // current depth in continuation
+let repLeadUpActive = false;      // navigating the lead-up moves before the deviation
+let repLeadUpLine = null;         // {baseFen, moves: [{san, uci, fen, isUser}], targetFen}
+let repLeadUpIdx = -1;            // current position in lead-up (-1 = starting position)
 let savedFilteredMistakes = null; // original filteredMistakes, restored when exiting drill
 let repertoireStudyCache = null; // localStorage cached: {studies:[{id,color,name,pgnHash,trie:{}}], lastUpdated}
 const REPERTOIRE_CACHE_KEY = 'mistakelab_repertoire';
@@ -6936,13 +6943,19 @@ function onBoardClick(e) {
         return;
       }
 
-      currentAttempts++;
-      if (tacticMode) {
-        evaluateTacticMove(move.from, move.to, move);
-      } else if (repertoireDrillMode) {
-        evaluateRepertoireMove(move.from, move.to, move);
+      if (repLeadUpActive) {
+        repLeadUpPlayMove(move.from, move.to, move);
       } else {
-        evaluateMove(move.from, move.to, move);
+        currentAttempts++;
+        if (tacticMode) {
+          evaluateTacticMove(move.from, move.to, move);
+        } else if (repContActive) {
+          evaluateRepertoireContinuationMove(move.from, move.to, move);
+        } else if (repertoireDrillMode) {
+          evaluateRepertoireMove(move.from, move.to, move);
+        } else {
+          evaluateMove(move.from, move.to, move);
+        }
       }
     }
   } else {
@@ -7119,6 +7132,10 @@ function loadPosition(globalIdx) {
   continuationMode = false;
   contWrongMovePending = false;
   clearPremove();
+  repContActive = false;
+  repLeadUpActive = false;
+  repLeadUpLine = null;
+  repLeadUpIdx = -1;
   tacticMode = false;
   tacticStepIdx = 0;
   tacticMoves = [];
@@ -7287,6 +7304,7 @@ function loadPosition(globalIdx) {
         </div>
         <div>Find the move from your repertoire</div>
         <div style="font-size:11px;color:var(--text-muted);margin-top:2px">You played <code class="mono">${escHtml(m.playedMove.san)}</code> in your game</div>
+        <div style="margin-top:4px;"><button class="btn btn-ghost btn-sm" onclick="startRepertoireFromBeginning()" style="font-size:10px;">⏮ Start from beginning</button></div>
       </div>
     `;
     stopPreAnalysis();
@@ -7515,13 +7533,19 @@ function onDrop(source, target) {
     return undefined;
   }
 
-  currentAttempts++;
-  if (tacticMode) {
-    evaluateTacticMove(source, target, move);
-  } else if (repertoireDrillMode) {
-    evaluateRepertoireMove(source, target, move);
+  if (repLeadUpActive) {
+    repLeadUpPlayMove(source, target, move);
   } else {
-    evaluateMove(source, target, move);
+    currentAttempts++;
+    if (tacticMode) {
+      evaluateTacticMove(source, target, move);
+    } else if (repContActive) {
+      evaluateRepertoireContinuationMove(source, target, move);
+    } else if (repertoireDrillMode) {
+      evaluateRepertoireMove(source, target, move);
+    } else {
+      evaluateMove(source, target, move);
+    }
   }
   return undefined; // allow the drop
 }
@@ -11969,9 +11993,34 @@ function detectRepertoireDeviations() {
 
   // Filter out dismissed positions
   const dismissed = getRepertoireDismissed();
-  repertoireDeviations = Array.from(devMap.values())
-    .filter(d => !dismissed.has(d.positionKey))
-    .sort((a, b) => b.gameCount - a.gameCount); // most frequent first
+  let allDevs = Array.from(devMap.values())
+    .filter(d => !dismissed.has(d.positionKey));
+
+  // Merge custom (manually added) deviations
+  const customDevs = gistData?.repertoire?.customDeviations || [];
+  for (const cd of customDevs) {
+    if (dismissed.has(cd.positionKey)) continue;
+    if (allDevs.some(d => d.positionKey === cd.positionKey)) continue; // already detected
+    allDevs.push({
+      type: 'repertoire',
+      positionKey: cd.positionKey,
+      fenBefore: cd.fenBefore,
+      repertoireMove: cd.repertoireMove,
+      playerColor: cd.playerColor,
+      opening: 'Manual',
+      source: 'manual',
+      games: [],
+      gameCount: 0,
+      gameId: '_manual_' + cd.positionKey.slice(0, 8),
+      movePly: 1,
+      playedMove: { san: '?', uci: '' },
+      createdAt: cd.addedAt,
+      moveNumber: 1,
+      game: null,
+    });
+  }
+
+  repertoireDeviations = allDevs.sort((a, b) => (b.gameCount || 0) - (a.gameCount || 0));
   repertoireGaps = Array.from(gapMap.values()).sort((a, b) => b.count - a.count);
 
   console.log(`[Repertoire] Found ${deviations.length} deviations, ${repertoireGaps.length} gaps`);
@@ -12149,6 +12198,18 @@ function renderRepertoirePanel() {
   html += `</div>`;
   html += `</div>`;
 
+  // Add position form
+  html += `<div style="padding:8px 12px;border-bottom:1px solid var(--border);">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <span style="font-size:11px;font-weight:600;color:var(--text-secondary);">Add position</span>
+      <button class="btn btn-ghost btn-sm" id="btnToggleAddPos" onclick="toggleAddPositionForm()" style="font-size:10px;padding:2px 6px;">+</button>
+    </div>
+    <div id="addPositionForm" style="display:none;margin-top:6px;">
+      <input type="text" id="repAddFenInput" placeholder="Paste FEN" style="width:100%;font-size:11px;padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);font-family:monospace;" oninput="onRepFenInput()">
+      <div id="repAddFenResult" style="margin-top:4px;font-size:11px;min-height:20px;"></div>
+    </div>
+  </div>`;
+
   // Deviations list
   if (repertoireDeviations.length) {
     html += `<div style="padding:8px 12px;border-bottom:1px solid var(--border);">
@@ -12175,17 +12236,24 @@ function renderRepertoirePanel() {
       for (const d of devs.slice(0, 20)) {
         const isDone = done.has(posId(d));
         const gameRef = allGames.find(g => g.id === d.gameId);
-        const opponent = gameRef ? getOpponentName(gameRef, d.playerColor) : '?';
+        const opponent = gameRef ? getOpponentName(gameRef, d.playerColor) : '';
         const countBadge = d.gameCount > 1 ? `<span style="font-size:10px;background:var(--bg-secondary);padding:1px 5px;border-radius:8px;margin-left:4px;">${d.gameCount}×</span>` : '';
         const chapterTag = d.repertoireMove?.chapterTitle ? `<div style="font-size:10px;opacity:0.4;margin-top:1px;">📖 ${d.repertoireMove.chapterTitle}</div>` : '';
-        const dismissBtn = `<button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();dismissRepertoirePosition('${d.positionKey.replace(/'/g, "\\'")}')" style="font-size:9px;padding:1px 4px;color:var(--text-muted);flex-shrink:0;" title="Dismiss this deviation">✕</button>`;
+        const isManual = d.source === 'manual';
+        const manualBadge = isManual ? `<span style="font-size:9px;background:var(--bg-secondary);color:var(--text-muted);padding:1px 5px;border-radius:8px;margin-left:4px;">manual</span>` : '';
+        const playedInfo = isManual ? `Drill <strong style="color:var(--green)">${d.repertoireMove.san}</strong>${manualBadge}` :
+          `Played <strong style="color:var(--red)">${d.playedMove.san}</strong> instead of <strong style="color:var(--green)">${d.repertoireMove.san}</strong>${countBadge}`;
+        const opponentInfo = opponent && !isManual ? `<span style="opacity:0.5;font-size:11px;"> vs ${opponent}</span>` : '';
+        const actionBtn = isManual
+          ? `<button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();removeCustomDeviation('${d.positionKey.replace(/'/g, "\\'")}')" style="font-size:9px;padding:1px 4px;color:var(--text-muted);flex-shrink:0;" title="Remove this position">✕</button>`
+          : `<button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();dismissRepertoirePosition('${d.positionKey.replace(/'/g, "\\'")}')" style="font-size:9px;padding:1px 4px;color:var(--text-muted);flex-shrink:0;" title="Dismiss this deviation">✕</button>`;
         html += `<div class="game-card${isDone ? ' completed' : ''}" style="padding:6px 8px;margin:2px 0;cursor:pointer;font-size:12px;display:flex;align-items:flex-start;gap:4px;" onclick="showRepertoireDeviation('${d.positionKey.replace(/'/g, "\\'")}')" onmouseenter="showPositionPreview('${d.fenBefore.replace(/'/g, "\\'")}',event)" onmouseleave="hidePositionPreview()">
           <div style="flex:1;min-width:0;">
-            <span>Played <strong style="color:var(--red)">${d.playedMove.san}</strong> instead of <strong style="color:var(--green)">${d.repertoireMove.san}</strong>${countBadge}</span>
-            <span style="opacity:0.5;font-size:11px;"> vs ${opponent}</span>
+            <span>${playedInfo}</span>
+            ${opponentInfo}
             ${chapterTag}
           </div>
-          ${dismissBtn}
+          ${actionBtn}
         </div>`;
       }
     }
@@ -12336,6 +12404,133 @@ function hidePositionPreview() {
   if (posPreviewEl) posPreviewEl.style.display = 'none';
 }
 
+// ── Manual position input ──
+
+function toggleAddPositionForm() {
+  const form = document.getElementById('addPositionForm');
+  if (!form) return;
+  const visible = form.style.display !== 'none';
+  form.style.display = visible ? 'none' : '';
+  const btn = document.getElementById('btnToggleAddPos');
+  if (btn) btn.textContent = visible ? '+' : '−';
+}
+
+function onRepFenInput() {
+  const input = document.getElementById('repAddFenInput');
+  const result = document.getElementById('repAddFenResult');
+  if (!input || !result) return;
+
+  const raw = input.value.trim();
+  if (!raw) { result.innerHTML = ''; return; }
+
+  // Validate FEN
+  const chess = new Chess();
+  const valid = chess.load(raw);
+  if (!valid) {
+    result.innerHTML = '<span style="color:var(--red);">Invalid FEN</span>';
+    return;
+  }
+
+  const posKey = fenPositionKey(raw);
+  const trieEntry = repertoireTrie ? repertoireTrie.get(posKey) : null;
+
+  // Show position on the board
+  if (boardObj) {
+    const turn = raw.split(' ')[1];
+    boardObj.orientation(turn === 'b' ? 'black' : 'white');
+    boardObj.position(raw, false);
+  }
+
+  if (trieEntry) {
+    // Position found in repertoire — correct move is known
+    result.innerHTML = `<div style="color:var(--green);">✓ In repertoire — correct move: <strong>${trieEntry.san}</strong></div>
+      <button class="btn btn-primary btn-sm" onclick="addCustomDeviation('${posKey.replace(/'/g, "\\'")}', '${trieEntry.san}', '${trieEntry.uci}')" style="font-size:11px;margin-top:4px;">Add to drill</button>`;
+  } else {
+    // Not in repertoire — user needs to specify the move
+    result.innerHTML = `<div style="color:var(--text-muted);">Position not in repertoire. Enter the correct move:</div>
+      <div style="display:flex;gap:6px;margin-top:4px;">
+        <input type="text" id="repAddMoveInput" placeholder="e.g. Nf3" style="flex:1;font-size:11px;padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);">
+        <button class="btn btn-primary btn-sm" onclick="addCustomDeviationFromInput()" style="font-size:11px;">Add</button>
+      </div>`;
+  }
+}
+
+function addCustomDeviationFromInput() {
+  const fenInput = document.getElementById('repAddFenInput');
+  const moveInput = document.getElementById('repAddMoveInput');
+  if (!fenInput || !moveInput) return;
+
+  const fen = fenInput.value.trim();
+  const san = moveInput.value.trim();
+  if (!fen || !san) return;
+
+  // Validate the move
+  const chess = new Chess();
+  if (!chess.load(fen)) { alert('Invalid FEN'); return; }
+  const move = chess.move(san, { sloppy: true });
+  if (!move) { alert(`Invalid move: ${san}`); return; }
+
+  const posKey = fenPositionKey(fen);
+  const uci = move.from + move.to + (move.promotion || '');
+  addCustomDeviation(posKey, move.san, uci);
+}
+
+function addCustomDeviation(posKey, san, uci) {
+  if (!gistData) return;
+  if (!gistData.repertoire) gistData.repertoire = {};
+  if (!gistData.repertoire.customDeviations) gistData.repertoire.customDeviations = [];
+
+  // Check for duplicates
+  if (gistData.repertoire.customDeviations.some(d => d.positionKey === posKey)) {
+    alert('This position is already added.');
+    return;
+  }
+
+  // Also check if it already exists as an auto-detected deviation
+  if (repertoireDeviations.some(d => d.positionKey === posKey)) {
+    alert('This position already exists as a detected deviation.');
+    return;
+  }
+
+  // Reconstruct the full FEN from the input
+  const fenInput = document.getElementById('repAddFenInput');
+  const fen = fenInput ? fenInput.value.trim() : posKey + ' 0 1';
+
+  // Determine player color from the FEN (the side to move is the user)
+  const turn = fen.split(' ')[1];
+  const playerColor = turn === 'w' ? 'white' : 'black';
+
+  gistData.repertoire.customDeviations.push({
+    positionKey: posKey,
+    fenBefore: fen,
+    repertoireMove: { san, uci },
+    playerColor,
+    source: 'manual',
+    addedAt: Date.now(),
+  });
+
+  debounceSyncToGist();
+
+  // Rebuild deviations to include the new one
+  detectRepertoireDeviations();
+  updateRepertoireBadge();
+
+  // Clear form and re-render
+  if (fenInput) fenInput.value = '';
+  const result = document.getElementById('repAddFenResult');
+  if (result) result.innerHTML = '<span style="color:var(--green);">✓ Added</span>';
+  renderRepertoirePanel();
+}
+
+function removeCustomDeviation(posKey) {
+  if (!gistData?.repertoire?.customDeviations) return;
+  gistData.repertoire.customDeviations = gistData.repertoire.customDeviations.filter(d => d.positionKey !== posKey);
+  debounceSyncToGist();
+  detectRepertoireDeviations();
+  updateRepertoireBadge();
+  renderRepertoirePanel();
+}
+
 function showRepertoireDeviation(posKey) {
   const dev = repertoireDeviations.find(d => d.positionKey === posKey);
   if (!dev) return;
@@ -12385,7 +12580,7 @@ function showRepertoireDeviation(posKey) {
 
   // Show game context in feedback area
   const fb = document.getElementById('feedbackContainer');
-  if (fb && dev.games) {
+  if (fb) {
     let html = `<div style="padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:12px;margin-top:6px;">`;
     html += `<div style="font-weight:600;margin-bottom:4px;">Repertoire move: <span style="color:var(--green)">${dev.repertoireMove.san}</span></div>`;
     if (dev.repertoireMove.chapterTitle) {
@@ -12394,15 +12589,19 @@ function showRepertoireDeviation(posKey) {
         : dev.repertoireMove.chapterTitle;
       html += `<div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">📖 ${link}</div>`;
     }
-    html += `<div style="color:var(--text-secondary);margin-bottom:6px;">Deviated in ${dev.gameCount} game${dev.gameCount > 1 ? 's' : ''}:</div>`;
-    for (const g of dev.games.slice(0, 5)) {
-      const game = allGames.find(gm => gm.id === g.gameId);
-      if (!game) continue;
-      const opp = getOpponentName(game, dev.playerColor);
-      const date = game.createdAt ? new Date(game.createdAt).toLocaleDateString() : '';
-      html += `<div style="padding:2px 0;color:var(--text-muted);">Played <strong style="color:var(--red)">${g.playedMove.san}</strong> vs ${opp} <span style="opacity:0.6">${date}</span></div>`;
+    if (dev.source === 'manual') {
+      html += `<div style="color:var(--text-muted);font-size:11px;">Manually added position</div>`;
+    } else if (dev.games && dev.games.length > 0) {
+      html += `<div style="color:var(--text-secondary);margin-bottom:6px;">Deviated in ${dev.gameCount} game${dev.gameCount > 1 ? 's' : ''}:</div>`;
+      for (const g of dev.games.slice(0, 5)) {
+        const game = allGames.find(gm => gm.id === g.gameId);
+        if (!game) continue;
+        const opp = getOpponentName(game, dev.playerColor);
+        const date = game.createdAt ? new Date(game.createdAt).toLocaleDateString() : '';
+        html += `<div style="padding:2px 0;color:var(--text-muted);">Played <strong style="color:var(--red)">${g.playedMove.san}</strong> vs ${opp} <span style="opacity:0.6">${date}</span></div>`;
+      }
+      if (dev.games.length > 5) html += `<div style="color:var(--text-muted);">… and ${dev.games.length - 5} more</div>`;
     }
-    if (dev.games.length > 5) html += `<div style="color:var(--text-muted);">… and ${dev.games.length - 5} more</div>`;
     html += `</div>`;
     fb.innerHTML = html;
   }
@@ -12492,13 +12691,22 @@ function evaluateRepertoireMove(source, target, move) {
       srsInfo = srsTag(gradeLabel, srsCard);
     }
 
+    // Check if there are continuations available
+    const contAvailable = getRepertoireContinuations(gameEngine.fen()).length > 0;
+    const contBtns = contAvailable
+      ? `<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">
+          <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="startRepertoireContinuation('random')">▶ Continue (random line)</button>
+          <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="startRepertoireContinuation('all')">▶ All variations</button>
+        </div>`
+      : '';
+
     const nextBtn = !isLastItem
       ? `<button class="btn btn-primary btn-sm" id="btnRepNext" style="font-size:12px;margin-top:8px;" onclick="loadPosition(${currentMistakeIdx + 1})">Next →</button>`
       : '';
 
     showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
       `♟ Correct! <code>${escHtml(move.san)}</code>`,
-      `That's your repertoire move.${srsInfo}${nextBtn}`);
+      `That's your repertoire move.${srsInfo}${contBtns}${nextBtn}`);
     updateSessionProgress();
     renderQueue();
 
@@ -12544,13 +12752,21 @@ function revealRepertoireAnswer(m, expected, isLastItem) {
   renderArrows();
   showLastMoveHighlight(expected.uci.slice(0, 2), expected.uci.slice(2, 4));
 
+  const contAvailable = getRepertoireContinuations(gameEngine.fen()).length > 0;
+  const contBtns = contAvailable
+    ? `<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">
+        <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="startRepertoireContinuation('random')">▶ Continue (random line)</button>
+        <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="startRepertoireContinuation('all')">▶ All variations</button>
+      </div>`
+    : '';
+
   const nextBtn = !isLastItem
     ? `<button class="btn btn-primary btn-sm" id="btnRepNext" style="font-size:12px;margin-top:8px;" onclick="loadPosition(${currentMistakeIdx + 1})">Next →</button>`
     : '';
 
   showColorFeedback('var(--red)', 'rgba(239,83,80,0.08)',
     `♟ The repertoire move is <code>${escHtml(expected.san)}</code>`,
-    `You played <code>${escHtml(m.playedMove.san)}</code>.${srsInfo}${nextBtn}`);
+    `You played <code>${escHtml(m.playedMove.san)}</code>.${srsInfo}${contBtns}${nextBtn}`);
   updateSessionProgress();
   renderQueue();
 
@@ -12613,6 +12829,460 @@ function retryFailedRepertoirePositions() {
 }
 
 // ── Gap exploration ──
+
+// ── Repertoire Continuation (ungraded line practice) ──
+
+function getRepertoireContinuations(fen) {
+  // From a position where it's the opponent's turn, find all opponent moves
+  // that lead to positions in the repertoire trie (i.e., covered continuations)
+  const chess = new Chess(fen);
+  const continuations = [];
+  const moves = chess.moves({ verbose: true });
+  for (const move of moves) {
+    chess.move(move);
+    const posKey = fenPositionKey(chess.fen());
+    if (repertoireTrie.has(posKey)) {
+      continuations.push({
+        san: move.san,
+        uci: move.from + move.to + (move.promotion || ''),
+        from: move.from,
+        to: move.to,
+        resultingPosKey: posKey,
+        repertoireMove: repertoireTrie.get(posKey),
+      });
+    }
+    chess.undo();
+  }
+  return continuations;
+}
+
+function startRepertoireContinuation(mode) {
+  repContActive = true;
+  repContMode = mode;
+  repContPendingBranches = [];
+  repContDepth = 0;
+
+  // Current position on gameEngine is after the user's correct move (opponent to move)
+  advanceRepertoireContinuation();
+}
+
+function advanceRepertoireContinuation() {
+  const fen = gameEngine.fen();
+  const continuations = getRepertoireContinuations(fen);
+
+  if (continuations.length === 0) {
+    // Check if there are pending branches (all-variations mode)
+    if (repContMode === 'all' && repContPendingBranches.length > 0) {
+      const branch = repContPendingBranches.shift();
+      // Reset board to the branch point
+      gameEngine = new Chess(branch.fen);
+      boardObj.position(branch.fen, false);
+      repContDepth = branch.depth;
+
+      // Play the opponent's branch move
+      const move = gameEngine.move(branch.san, { sloppy: true });
+      if (move) {
+        boardObj.position(gameEngine.fen(), true);
+        showLastMoveHighlight(move.from, move.to);
+        const branchesLeft = repContPendingBranches.filter(b => b.depth === branch.depth).length;
+        showRepContPrompt(branch.repertoireMove, branchesLeft > 0 ? `(${branchesLeft + 1} lines remaining at this branch)` : '');
+      }
+      return;
+    }
+
+    // Line complete
+    repContActive = false;
+    const nextBtn = currentMistakeIdx < filteredMistakes.length - 1
+      ? `<button class="btn btn-primary btn-sm" id="btnRepNext" style="font-size:12px;margin-top:8px;" onclick="loadPosition(${currentMistakeIdx + 1})">Next →</button>`
+      : `<button class="btn btn-ghost btn-sm" style="font-size:12px;margin-top:8px;" onclick="exitRepertoireDrill()">Done</button>`;
+    showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
+      '♟ Line complete!',
+      `You've reached the end of this repertoire line.${nextBtn}`);
+    return;
+  }
+
+  // Pick which continuation to play
+  let chosen;
+  if (repContMode === 'random') {
+    chosen = continuations[Math.floor(Math.random() * continuations.length)];
+  } else {
+    // All mode: play the first, queue the rest as pending branches
+    chosen = continuations[0];
+    for (let i = 1; i < continuations.length; i++) {
+      repContPendingBranches.push({
+        fen: fen, // branch point FEN (before opponent moves)
+        san: continuations[i].san,
+        repertoireMove: continuations[i].repertoireMove,
+        depth: repContDepth,
+      });
+    }
+  }
+
+  // Play opponent's move on the board
+  const opMove = gameEngine.move(chosen.san, { sloppy: true });
+  if (!opMove) { repContActive = false; return; }
+
+  repContDepth++;
+  boardObj.position(gameEngine.fen(), true);
+  setTimeout(() => {
+    showLastMoveHighlight(opMove.from, opMove.to);
+  }, 250);
+
+  const branchInfo = continuations.length > 1
+    ? ` <span style="font-size:10px;color:var(--text-muted);">(${continuations.length} opponent responses)</span>`
+    : '';
+  showRepContPrompt(chosen.repertoireMove, branchInfo);
+}
+
+function showRepContPrompt(repertoireMove, extraInfo) {
+  const fb = document.getElementById('feedbackContainer');
+  fb.innerHTML = `<div class="feedback-box" style="border-left:3px solid var(--blue);background:rgba(91,155,213,0.06);padding:10px 12px;">
+    <div class="feedback-title" style="color:var(--blue);">♟ Continuation Practice</div>
+    <div class="feedback-text" style="font-size:12px;">Find the repertoire move${extraInfo}</div>
+  </div>`;
+}
+
+function evaluateRepertoireContinuationMove(source, target, move) {
+  // Find the expected move from the trie for the current position
+  const posKey = fenPositionKey(gameEngine.fen());
+
+  // Undo the move to get the position before the user's move
+  gameEngine.undo();
+  const beforePosKey = fenPositionKey(gameEngine.fen());
+
+  if (!repertoireTrie.has(beforePosKey)) {
+    // Shouldn't happen, but safety net
+    gameEngine.move(move.san, { sloppy: true }); // redo
+    repContActive = false;
+    return;
+  }
+
+  const expected = repertoireTrie.get(beforePosKey);
+  const playedUci = source + target + (move.promotion || '');
+  const isCorrect = (playedUci === expected.uci) || (move.san === expected.san);
+
+  if (isCorrect) {
+    // Redo the move
+    gameEngine.move(move.san, { sloppy: true });
+    boardObj.position(gameEngine.fen(), false);
+    showLastMoveHighlight(source, target);
+
+    showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
+      `✓ <code>${escHtml(move.san)}</code>`, '');
+
+    // Continue after a brief pause
+    setTimeout(() => {
+      if (repContActive) advanceRepertoireContinuation();
+    }, 400);
+  } else {
+    // Wrong — show correct move, let them retry
+    boardObj.position(gameEngine.fen(), false); // already undone
+
+    showColorFeedback('var(--yellow)', 'rgba(255,193,7,0.08)',
+      `<code>${escHtml(move.san)}</code> is not the repertoire move`,
+      `<div style="margin-top:6px;display:flex;gap:8px;">
+        <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="repContShowAnswer()">Show answer</button>
+      </div>`);
+  }
+}
+
+function repContShowAnswer() {
+  const posKey = fenPositionKey(gameEngine.fen());
+  if (!repertoireTrie.has(posKey)) { repContActive = false; return; }
+
+  const expected = repertoireTrie.get(posKey);
+  const move = gameEngine.move(expected.san, { sloppy: true });
+  if (!move) { repContActive = false; return; }
+
+  boardObj.position(gameEngine.fen(), true);
+  bestMoveArrow = { from: expected.uci.slice(0, 2), to: expected.uci.slice(2, 4) };
+  showLastMoveHighlight(move.from, move.to);
+  renderArrows();
+
+  showColorFeedback('var(--red)', 'rgba(239,83,80,0.08)',
+    `♟ The repertoire move is <code>${escHtml(expected.san)}</code>`, '');
+
+  // Continue after a pause
+  setTimeout(() => {
+    bestMoveArrow = null;
+    renderArrows();
+    if (repContActive) advanceRepertoireContinuation();
+  }, 1200);
+}
+
+// ── Repertoire Lead-Up (Start from Beginning) ──
+
+function buildRepertoireLeadUp(dev) {
+  // Try walking the trie from the starting position to the deviation position.
+  const targetPosKey = dev.positionKey;
+  const playerColor = dev.playerColor;
+  const line = buildLeadUpFromTrie(targetPosKey, playerColor);
+
+  // If trie walk reached the target, use it
+  if (line.length > 0 && fenPositionKey(line[line.length - 1].fen) === targetPosKey) {
+    return line;
+  }
+
+  // Fallback: use the game's actual moves
+  const game = allGames.find(g => g.id === dev.gameId);
+  if (!game || !game.moves) return line.length > 0 ? line : [];
+  const moves = game.moves.split(' ');
+  const chess = game.initialFen ? new Chess(game.initialFen) : new Chess();
+  const gameLine = [];
+  const ply = dev.movePly; // 1-based
+
+  for (let i = 0; i < ply - 1 && i < moves.length; i++) {
+    const fenBefore = chess.fen();
+    const move = chess.move(moves[i], { sloppy: true });
+    if (!move) break;
+    const isUser = (playerColor === 'white' && move.color === 'w') || (playerColor === 'black' && move.color === 'b');
+    gameLine.push({ san: move.san, uci: move.from + move.to + (move.promotion || ''), fen: chess.fen(), fenBefore, isUser, from: move.from, to: move.to });
+  }
+
+  // Verify the game line reaches the target
+  if (gameLine.length > 0 && fenPositionKey(chess.fen()) === targetPosKey) {
+    return gameLine;
+  }
+
+  return line.length > 0 ? line : gameLine;
+}
+
+function buildLeadUpFromTrie(targetPosKey, playerColor) {
+  const chess = new Chess();
+  const line = [];
+
+  for (let safety = 0; safety < 80; safety++) {
+    const posKey = fenPositionKey(chess.fen());
+    if (posKey === targetPosKey) break;
+
+    const turn = chess.turn();
+    const isUserTurn = (turn === 'w' && playerColor === 'white') || (turn === 'b' && playerColor === 'black');
+
+    if (isUserTurn) {
+      if (!repertoireTrie.has(posKey)) break;
+      const entry = repertoireTrie.get(posKey);
+      const fenBefore = chess.fen();
+      const move = chess.move(entry.san, { sloppy: true });
+      if (!move) break;
+      line.push({ san: move.san, uci: entry.uci, fen: chess.fen(), fenBefore, isUser: true, from: move.from, to: move.to });
+    } else {
+      const legalMoves = chess.moves({ verbose: true });
+      let bestMove = null;
+
+      // First pass: direct hit to target
+      for (const m of legalMoves) {
+        chess.move(m);
+        if (fenPositionKey(chess.fen()) === targetPosKey) { bestMove = m; chess.undo(); break; }
+        chess.undo();
+      }
+
+      // Second pass: any move leading to a trie position
+      if (!bestMove) {
+        for (const m of legalMoves) {
+          chess.move(m);
+          if (repertoireTrie.has(fenPositionKey(chess.fen()))) { bestMove = m; chess.undo(); break; }
+          chess.undo();
+        }
+      }
+
+      if (!bestMove) break;
+      const fenBefore = chess.fen();
+      const move = chess.move(bestMove, { sloppy: true });
+      if (!move) break;
+      line.push({ san: move.san, uci: move.from + move.to + (move.promotion || ''), fen: chess.fen(), fenBefore, isUser: false, from: move.from, to: move.to });
+    }
+  }
+
+  return line;
+}
+
+function startRepertoireFromBeginning() {
+  const m = filteredMistakes[currentMistakeIdx];
+  if (!m || m.type !== 'repertoire') return;
+
+  const line = buildRepertoireLeadUp(m);
+  if (line.length === 0) return; // already at start or no path
+
+  repLeadUpActive = true;
+  repLeadUpLine = {
+    baseFen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+    moves: line,
+    targetFen: m.fenBefore,
+  };
+  repLeadUpIdx = -1;
+
+  // Set board to starting position
+  gameEngine = new Chess();
+  boardObj.position('start', false);
+  clearLastMoveHighlight();
+
+  // Show line display and update info
+  renderRepLeadUpLine();
+  updateRepLeadUpInfo();
+}
+
+function renderRepLeadUpLine() {
+  const cont = document.getElementById('contLineContainer');
+  if (!cont || !repLeadUpLine) { if (cont) cont.innerHTML = ''; return; }
+
+  const moves = repLeadUpLine.moves;
+  let html = '<div style="font-size:12px;line-height:1.8;padding:4px 0;">';
+  for (let i = 0; i < moves.length; i++) {
+    const mv = moves[i];
+    const moveNum = Math.floor(i / 2) + 1;
+    const isWhite = mv.fenBefore.split(' ')[1] === 'w';
+    if (isWhite) html += `<span style="opacity:0.4;font-size:10px;">${moveNum}.</span> `;
+
+    const isCurrent = i === repLeadUpIdx;
+    const style = isCurrent
+      ? 'font-weight:700;color:var(--accent);text-decoration:underline;cursor:pointer;'
+      : 'opacity:0.6;cursor:pointer;';
+    html += `<span style="${style}" onclick="repLeadUpGoTo(${i})">${mv.san}</span> `;
+  }
+  // Show the "?" for the deviation move
+  const lastIsWhite = moves.length > 0 && moves[moves.length - 1].fen.split(' ')[1] === 'w';
+  const devMoveNum = Math.floor(moves.length / 2) + 1;
+  if (lastIsWhite) html += `<span style="opacity:0.4;font-size:10px;">${devMoveNum}.</span> `;
+  html += `<span style="font-weight:700;color:var(--yellow);">?</span>`;
+  html += '</div>';
+  cont.innerHTML = html;
+}
+
+function updateRepLeadUpInfo() {
+  const totalMoves = repLeadUpLine ? repLeadUpLine.moves.length : 0;
+  const atEnd = repLeadUpIdx >= totalMoves - 1;
+
+  const fb = document.getElementById('feedbackContainer');
+  if (!fb) return;
+
+  if (atEnd) {
+    fb.innerHTML = `<div class="feedback-box" style="border-left:3px solid var(--yellow);background:rgba(255,193,7,0.06);padding:10px 12px;">
+      <div class="feedback-title" style="color:var(--yellow);">Now find the repertoire move</div>
+      <div class="feedback-text" style="font-size:11px;color:var(--text-muted);">This is where you deviated. The move is graded.</div>
+    </div>`;
+  } else {
+    const remaining = totalMoves - repLeadUpIdx - 1;
+    fb.innerHTML = `<div class="feedback-box" style="border-left:3px solid var(--text-muted);background:rgba(128,128,128,0.04);padding:10px 12px;">
+      <div class="feedback-title" style="color:var(--text-secondary);">Opening context</div>
+      <div class="feedback-text" style="font-size:11px;color:var(--text-muted);">
+        Play the moves or navigate. ${remaining} move${remaining !== 1 ? 's' : ''} until the deviation.
+        <div style="margin-top:6px;display:flex;gap:6px;align-items:center;">
+          <button class="btn btn-ghost btn-sm" onclick="repLeadUpStep(-1)" style="font-size:12px;padding:2px 10px;">←</button>
+          <button class="btn btn-ghost btn-sm" onclick="repLeadUpStep(1)" style="font-size:12px;padding:2px 10px;">→</button>
+          <button class="btn btn-ghost btn-sm" onclick="repLeadUpGoTo(${totalMoves - 1})" style="font-size:10px;padding:2px 8px;">Skip to deviation →</button>
+        </div>
+      </div>
+    </div>`;
+  }
+}
+
+function repLeadUpGoTo(idx) {
+  if (!repLeadUpLine) return;
+  idx = Math.max(-1, Math.min(idx, repLeadUpLine.moves.length - 1));
+  repLeadUpIdx = idx;
+
+  if (idx === -1) {
+    gameEngine = new Chess(repLeadUpLine.baseFen);
+    boardObj.position(repLeadUpLine.baseFen, false);
+    clearLastMoveHighlight();
+  } else {
+    const mv = repLeadUpLine.moves[idx];
+    gameEngine = new Chess(mv.fen);
+    boardObj.position(mv.fen, false);
+    showLastMoveHighlight(mv.from, mv.to);
+  }
+
+  renderRepLeadUpLine();
+  updateRepLeadUpInfo();
+
+  // If we've reached the end, transition to drill mode
+  if (idx >= repLeadUpLine.moves.length - 1) {
+    transitionFromLeadUpToDrill();
+  }
+}
+
+function repLeadUpStep(delta) {
+  if (!repLeadUpLine) return;
+  repLeadUpGoTo(repLeadUpIdx + delta);
+}
+
+function repLeadUpPlayMove(source, target, move) {
+  if (!repLeadUpLine) return;
+
+  const nextIdx = repLeadUpIdx + 1;
+  if (nextIdx >= repLeadUpLine.moves.length) {
+    // At the end — this is the deviation move, transition to drill
+    gameEngine.undo();
+    transitionFromLeadUpToDrill();
+    // Re-make the move via the normal drill system
+    const reMove = gameEngine.move({ from: source, to: target, promotion: 'q' });
+    if (reMove) {
+      boardObj.position(gameEngine.fen(), true);
+      showLastMoveHighlight(source, target);
+      currentAttempts++;
+      evaluateRepertoireMove(source, target, reMove);
+    }
+    return;
+  }
+
+  const expected = repLeadUpLine.moves[nextIdx];
+  const playedUci = source + target + (move.promotion || '');
+
+  if (playedUci === expected.uci || move.san === expected.san) {
+    // Correct context move — advance
+    repLeadUpIdx = nextIdx;
+    boardObj.position(gameEngine.fen(), false);
+    showLastMoveHighlight(source, target);
+    renderRepLeadUpLine();
+
+    // Auto-play opponent's response after a brief delay
+    if (nextIdx + 1 < repLeadUpLine.moves.length && !repLeadUpLine.moves[nextIdx + 1].isUser) {
+      setTimeout(() => {
+        if (!repLeadUpActive) return;
+        const oppMove = repLeadUpLine.moves[nextIdx + 1];
+        const m = gameEngine.move(oppMove.san, { sloppy: true });
+        if (m) {
+          repLeadUpIdx = nextIdx + 1;
+          boardObj.position(gameEngine.fen(), true);
+          setTimeout(() => showLastMoveHighlight(m.from, m.to), 250);
+          renderRepLeadUpLine();
+          updateRepLeadUpInfo();
+          if (repLeadUpIdx >= repLeadUpLine.moves.length - 1) {
+            transitionFromLeadUpToDrill();
+          }
+        }
+      }, 300);
+    } else {
+      updateRepLeadUpInfo();
+      if (repLeadUpIdx >= repLeadUpLine.moves.length - 1) {
+        transitionFromLeadUpToDrill();
+      }
+    }
+  } else {
+    // Wrong context move — undo silently
+    gameEngine.undo();
+    boardObj.position(gameEngine.fen(), false);
+  }
+}
+
+function transitionFromLeadUpToDrill() {
+  repLeadUpActive = false;
+  // Reset the game engine to the deviation FEN
+  const m = filteredMistakes[currentMistakeIdx];
+  if (!m) return;
+  gameEngine = new Chess(m.fenBefore);
+  boardObj.position(m.fenBefore, false);
+
+  // Reset drill timer and attempts
+  repertoireDrillStartTime = Date.now();
+  currentAttempts = 0;
+  srsRecorded = false;
+  hintLevel = 0;
+  hintUsed = false;
+
+  updateRepLeadUpInfo();
+  // Keep the line display visible for context
+}
 
 function exploreRepertoireGap(gapIdx) {
   if (gapIdx < 0 || gapIdx >= repertoireGaps.length) return;
@@ -12917,6 +13587,11 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowLeft') { filterUndoMove(); e.preventDefault(); }
     if (e.key === 'ArrowRight') { filterRedoMove(); e.preventDefault(); }
     return;
+  }
+  // Arrow keys: repertoire lead-up takes priority when active
+  if (repLeadUpActive && repLeadUpLine) {
+    if (e.key === 'ArrowLeft') { repLeadUpStep(-1); e.preventDefault(); return; }
+    if (e.key === 'ArrowRight') { repLeadUpStep(1); e.preventDefault(); return; }
   }
   // Arrow keys: engine line takes priority (for wrong-move browsing during tactics)
   if (e.key === 'ArrowLeft') {
