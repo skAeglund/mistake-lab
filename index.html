@@ -1829,6 +1829,7 @@ let repertoireDrillQueue = [];   // deviation items formatted for loadPosition
 let repertoireDrillCorrect = 0;  // positions solved on first attempt
 let repertoireDrillWrong = 0;    // positions that needed >1 attempt or reveal
 let repertoireDrillFailed = [];  // positionKeys of failed items for retry loop
+let repertoireDrillStartTime = 0; // timestamp when current position was loaded
 let savedFilteredMistakes = null; // original filteredMistakes, restored when exiting drill
 let repertoireStudyCache = null; // localStorage cached: {studies:[{id,color,name,pgnHash,trie:{}}], lastUpdated}
 const REPERTOIRE_CACHE_KEY = 'mistakelab_repertoire';
@@ -7270,6 +7271,7 @@ function loadPosition(globalIdx) {
     startAdvantageContinuation(m);
   } else if (m.type === 'repertoire') {
     // ── Repertoire deviation mode setup ──
+    repertoireDrillStartTime = Date.now();
     const drillProgress = repertoireDrillMode ? `<span style="font-size:11px;color:var(--text-muted);float:right;">${currentMistakeIdx + 1} / ${filteredMistakes.length}</span>` : '';
     const countInfo = m.gameCount > 1 ? ` <span style="font-size:10px;color:var(--text-muted)">(${m.gameCount} games)</span>` : '';
     document.getElementById('posInfoContent').innerHTML = `
@@ -12462,7 +12464,10 @@ function evaluateRepertoireMove(source, target, move) {
   if (isCorrect) {
     let grade, gradeLabel;
     if (currentAttempts <= 1 && !hintUsed) {
-      grade = 4; gradeLabel = 'Easy';
+      const elapsed = (Date.now() - repertoireDrillStartTime) / 1000;
+      if (elapsed < 3) { grade = 4; gradeLabel = 'Easy'; }
+      else if (elapsed < 15) { grade = 3; gradeLabel = 'Good'; }
+      else { grade = 2; gradeLabel = 'Hard'; }
     } else {
       grade = 1; gradeLabel = 'Again';
     }
