@@ -225,6 +225,20 @@
   .panel-tab { color: var(--text-muted); border-color: transparent; }
   .panel-tab.active { color: var(--accent); border-color: var(--accent); background: var(--accent-glow); }
 
+  /* Position preview tooltip */
+  .pos-preview {
+    position: fixed; z-index: 1000; pointer-events: none;
+    width: 160px; height: 160px;
+    border-radius: 4px; overflow: hidden;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    border: 1px solid var(--border);
+    display: grid; grid-template-columns: repeat(8, 1fr); grid-template-rows: repeat(8, 1fr);
+  }
+  .pos-preview-sq { width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; }
+  .pos-preview-sq.light { background: #f0d9b5; }
+  .pos-preview-sq.dark { background: #b58863; }
+  .pos-preview-sq img { width: 18px; height: 18px; }
+
   /* Opening filter */
   .opening-filter-chip {
     display: inline-flex; align-items: center; gap: 4px;
@@ -12159,7 +12173,7 @@ function renderRepertoirePanel() {
         const countBadge = d.gameCount > 1 ? `<span style="font-size:10px;background:var(--bg-secondary);padding:1px 5px;border-radius:8px;margin-left:4px;">${d.gameCount}×</span>` : '';
         const chapterTag = d.repertoireMove?.chapterTitle ? `<div style="font-size:10px;opacity:0.4;margin-top:1px;">📖 ${d.repertoireMove.chapterTitle}</div>` : '';
         const dismissBtn = `<button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();dismissRepertoirePosition('${d.positionKey.replace(/'/g, "\\'")}')" style="font-size:9px;padding:1px 4px;color:var(--text-muted);flex-shrink:0;" title="Dismiss this deviation">✕</button>`;
-        html += `<div class="game-card${isDone ? ' completed' : ''}" style="padding:6px 8px;margin:2px 0;cursor:pointer;font-size:12px;display:flex;align-items:flex-start;gap:4px;" onclick="showRepertoireDeviation('${d.positionKey.replace(/'/g, "\\'")}')">
+        html += `<div class="game-card${isDone ? ' completed' : ''}" style="padding:6px 8px;margin:2px 0;cursor:pointer;font-size:12px;display:flex;align-items:flex-start;gap:4px;" onclick="showRepertoireDeviation('${d.positionKey.replace(/'/g, "\\'")}')" onmouseenter="showPositionPreview('${d.fenBefore.replace(/'/g, "\\'")}',event)" onmouseleave="hidePositionPreview()">
           <div style="flex:1;min-width:0;">
             <span>Played <strong style="color:var(--red)">${d.playedMove.san}</strong> instead of <strong style="color:var(--green)">${d.repertoireMove.san}</strong>${countBadge}</span>
             <span style="opacity:0.5;font-size:11px;"> vs ${opponent}</span>
@@ -12269,6 +12283,51 @@ function restoreDismissedRepertoire() {
 function getOpponentName(game, playerColor) {
   const oppColor = playerColor === 'white' ? 'black' : 'white';
   return game.players?.[oppColor]?.user?.name || 'Unknown';
+}
+
+// ── Position preview tooltip ──
+let posPreviewEl = null;
+
+function showPositionPreview(fen, event) {
+  if (!posPreviewEl) {
+    posPreviewEl = document.createElement('div');
+    posPreviewEl.className = 'pos-preview';
+    document.body.appendChild(posPreviewEl);
+  }
+
+  const PIECE_MAP = { K: 'wK', Q: 'wQ', R: 'wR', B: 'wB', N: 'wN', P: 'wP',
+                      k: 'bK', q: 'bQ', r: 'bR', b: 'bB', n: 'bN', p: 'bP' };
+  const rows = fen.split(' ')[0].split('/');
+  let html = '';
+  for (let r = 0; r < 8; r++) {
+    let col = 0;
+    for (const ch of rows[r]) {
+      if (/\d/.test(ch)) {
+        for (let k = 0; k < parseInt(ch); k++) {
+          const light = (r + col) % 2 === 0;
+          html += `<div class="pos-preview-sq ${light ? 'light' : 'dark'}"></div>`;
+          col++;
+        }
+      } else {
+        const light = (r + col) % 2 === 0;
+        const piece = PIECE_MAP[ch];
+        html += `<div class="pos-preview-sq ${light ? 'light' : 'dark'}"><img src="https://lichess1.org/assets/piece/cburnett/${piece}.svg"></div>`;
+        col++;
+      }
+    }
+  }
+  posPreviewEl.innerHTML = html;
+  posPreviewEl.style.display = 'grid';
+
+  // Position to the right of the cursor, or left if near right edge
+  const x = event.clientX + 12;
+  const y = event.clientY - 80;
+  posPreviewEl.style.left = Math.min(x, window.innerWidth - 172) + 'px';
+  posPreviewEl.style.top = Math.max(4, Math.min(y, window.innerHeight - 172)) + 'px';
+}
+
+function hidePositionPreview() {
+  if (posPreviewEl) posPreviewEl.style.display = 'none';
 }
 
 function showRepertoireDeviation(posKey) {
