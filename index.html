@@ -1316,7 +1316,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">RepertoireCheck: flip preview for black, fix animation teleport, hide spoiler text, track continuation errors for retry, next deviation skip button, fix badge count</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">RepertoireCheck: defer drill summary until after continuation, fix retry loop capturing continuation errors</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -12716,15 +12716,13 @@ function evaluateRepertoireMove(source, target, move) {
 
     const nextBtn = !isLastItem
       ? `<button class="btn btn-primary btn-sm" id="btnRepNext" style="font-size:12px;margin-top:8px;" onclick="loadPosition(${currentMistakeIdx + 1})">Next →</button>`
-      : '';
+      : `<button class="btn btn-primary btn-sm" style="font-size:12px;margin-top:8px;" onclick="showRepertoireDrillSummary()">Finish drill</button>`;
 
     showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
       `♟ Correct! <code>${escHtml(move.san)}</code>`,
       `That's your repertoire move.${srsInfo}${contBtns}${nextBtn}`);
     updateSessionProgress();
     renderQueue();
-
-    if (isLastItem) showRepertoireDrillSummary();
   } else {
     // Wrong move
     if (currentAttempts >= 3) {
@@ -12776,15 +12774,13 @@ function revealRepertoireAnswer(m, expected, isLastItem) {
 
   const nextBtn = !isLastItem
     ? `<button class="btn btn-primary btn-sm" id="btnRepNext" style="font-size:12px;margin-top:8px;" onclick="loadPosition(${currentMistakeIdx + 1})">Next →</button>`
-    : '';
+    : `<button class="btn btn-primary btn-sm" style="font-size:12px;margin-top:8px;" onclick="showRepertoireDrillSummary()">Finish drill</button>`;
 
   showColorFeedback('var(--red)', 'rgba(239,83,80,0.08)',
     `♟ The repertoire move is <code>${escHtml(expected.san)}</code>`,
     `You played <code>${escHtml(m.playedMove.san)}</code>.${srsInfo}${contBtns}${nextBtn}`);
   updateSessionProgress();
   renderQueue();
-
-  if (isLastItem) showRepertoireDrillSummary();
 }
 
 function repertoireRevealAnswer() {
@@ -12906,9 +12902,10 @@ function advanceRepertoireContinuation() {
 
     // Line complete
     repContActive = false;
-    const nextBtn = currentMistakeIdx < filteredMistakes.length - 1
+    const isLastDrill = currentMistakeIdx >= filteredMistakes.length - 1;
+    const nextBtn = !isLastDrill
       ? `<button class="btn btn-primary btn-sm" id="btnRepNext" style="font-size:12px;margin-top:8px;" onclick="loadPosition(${currentMistakeIdx + 1})">Next →</button>`
-      : `<button class="btn btn-ghost btn-sm" style="font-size:12px;margin-top:8px;" onclick="exitRepertoireDrill()">Done</button>`;
+      : `<button class="btn btn-primary btn-sm" style="font-size:12px;margin-top:8px;" onclick="showRepertoireDrillSummary()">Finish drill</button>`;
     showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
       '♟ Line complete!',
       `You've reached the end of this repertoire line.${nextBtn}`);
