@@ -1316,7 +1316,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Notes available in all line navigations: repCont, repLeadUp, reviewBestLine, mobile nav</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Use StudyName PGN header for study display name, auto-refresh on reload</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -11802,6 +11802,12 @@ async function loadRepertoireTrie() {
         anyChanged = true;
         console.log(`[Repertoire] Parsed study ${study.id}: ${studyTrie.size} positions, ${studyComments.size} comments`);
       }
+      // Update study name from PGN if available
+      const refreshedName = pgn.match(/\[StudyName "([^"]+)"\]/) || pgn.match(/\[Event "([^"]+)"\]/);
+      if (refreshedName && refreshedName[1] !== study.name) {
+        study.name = refreshedName[1];
+        anyChanged = true;
+      }
       // Update cache
       cache.studies[study.id] = {
         pgnHash,
@@ -11842,6 +11848,8 @@ async function loadRepertoireTrie() {
   }
 
   try { localStorage.setItem(REPERTOIRE_CACHE_KEY, JSON.stringify(cache)); } catch {}
+
+  if (anyChanged && gistData?.repertoire?.studies) debounceSyncToGist();
 
   if (allWarnings.length) {
     console.warn(`[Repertoire] Warnings:`, allWarnings);
@@ -12112,7 +12120,7 @@ async function addRepertoireStudy() {
   }
 
   // Extract study name from PGN headers
-  const nameMatch = pgn.match(/\[Event "([^"]+)"\]/);
+  const nameMatch = pgn.match(/\[StudyName "([^"]+)"\]/) || pgn.match(/\[Event "([^"]+)"\]/);
   const name = nameMatch ? nameMatch[1] : studyId;
 
   studies.push({ id: studyId, color, name });
