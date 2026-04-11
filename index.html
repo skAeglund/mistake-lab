@@ -1318,7 +1318,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Chessable study button for deviations with course URL in Event tag</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Exit analysis mode on loadPosition and enterOpeningFilter</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -5756,6 +5756,7 @@ function toggleOpeningFilter() {
 }
 
 function enterOpeningFilter() {
+  if (analysisMode) exitAnalysisMode();
   buildFenIndex();
   openingFilterMode = true;
 
@@ -7097,6 +7098,7 @@ function renderQueue() {
 // ─── Load a position ───
 function loadPosition(globalIdx) {
   if (globalIdx < 0 || globalIdx >= filteredMistakes.length) return;
+  if (analysisMode) exitAnalysisMode();
   const prevSession = preAnalysisSession;
   const prevFen = preAnalysisFen;
   currentMistakeIdx = globalIdx;
