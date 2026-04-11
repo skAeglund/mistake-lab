@@ -427,7 +427,7 @@
   }
 
   /* ─── Analysis Mode ─── */
-  .analysis-panel { display: flex; flex-direction: column; gap: 0; height: 100%; }
+  .analysis-panel { display: flex; flex-direction: column; gap: 0; height: 100%; overflow: hidden; }
   .analysis-panel.hidden { display: none; }
   .analysis-header {
     display: flex; align-items: center; justify-content: space-between;
@@ -616,6 +616,8 @@
     background: var(--bg-panel);
     display: flex; flex-direction: column;
     overflow: hidden;
+    max-height: calc(100vh - 57px);
+    max-height: calc(100dvh - 57px);
   }
   .feedback-area {
     flex: 1; padding: 20px; overflow-y: auto;
@@ -1316,7 +1318,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Use StudyName PGN header for study display name, auto-refresh on reload</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix analysis controls pushed off-screen, exit analysis on tab switch</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -6558,6 +6560,7 @@ function renderGameList() {
 
 // ─── Review mode ───
 function activatePanelTab(tab) {
+  if (analysisMode) exitAnalysisMode();
   if (tab === 'games') {
     if (reviewMode) toggleReviewMode();
     if (repertoireMode) toggleRepertoireMode();
