@@ -1318,7 +1318,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Multi-study trie with retry fetch, fix false deviations/gaps across studies</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Study on Lichess button with ply-accurate chapter link</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -12688,6 +12688,7 @@ function showRepertoireDeviation(posKey) {
     if (chessableUrl) {
       html += `<div style="margin-top:6px;"><a href="${chessableUrl}" target="_blank" class="btn btn-ghost btn-sm" style="font-size:11px;text-decoration:none;color:var(--blue);">📗 Study on Chessable</a></div>`;
     }
+    html += lichessStudyBtn(dev);
     html += `</div>`;
     fb.innerHTML = html;
   }
@@ -12707,6 +12708,17 @@ function chessableBtn(m) {
   const url = buildChessableUrl(m.repertoireMove.chapterTitle, m.fenBefore);
   if (!url) return '';
   return `<div style="margin-top:6px;"><a href="${url}" target="_blank" class="btn btn-ghost btn-sm" style="font-size:11px;text-decoration:none;color:var(--blue);">📗 Study on Chessable</a></div>`;
+}
+
+function lichessStudyBtn(m) {
+  if (!m || !m.repertoireMove || !m.repertoireMove.chapterUrl) return '';
+  const baseUrl = m.repertoireMove.chapterUrl;
+  if (!baseUrl.includes('lichess.org/study/')) return '';
+  // Compute ply within the study chapter by walking the trie
+  const leadUp = buildLeadUpFromTrie(m.positionKey, m.playerColor);
+  const ply = leadUp.length;
+  const url = ply > 0 ? baseUrl + '#' + ply : baseUrl;
+  return `<div style="margin-top:4px;"><a href="${url}" target="_blank" class="btn btn-ghost btn-sm" style="font-size:11px;text-decoration:none;color:var(--text-secondary);">♟ Study on Lichess</a></div>`;
 }
 
 // ── Repertoire Drill Mode ──
@@ -12808,7 +12820,7 @@ function evaluateRepertoireMove(source, target, move) {
 
     showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
       `♟ Correct! <code>${escHtml(move.san)}</code>`,
-      `That's your repertoire move.${srsInfo}${contBtns}${chessableBtn(m)}${nextBtn}`);
+      `That's your repertoire move.${srsInfo}${contBtns}${chessableBtn(m)}${lichessStudyBtn(m)}${nextBtn}`);
     updateSessionProgress();
     renderQueue();
   } else {
@@ -12866,7 +12878,7 @@ function revealRepertoireAnswer(m, expected, isLastItem) {
 
   showColorFeedback('var(--red)', 'rgba(239,83,80,0.08)',
     `♟ The repertoire move is <code>${escHtml(expected.san)}</code>`,
-    `You played <code>${escHtml(m.playedMove.san)}</code>.${srsInfo}${contBtns}${chessableBtn(m)}${nextBtn}`);
+    `You played <code>${escHtml(m.playedMove.san)}</code>.${srsInfo}${contBtns}${chessableBtn(m)}${lichessStudyBtn(m)}${nextBtn}`);
   updateSessionProgress();
   renderQueue();
 }
