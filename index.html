@@ -1318,7 +1318,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Study on Lichess button with ply-accurate chapter link</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Replay beginning button with lerped move timing</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1841,6 +1841,7 @@ let repContBrowsing = false;      // true when navigating to a non-terminal repC
 let repLeadUpActive = false;      // navigating the lead-up moves before the deviation
 let repLeadUpLine = null;         // {baseFen, moves: [{san, uci, fen, isUser}], targetFen}
 let repLeadUpIdx = -1;            // current position in lead-up (-1 = starting position)
+let repReplayTimer = null;        // setTimeout id for auto-replay
 let savedFilteredMistakes = null; // original filteredMistakes, restored when exiting drill
 let repertoireStudyCache = null; // localStorage cached: {studies:[{id,color,name,pgnHash,trie:{}}], lastUpdated}
 const REPERTOIRE_CACHE_KEY = 'mistakelab_repertoire';
@@ -7150,6 +7151,7 @@ function loadPosition(globalIdx) {
   repLeadUpActive = false;
   repLeadUpLine = null;
   repLeadUpIdx = -1;
+  if (repReplayTimer) { clearTimeout(repReplayTimer); repReplayTimer = null; }
   tacticMode = false;
   tacticStepIdx = 0;
   tacticMoves = [];
@@ -7317,7 +7319,7 @@ function loadPosition(globalIdx) {
           <button class="btn btn-ghost btn-sm" onclick="exitRepertoireDrill()" style="font-size:10px;padding:2px 6px;">✕ Exit</button>
         </div>
         <div>Find the move from your repertoire</div>
-        <div style="margin-top:4px;"><button class="btn btn-ghost btn-sm" onclick="startRepertoireFromBeginning()" style="font-size:10px;">⏮ Start from beginning</button></div>
+        <div style="margin-top:4px;display:flex;gap:6px;"><button class="btn btn-ghost btn-sm" onclick="startRepertoireFromBeginning()" style="font-size:10px;">⏮ Start from beginning</button><button class="btn btn-ghost btn-sm" onclick="replayRepertoireBeginning()" style="font-size:10px;">▶ Replay beginning</button></div>
       </div>
     `;
     stopPreAnalysis();
@@ -13335,6 +13337,7 @@ function startRepertoireFromBeginning() {
   const line = buildRepertoireLeadUp(m);
   if (line.length === 0) return; // already at start or no path
 
+  if (repReplayTimer) { clearTimeout(repReplayTimer); repReplayTimer = null; }
   repLeadUpActive = true;
   repLeadUpLine = {
     baseFen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
@@ -13351,6 +13354,54 @@ function startRepertoireFromBeginning() {
   // Show line display and update info
   renderRepLeadUpLine();
   updateRepLeadUpInfo();
+}
+
+function replayRepertoireBeginning() {
+  const m = filteredMistakes[currentMistakeIdx];
+  if (!m || m.type !== 'repertoire') return;
+
+  const line = buildRepertoireLeadUp(m);
+  if (line.length === 0) return;
+
+  // Cancel any existing replay
+  if (repReplayTimer) { clearTimeout(repReplayTimer); repReplayTimer = null; }
+
+  repLeadUpActive = true;
+  repLeadUpLine = {
+    baseFen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+    moves: line,
+    targetFen: m.fenBefore,
+  };
+  repLeadUpIdx = -1;
+
+  const orientation = m.playerColor === 'black' ? 'black' : 'white';
+  if (boardObj) boardObj.orientation(orientation);
+  gameEngine = new Chess();
+  boardObj.position('start', false);
+  clearLastMoveHighlight();
+  renderRepLeadUpLine();
+
+  // Auto-advance through moves with lerped timing (0.33s → 0.75s)
+  const total = line.length;
+  function scheduleNext(idx) {
+    if (idx >= total) {
+      transitionFromLeadUpToDrill();
+      return;
+    }
+    const t = total <= 1 ? 0.75 : idx / (total - 1); // 0..1
+    const delay = (330 + t * (750 - 330)); // lerp 330ms → 750ms
+    repReplayTimer = setTimeout(() => {
+      if (!repLeadUpActive) return;
+      const mv = line[idx];
+      gameEngine = new Chess(mv.fen);
+      boardObj.position(mv.fen, true);
+      repLeadUpIdx = idx;
+      setTimeout(() => showLastMoveHighlight(mv.from, mv.to), 200);
+      renderRepLeadUpLine();
+      scheduleNext(idx + 1);
+    }, delay);
+  }
+  scheduleNext(0);
 }
 
 function renderRepLeadUpLine() {
