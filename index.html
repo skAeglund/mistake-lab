@@ -1318,7 +1318,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix analysis controls pushed off-screen, exit analysis on tab switch</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Use StudyName header for deviation and gap labels, cache v3</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1844,7 +1844,7 @@ let repLeadUpIdx = -1;            // current position in lead-up (-1 = starting 
 let savedFilteredMistakes = null; // original filteredMistakes, restored when exiting drill
 let repertoireStudyCache = null; // localStorage cached: {studies:[{id,color,name,pgnHash,trie:{}}], lastUpdated}
 const REPERTOIRE_CACHE_KEY = 'mistakelab_repertoire';
-const REPERTOIRE_CACHE_VERSION = 2; // bump to force re-parse (v2: comment position key fix)
+const REPERTOIRE_CACHE_VERSION = 3; // bump to force re-parse (v3: studyName in trie entries)
 const LICHESS_CLIENT_ID = 'mistakelab';
 const LICHESS_REDIRECT_URI = location.origin + location.pathname;
 let lichessToken = localStorage.getItem('mistakelab_lichess_token') || null;
@@ -11570,12 +11570,16 @@ function parseRepertoirePGN(pgnText, repertoireColor) {
     const eventMatch = gamePgn.match(/\[Event "([^"]+)"\]/);
     const chapterTitle = eventMatch ? eventMatch[1] : null;
 
+    // Extract study name from [StudyName] header (falls back to Event if absent)
+    const studyNameMatch = gamePgn.match(/\[StudyName "([^"]+)"\]/);
+    const studyName = studyNameMatch ? studyNameMatch[1] : null;
+
     // Skip chapters tagged [SKIP], [OLD], or [ALT] (case-insensitive)
     if (chapterTitle && /\[(skip|old|alt)\]/i.test(chapterTitle)) {
       continue;
     }
 
-    const chapterMeta = { chapterUrl, chapterTitle };
+    const chapterMeta = { chapterUrl, chapterTitle, studyName };
 
     const tokens = tokenizePGN(movetext);
     const chess = startFen ? new Chess(startFen) : new Chess();
@@ -11916,6 +11920,7 @@ function detectRepertoireDeviations() {
     let deviated = false;
     let lastChapterUrl = null;
     let lastChapterTitle = null;
+    let lastStudyName = null;
 
     for (let i = 0; i < moves.length; i++) {
       const fen = chess.fen();
@@ -11936,6 +11941,7 @@ function detectRepertoireDeviations() {
         const expected = repertoireTrie.get(posKey);
         lastChapterUrl = expected.chapterUrl || lastChapterUrl;
         lastChapterTitle = expected.chapterTitle || lastChapterTitle;
+        lastStudyName = expected.studyName || lastStudyName;
         const playedUci = move.from + move.to + (move.promotion || '');
         if (expected.uci !== playedUci && expected.san !== move.san) {
           // Deviation found
@@ -11967,6 +11973,7 @@ function detectRepertoireDeviations() {
               opponentMove: { san: move.san, uci: move.from + move.to + (move.promotion || '') },
               chapterUrl: lastChapterUrl,
               chapterTitle: lastChapterTitle,
+              studyName: lastStudyName,
               count: 0,
               games: [],
             });
@@ -12269,7 +12276,7 @@ function renderRepertoirePanel() {
         const gameRef = allGames.find(g => g.id === d.gameId);
         const opponent = gameRef ? getOpponentName(gameRef, d.playerColor) : '';
         const countBadge = d.gameCount > 1 ? `<span style="font-size:10px;background:var(--bg-secondary);padding:1px 5px;border-radius:8px;margin-left:4px;">${d.gameCount}×</span>` : '';
-        const chapterTag = d.repertoireMove?.chapterTitle ? `<div style="font-size:10px;opacity:0.4;margin-top:1px;">📖 ${d.repertoireMove.chapterTitle}</div>` : '';
+        const chapterTag = d.repertoireMove?.studyName ? `<div style="font-size:10px;opacity:0.4;margin-top:1px;">📖 ${d.repertoireMove.studyName}</div>` : (d.repertoireMove?.chapterTitle ? `<div style="font-size:10px;opacity:0.4;margin-top:1px;">📖 ${d.repertoireMove.chapterTitle}</div>` : '');
         const isManual = d.source === 'manual';
         const manualBadge = isManual ? `<span style="font-size:9px;background:var(--bg-secondary);color:var(--text-muted);padding:1px 5px;border-radius:8px;margin-left:4px;">manual</span>` : '';
         const playedInfo = isManual ? `Drill <strong style="color:var(--green)">${d.repertoireMove.san}</strong>${manualBadge}` :
@@ -12315,9 +12322,9 @@ function renderRepertoirePanel() {
       const moveNum = fenParts[5] || '?';
       const side = fenParts[1] === 'w' ? '.' : '…';
       const studyLink = gap.chapterUrl
-        ? `<a href="${gap.chapterUrl}" target="_blank" onclick="event.stopPropagation()" style="font-size:10px;color:var(--blue);margin-left:4px;" title="${gap.chapterTitle || 'Open study chapter'}">📖</a>`
+        ? `<a href="${gap.chapterUrl}" target="_blank" onclick="event.stopPropagation()" style="font-size:10px;color:var(--blue);margin-left:4px;" title="${gap.studyName || gap.chapterTitle || 'Open study chapter'}">📖</a>`
         : '';
-      const chapterLabel = gap.chapterTitle ? `<span style="opacity:0.4;font-size:10px;"> · ${gap.chapterTitle}</span>` : '';
+      const chapterLabel = (gap.studyName || gap.chapterTitle) ? `<span style="opacity:0.4;font-size:10px;"> · ${gap.studyName || gap.chapterTitle}</span>` : '';
       html += `<div class="game-card" style="padding:6px 8px;margin:2px 0;font-size:12px;cursor:pointer;" onclick="exploreRepertoireGap(${gapIdx})">
         <span><span style="opacity:0.5;">${moveNum}${side}</span> <strong>${gap.opponentMove.san}</strong>${studyLink}${chapterLabel}</span>
         <span style="opacity:0.5;"> — ${gap.count} game${gap.count > 1 ? 's' : ''}</span>
@@ -12625,10 +12632,11 @@ function showRepertoireDeviation(posKey) {
   if (fb) {
     let html = `<div style="padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:12px;margin-top:6px;">`;
     html += `<div style="font-weight:600;margin-bottom:4px;">Repertoire move: <span style="color:var(--green)">${dev.repertoireMove.san}</span></div>`;
-    if (dev.repertoireMove.chapterTitle) {
+    if (dev.repertoireMove.studyName || dev.repertoireMove.chapterTitle) {
+      const displayName = dev.repertoireMove.studyName || dev.repertoireMove.chapterTitle;
       const link = dev.repertoireMove.chapterUrl
-        ? `<a href="${dev.repertoireMove.chapterUrl}" target="_blank" style="color:var(--blue);">${dev.repertoireMove.chapterTitle}</a>`
-        : dev.repertoireMove.chapterTitle;
+        ? `<a href="${dev.repertoireMove.chapterUrl}" target="_blank" style="color:var(--blue);">${displayName}</a>`
+        : displayName;
       html += `<div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">📖 ${link}</div>`;
     }
     if (dev.source === 'manual') {
