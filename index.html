@@ -1316,7 +1316,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix repertoire comment position keys: store at drill-visible positions, bust cache v2</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Notes available in all line navigations: repCont, repLeadUp, reviewBestLine, mobile nav</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -9551,6 +9551,8 @@ function contLineGoToEnd() {
 // ─── Mobile line nav bar ───
 function lineNavStep(delta) {
   if (analysisMode) analysisLineStep(delta);
+  else if (repLeadUpActive && repLeadUpLine) repLeadUpStep(delta);
+  else if (repContActive && repContLine && repContLine.moves.length > 0) repContLineStep(delta);
   else if (window._reviewBestLine) stepReviewBestLine(delta);
   else if (engineLine) lineStep(delta);
   else if (tacticLine) tacticLineStep(delta);
@@ -10198,6 +10200,7 @@ function goToReviewLine(moveIdx, lineIdx) {
   // Update active state in the move list
   const moves = document.querySelectorAll('#feedbackContainer .engine-line-moves .move');
   moves.forEach((el, i) => el.classList.toggle('active', i === lineIdx));
+  checkForNote(lm.fen);
 }
 
 function stepReviewBestLine(delta) {
@@ -10217,6 +10220,7 @@ function stepReviewBestLine(delta) {
     renderArrows();
     const moves = document.querySelectorAll('#feedbackContainer .engine-line-moves .move');
     moves.forEach(el => el.classList.remove('active'));
+    checkForNote(data.preFen);
   } else {
     goToReviewLine(data.moveIdx, newIdx);
   }
@@ -13040,6 +13044,7 @@ function repContLineGoTo(idx) {
 
   repContBrowsing = idx < repContLine.moves.length - 1;
   renderRepContLine();
+  checkForNote(gameEngine.fen());
 }
 
 function repContLineStep(delta) {
@@ -13338,6 +13343,7 @@ function repLeadUpGoTo(idx) {
 
   renderRepLeadUpLine();
   updateRepLeadUpInfo();
+  checkForNote(gameEngine.fen());
 
   // If we've reached the end, transition to drill mode
   if (idx >= repLeadUpLine.moves.length - 1) {
@@ -13466,6 +13472,12 @@ function getCurrentNoteFen() {
   }
   if (tacticLine && tacticLine.currentIdx >= 0 && tacticLine.moves[tacticLine.currentIdx]) {
     return tacticLine.moves[tacticLine.currentIdx].fen;
+  }
+  if (repContLine && repContLine.currentIdx >= 0 && repContLine.moves[repContLine.currentIdx]) {
+    return repContLine.moves[repContLine.currentIdx].fen;
+  }
+  if (repLeadUpLine && repLeadUpIdx >= 0 && repLeadUpLine.moves[repLeadUpIdx]) {
+    return repLeadUpLine.moves[repLeadUpIdx].fen;
   }
   if (continuationMode && currentSolveFen) return currentSolveFen;
   if (currentMistakeIdx >= 0 && filteredMistakes[currentMistakeIdx]) {
