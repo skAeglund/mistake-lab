@@ -1732,6 +1732,21 @@ async function main() {
     const estSecondsPerPos = 0.3;
     const estTotal = toAnalyze.length * avgMoves * estSecondsPerPos;
     log(`Estimated time: ${formatDuration(estTotal)} (${Math.round(avgMoves)} avg moves/game, ~${estSecondsPerPos}s/position)`);
+
+    // Initialize Maia once for tactic alt lines (if available)
+    let maia = null;
+    if (!CONFIG.noTactics && CONFIG.maiaModel && MaiaEngine) {
+      try {
+        maia = new MaiaEngine();
+        const modelPath = path.resolve(CONFIG.maiaModel);
+        const movesDir = path.dirname(modelPath);
+        await maia.init(modelPath, movesDir);
+        log(`Maia loaded for tactic alt lines`);
+      } catch (e) {
+        logError(`Maia init failed: ${e.message} — continuing without Maia`);
+        maia = null;
+      }
+    }
     log('');
 
     for (let i = 0; i < toAnalyze.length; i++) {
@@ -1741,47 +1756,73 @@ async function main() {
     const opening = game.opening?.name || 'Unknown';
     const date = game.createdAt ? new Date(game.createdAt).toLocaleDateString() : '?';
 
-    log(`[${i + 1}/${toAnalyze.length}] Analyzing: ${opening} (${date}, ${moveCount} moves, ${game.speed || '?'})…`);
+    log(`[${i + 1}/${toAnalyze.length}] ${opening} (${date}, ${moveCount} moves, ${game.speed || '?'})`);
 
     const gameStart = Date.now();
     try {
+      // Step 1: Evaluate all positions
       const analyzed = await analyzeGame(pool, game, CONFIG.depth);
-      if (analyzed) {
-        // Stamp player color so MistakeLab knows which side we played
-        const isWhite = analyzed.players?.white?.user?.name?.toLowerCase() === CONFIG.username.toLowerCase()
-                     || analyzed.players?.white?.user?.id?.toLowerCase() === CONFIG.username.toLowerCase();
-        analyzed._playerColor = isWhite ? 'white' : 'black';
+      if (!analyzed) continue;
 
-        const { mistakes, blunders } = countMistakes(analyzed, CONFIG.username);
-        const duration = (Date.now() - gameStart) / 1000;
-        gameTimings.push(duration);
-        totalPositions += moveCount;
-        gamesAnalyzed++;
+      // Step 2: Stamp player color
+      const allNames = gistUsernames.length > 0 ? gistUsernames : (CONFIG.username ? [CONFIG.username] : []);
+      const wName = (analyzed.players?.white?.user?.name || '').toLowerCase();
+      const wId = (analyzed.players?.white?.user?.id || '').toLowerCase();
+      const bName = (analyzed.players?.black?.user?.name || '').toLowerCase();
+      const bId = (analyzed.players?.black?.user?.id || '').toLowerCase();
+      const isW = allNames.some(u => { const l = u.toLowerCase(); return l === wName || l === wId; });
+      const isB = allNames.some(u => { const l = u.toLowerCase(); return l === bName || l === bId; });
+      analyzed._playerColor = isW ? 'white' : (isB ? 'black' : 'white');
 
-        analyzedGames.push(analyzed);
-        existingIds.add(analyzed.id);
+      // Step 3: Stamp clocks
+      if (!CONFIG.noClocks) stampClocks(analyzed);
 
-        const avgTime = gameTimings.reduce((a, b) => a + b, 0) / gameTimings.length;
-        const remaining = (toAnalyze.length - i - 1) * avgTime;
-
-        log(`  ✓ ${mistakes} mistakes (${blunders} blunders) — ${duration.toFixed(1)}s — ETA: ${formatDuration(remaining)}`);
+      // Step 4: Scan tactics (using first worker)
+      if (!CONFIG.noTactics && analyzed._playerColor) {
+        await pool[0].newGame();
+        const tactics = await scanGameForTactics(pool[0], analyzed, CONFIG.tacticDepth, maia);
+        analyzed.tactics = tactics;
+        analyzed._tacticsScanned = true;
+        if (tactics.length > 0) {
+          for (const t of tactics) {
+            const userMoves = t.moves.filter(m => m.isUser).length;
+            const label = t.found ? '✓ found' : '✗ missed';
+            const moveNum = Math.ceil(t.startPly / 2);
+            const solution = t.moves.filter(m => m.isUser).map(m => m.san).join(' → ');
+            log(`  ⚡ ${userMoves}-move tactic at move ${moveNum} (${label}): ${solution}`);
+          }
+        }
       }
+
+      const { mistakes, blunders } = countMistakes(analyzed, CONFIG.username);
+      const duration = (Date.now() - gameStart) / 1000;
+      gameTimings.push(duration);
+      totalPositions += moveCount;
+      gamesAnalyzed++;
+
+      analyzedGames.push(analyzed);
+      existingIds.add(analyzed.id);
+
+      const avgTime = gameTimings.reduce((a, b) => a + b, 0) / gameTimings.length;
+      const remaining = (toAnalyze.length - i - 1) * avgTime;
+      const tacticStr = analyzed.tactics?.length ? `, ${analyzed.tactics.length} tactic(s)` : '';
+
+      log(`  ✓ ${mistakes} mistakes (${blunders} blunders)${tacticStr} — ${duration.toFixed(1)}s — ETA: ${formatDuration(remaining)}`);
     } catch (err) {
       logError(`  Failed to analyze game ${game.id}: ${err.message}`);
-      // Try to continue with next game
       continue;
     }
 
     // Periodic save
     if (gamesAnalyzed > 0 && gamesAnalyzed % CONFIG.saveEvery === 0) {
-      log(`Saving progress (${gamesAnalyzed} games analyzed so far)…`);
-      await saveAll(analyzedGames, gamesAnalyzed, `MistakeLab analyzer — ${gamesAnalyzed} games analyzed`);
+      log(`Saving progress (${gamesAnalyzed} games so far)…`);
+      await saveAll(analyzedGames, gamesAnalyzed, `MistakeLab analyzer — ${gamesAnalyzed} games`);
       savePosCache();
     }
     } // end for loop
   } // end else (had games to analyze)
 
-  // ── Phase 5: Stamp clocks on games missing clock data ──
+  // ── Phase 5: Backfill clocks on older games missing clock data ──
   if (!CONFIG.noClocks) {
     // Chess.com games: parse clocks from PGN
     let chesscomStamped = 0;
@@ -1822,7 +1863,7 @@ async function main() {
     log(`Clock data: ${totalWithClocks}/${analyzedGames.length} games`);
   }
 
-  // ── Phase 6: Scan tactics on games that haven't been scanned ──
+  // ── Phase 6: Backfill tactics on older games that haven't been scanned ──
   if (!CONFIG.noTactics) {
     const toScanTactics = analyzedGames.filter(g =>
       g.analysis?.length > 0 && !g._tacticsScanned && g._playerColor
