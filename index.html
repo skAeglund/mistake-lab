@@ -13388,8 +13388,7 @@ function replayRepertoireBeginning() {
       transitionFromLeadUpToDrill();
       return;
     }
-    const t = total <= 1 ? 0.75 : idx / (total - 1); // 0..1
-    const delay = (330 + t * (750 - 330)); // lerp 330ms → 750ms
+    const delay = 500;
     repReplayTimer = setTimeout(() => {
       if (!repLeadUpActive) return;
       const mv = line[idx];
