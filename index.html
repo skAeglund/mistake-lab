@@ -1316,7 +1316,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">RepertoireCheck: defer drill summary until after continuation, fix retry loop capturing continuation errors</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Exit opening filter when switching to Repertoire or Review tabs</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -6559,9 +6559,11 @@ function activatePanelTab(tab) {
     if (reviewMode) toggleReviewMode();
     if (repertoireMode) toggleRepertoireMode();
   } else if (tab === 'repertoire') {
+    if (openingFilterMode) exitOpeningFilter(false);
     if (reviewMode) toggleReviewMode();
     if (!repertoireMode) toggleRepertoireMode();
   } else if (tab === 'review') {
+    if (openingFilterMode) exitOpeningFilter(false);
     if (repertoireMode) toggleRepertoireMode();
     if (!reviewMode) toggleReviewMode();
   }
