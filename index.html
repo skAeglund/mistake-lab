@@ -1316,7 +1316,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">RepertoireCheck: line navigation during continuation practice</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix repertoire comment position keys: store at drill-visible positions, bust cache v2</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1842,6 +1842,7 @@ let repLeadUpIdx = -1;            // current position in lead-up (-1 = starting 
 let savedFilteredMistakes = null; // original filteredMistakes, restored when exiting drill
 let repertoireStudyCache = null; // localStorage cached: {studies:[{id,color,name,pgnHash,trie:{}}], lastUpdated}
 const REPERTOIRE_CACHE_KEY = 'mistakelab_repertoire';
+const REPERTOIRE_CACHE_VERSION = 2; // bump to force re-parse (v2: comment position key fix)
 const LICHESS_CLIENT_ID = 'mistakelab';
 const LICHESS_REDIRECT_URI = location.origin + location.pathname;
 let lichessToken = localStorage.getItem('mistakelab_lichess_token') || null;
@@ -11630,6 +11631,7 @@ function tokenizePGN(movetext) {
 function walkPGNTokens(chess, tokens, cursor, trie, repertoireColor, warnings, isMainLine, chapterMeta, comments) {
   let lastMoveFen = chess.fen(); // FEN before the most recent move (for variation branching)
   let lastMoveObj = null;
+  let lastMoveWasRepertoireTurn = false;
 
   while (cursor.idx < tokens.length) {
     const tok = tokens[cursor.idx];
@@ -11654,16 +11656,20 @@ function walkPGNTokens(chess, tokens, cursor, trie, repertoireColor, warnings, i
     }
 
     if (tok.type === 'comment') {
-      // Comment after a move — store for the position after the last move
+      // Comment after a move — store at the position the user will see during drill:
+      // After a repertoire move: use lastMoveFen (position BEFORE the move = drill position)
+      // After an opponent move: use chess.fen() (position AFTER = user's next decision point)
       if (lastMoveObj && comments) {
-        const afterPosKey = fenPositionKey(chess.fen());
-        if (!comments.has(afterPosKey)) {
-          comments.set(afterPosKey, tok.text);
+        const commentPosKey = lastMoveWasRepertoireTurn
+          ? fenPositionKey(lastMoveFen)
+          : fenPositionKey(chess.fen());
+        if (!comments.has(commentPosKey)) {
+          comments.set(commentPosKey, tok.text);
         } else {
           // Append if multiple comments for the same position (from different chapters)
-          const existing = comments.get(afterPosKey);
+          const existing = comments.get(commentPosKey);
           if (!existing.includes(tok.text)) {
-            comments.set(afterPosKey, existing + '\n\n' + tok.text);
+            comments.set(commentPosKey, existing + '\n\n' + tok.text);
           }
         }
       }
@@ -11686,6 +11692,7 @@ function walkPGNTokens(chess, tokens, cursor, trie, repertoireColor, warnings, i
       }
 
       lastMoveObj = move;
+      lastMoveWasRepertoireTurn = isRepertoireTurn;
 
       if (isRepertoireTurn) {
         const uci = move.from + move.to + (move.promotion || '');
@@ -11759,7 +11766,7 @@ async function loadRepertoireTrie() {
   // Load cache
   let cache;
   try { cache = JSON.parse(localStorage.getItem(REPERTOIRE_CACHE_KEY)); } catch { cache = null; }
-  if (!cache) cache = { studies: {} };
+  if (!cache || cache.version !== REPERTOIRE_CACHE_VERSION) cache = { studies: {}, version: REPERTOIRE_CACHE_VERSION };
 
   const mergedTrie = new Map();
   const allWarnings = [];
