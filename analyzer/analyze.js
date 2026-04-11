@@ -1687,24 +1687,21 @@ async function main() {
   // Stamp clock data on newly fetched games
   for (const g of fetchedGames) stampClocks(g);
 
-  // Filter out already-analyzed games and games with server analysis
-  const toAnalyze = fetchedGames.filter(g => {
+  // Filter to new games (not already in DB)
+  const toProcess = fetchedGames.filter(g => {
     if (!g.moves || g.moves.split(' ').length < 4) return false;
     if (existingIds.has(g.id)) return false;
-    // If Lichess already provided analysis, keep it but don't re-analyze
-    if (g.analysis && g.analysis.length > 0) {
-      existingGames.push(g);
-      existingIds.add(g.id);
-      return false;
-    }
     return true;
   });
 
-  log(`${toAnalyze.length} games need local analysis`);
+  const needEval = toProcess.filter(g => !g.analysis || g.analysis.length === 0).length;
+  const haveEval = toProcess.length - needEval;
+  log(`${toProcess.length} new games (${needEval} need eval, ${haveEval} have server analysis)`);
 
-  // ── Phase 4: Analyze games ──
+  // ── Phase 4: Process each game fully (eval → playerColor → clocks → tactics) ──
   const analyzedGames = [...existingGames];
   let gamesAnalyzed = 0;
+  let gamesProcessed = 0;
   let totalPositions = 0;
   const gameTimings = [];
 
@@ -1715,7 +1712,7 @@ async function main() {
     shuttingDown = true;
     log('\nInterrupted — saving progress…');
     try {
-      await saveAll(analyzedGames, gamesAnalyzed, `MistakeLab analyzer — ${gamesAnalyzed} games analyzed`);
+      await saveAll(analyzedGames, gamesAnalyzed, `MistakeLab analyzer — ${gamesProcessed} games processed`);
       savePosCache();
     } catch (err) {
       logError(`Save failed: ${err.message}`);
@@ -1724,14 +1721,17 @@ async function main() {
     process.exit(0);
   });
 
-  if (toAnalyze.length === 0) {
-    log('All games already analyzed — skipping to clocks & tactics.');
+  if (toProcess.length === 0) {
+    log('All games already processed — skipping to backfill.');
   } else {
-    // Estimate time
-    const avgMoves = toAnalyze.reduce((sum, g) => sum + g.moves.split(' ').length, 0) / toAnalyze.length;
-    const estSecondsPerPos = 0.3;
-    const estTotal = toAnalyze.length * avgMoves * estSecondsPerPos;
-    log(`Estimated time: ${formatDuration(estTotal)} (${Math.round(avgMoves)} avg moves/game, ~${estSecondsPerPos}s/position)`);
+    // Estimate time (only for games needing eval)
+    if (needEval > 0) {
+      const evalGames = toProcess.filter(g => !g.analysis || g.analysis.length === 0);
+      const avgMoves = evalGames.reduce((sum, g) => sum + g.moves.split(' ').length, 0) / evalGames.length;
+      const estSecondsPerPos = 0.3;
+      const estTotal = needEval * avgMoves * estSecondsPerPos;
+      log(`Estimated eval time: ${formatDuration(estTotal)} (${Math.round(avgMoves)} avg moves/game, ~${estSecondsPerPos}s/position)`);
+    }
 
     // Initialize Maia once for tactic alt lines (if available)
     let maia = null;
@@ -1749,40 +1749,48 @@ async function main() {
     }
     log('');
 
-    for (let i = 0; i < toAnalyze.length; i++) {
+    for (let i = 0; i < toProcess.length; i++) {
     if (shuttingDown) break;
-    const game = toAnalyze[i];
+    const game = toProcess[i];
     const moveCount = game.moves.split(' ').length;
     const opening = game.opening?.name || 'Unknown';
     const date = game.createdAt ? new Date(game.createdAt).toLocaleDateString() : '?';
+    const hasServerEval = game.analysis && game.analysis.length > 0;
 
-    log(`[${i + 1}/${toAnalyze.length}] ${opening} (${date}, ${moveCount} moves, ${game.speed || '?'})`);
+    log(`[${i + 1}/${toProcess.length}] ${opening} (${date}, ${moveCount} moves, ${game.speed || '?'}${hasServerEval ? ', server eval' : ''})`);
 
     const gameStart = Date.now();
     try {
-      // Step 1: Evaluate all positions
-      const analyzed = await analyzeGame(pool, game, CONFIG.depth);
-      if (!analyzed) continue;
+      // Step 1: Evaluate all positions (skip if server analysis exists)
+      let processed = game;
+      if (!hasServerEval) {
+        processed = await analyzeGame(pool, game, CONFIG.depth);
+        if (!processed) continue;
+        totalPositions += moveCount;
+        gamesAnalyzed++;
+      }
 
       // Step 2: Stamp player color
       const allNames = gistUsernames.length > 0 ? gistUsernames : (CONFIG.username ? [CONFIG.username] : []);
-      const wName = (analyzed.players?.white?.user?.name || '').toLowerCase();
-      const wId = (analyzed.players?.white?.user?.id || '').toLowerCase();
-      const bName = (analyzed.players?.black?.user?.name || '').toLowerCase();
-      const bId = (analyzed.players?.black?.user?.id || '').toLowerCase();
+      const wName = (processed.players?.white?.user?.name || '').toLowerCase();
+      const wId = (processed.players?.white?.user?.id || '').toLowerCase();
+      const bName = (processed.players?.black?.user?.name || '').toLowerCase();
+      const bId = (processed.players?.black?.user?.id || '').toLowerCase();
       const isW = allNames.some(u => { const l = u.toLowerCase(); return l === wName || l === wId; });
       const isB = allNames.some(u => { const l = u.toLowerCase(); return l === bName || l === bId; });
-      analyzed._playerColor = isW ? 'white' : (isB ? 'black' : 'white');
+      if (!processed._playerColor) {
+        processed._playerColor = isW ? 'white' : (isB ? 'black' : 'white');
+      }
 
       // Step 3: Stamp clocks
-      if (!CONFIG.noClocks) stampClocks(analyzed);
+      if (!CONFIG.noClocks) stampClocks(processed);
 
       // Step 4: Scan tactics (using first worker)
-      if (!CONFIG.noTactics && analyzed._playerColor) {
+      if (!CONFIG.noTactics && !processed._tacticsScanned && processed._playerColor) {
         await pool[0].newGame();
-        const tactics = await scanGameForTactics(pool[0], analyzed, CONFIG.tacticDepth, maia);
-        analyzed.tactics = tactics;
-        analyzed._tacticsScanned = true;
+        const tactics = await scanGameForTactics(pool[0], processed, CONFIG.tacticDepth, maia);
+        processed.tactics = tactics;
+        processed._tacticsScanned = true;
         if (tactics.length > 0) {
           for (const t of tactics) {
             const userMoves = t.moves.filter(m => m.isUser).length;
@@ -1794,33 +1802,33 @@ async function main() {
         }
       }
 
-      const { mistakes, blunders } = countMistakes(analyzed, CONFIG.username);
+      const { mistakes, blunders } = countMistakes(processed, CONFIG.username);
       const duration = (Date.now() - gameStart) / 1000;
       gameTimings.push(duration);
-      totalPositions += moveCount;
-      gamesAnalyzed++;
+      gamesProcessed++;
 
-      analyzedGames.push(analyzed);
-      existingIds.add(analyzed.id);
+      analyzedGames.push(processed);
+      existingIds.add(processed.id);
 
       const avgTime = gameTimings.reduce((a, b) => a + b, 0) / gameTimings.length;
-      const remaining = (toAnalyze.length - i - 1) * avgTime;
-      const tacticStr = analyzed.tactics?.length ? `, ${analyzed.tactics.length} tactic(s)` : '';
+      const remaining = (toProcess.length - i - 1) * avgTime;
+      const tacticStr = processed.tactics?.length ? `, ${processed.tactics.length} tactic(s)` : '';
+      const evalStr = hasServerEval ? 'server eval' : `${mistakes} mistakes (${blunders} blunders)`;
 
-      log(`  ✓ ${mistakes} mistakes (${blunders} blunders)${tacticStr} — ${duration.toFixed(1)}s — ETA: ${formatDuration(remaining)}`);
+      log(`  ✓ ${evalStr}${tacticStr} — ${duration.toFixed(1)}s — ETA: ${formatDuration(remaining)}`);
     } catch (err) {
-      logError(`  Failed to analyze game ${game.id}: ${err.message}`);
+      logError(`  Failed to process game ${game.id}: ${err.message}`);
       continue;
     }
 
     // Periodic save
-    if (gamesAnalyzed > 0 && gamesAnalyzed % CONFIG.saveEvery === 0) {
-      log(`Saving progress (${gamesAnalyzed} games so far)…`);
-      await saveAll(analyzedGames, gamesAnalyzed, `MistakeLab analyzer — ${gamesAnalyzed} games`);
+    if (gamesProcessed > 0 && gamesProcessed % CONFIG.saveEvery === 0) {
+      log(`Saving progress (${gamesProcessed} games so far)…`);
+      await saveAll(analyzedGames, gamesAnalyzed, `MistakeLab analyzer — ${gamesProcessed} games`);
       savePosCache();
     }
     } // end for loop
-  } // end else (had games to analyze)
+  } // end else (had games to process)
 
   // ── Phase 5: Backfill clocks on older games missing clock data ──
   if (!CONFIG.noClocks) {
@@ -1937,14 +1945,14 @@ async function main() {
   log('═══════════════════════════════════════════════════');
   log('  Analysis Complete');
   log('═══════════════════════════════════════════════════');
-  log(`Games analyzed:    ${gamesAnalyzed}`);
+  log(`Games processed:   ${gamesProcessed} (${gamesAnalyzed} eval'd, ${gamesProcessed - gamesAnalyzed} server eval)`);
   log(`Total positions:   ${totalPositions}`);
   log(`Cache hits:        ${posCacheHits} (${totalPositions > 0 ? Math.round(100 * posCacheHits / (posCacheHits + posCacheMisses)) : 0}%)`);
   log(`Positions/sec:     ${(pool.reduce((s, w) => s + w.positionsEvaluated, 0) / ((Date.now() - START_TIME) / 1000)).toFixed(1)}`);
   log(`Total time:        ${formatDuration((Date.now() - START_TIME) / 1000)}`);
   log(`Total games in DB: ${analyzedGames.length}`);
 
-  await saveAll(analyzedGames, gamesAnalyzed, `MistakeLab analyzer — ${gamesAnalyzed} games analyzed`);
+  await saveAll(analyzedGames, gamesAnalyzed, `MistakeLab analyzer — ${gamesProcessed} games processed`);
   savePosCache();
   log(`Eval cache: ${Object.keys(posCache).length} entries saved`);
   quitAll();
