@@ -1318,7 +1318,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Use StudyName header for deviation and gap labels, cache v3</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Chessable study button for deviations with course URL in Event tag</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -12652,9 +12652,30 @@ function showRepertoireDeviation(posKey) {
       }
       if (dev.games.length > 5) html += `<div style="color:var(--text-muted);">… and ${dev.games.length - 5} more</div>`;
     }
+    // Chessable study button
+    const chessableUrl = buildChessableUrl(dev.repertoireMove.chapterTitle, dev.fenBefore);
+    if (chessableUrl) {
+      html += `<div style="margin-top:6px;"><a href="${chessableUrl}" target="_blank" class="btn btn-ghost btn-sm" style="font-size:11px;text-decoration:none;color:var(--blue);">📗 Study on Chessable</a></div>`;
+    }
     html += `</div>`;
     fb.innerHTML = html;
   }
+}
+
+function buildChessableUrl(eventTag, fen) {
+  if (!eventTag || !fen) return null;
+  const match = eventTag.match(/(https?:\/\/www\.chessable\.com\/course\/\d+)/);
+  if (!match) return null;
+  const baseUrl = match[1];
+  const boardPart = fen.split(' ')[0].replace(/\//g, ';');
+  return baseUrl + '/fen/' + boardPart;
+}
+
+function chessableBtn(m) {
+  if (!m || !m.repertoireMove) return '';
+  const url = buildChessableUrl(m.repertoireMove.chapterTitle, m.fenBefore);
+  if (!url) return '';
+  return `<div style="margin-top:6px;"><a href="${url}" target="_blank" class="btn btn-ghost btn-sm" style="font-size:11px;text-decoration:none;color:var(--blue);">📗 Study on Chessable</a></div>`;
 }
 
 // ── Repertoire Drill Mode ──
@@ -12756,7 +12777,7 @@ function evaluateRepertoireMove(source, target, move) {
 
     showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
       `♟ Correct! <code>${escHtml(move.san)}</code>`,
-      `That's your repertoire move.${srsInfo}${contBtns}${nextBtn}`);
+      `That's your repertoire move.${srsInfo}${contBtns}${chessableBtn(m)}${nextBtn}`);
     updateSessionProgress();
     renderQueue();
   } else {
@@ -12814,7 +12835,7 @@ function revealRepertoireAnswer(m, expected, isLastItem) {
 
   showColorFeedback('var(--red)', 'rgba(239,83,80,0.08)',
     `♟ The repertoire move is <code>${escHtml(expected.san)}</code>`,
-    `You played <code>${escHtml(m.playedMove.san)}</code>.${srsInfo}${contBtns}${nextBtn}`);
+    `You played <code>${escHtml(m.playedMove.san)}</code>.${srsInfo}${contBtns}${chessableBtn(m)}${nextBtn}`);
   updateSessionProgress();
   renderQueue();
 }
