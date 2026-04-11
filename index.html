@@ -1318,7 +1318,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Exit analysis mode on loadPosition and enterOpeningFilter</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Multi-study trie with retry fetch, fix false deviations/gaps across studies</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1844,7 +1844,7 @@ let repLeadUpIdx = -1;            // current position in lead-up (-1 = starting 
 let savedFilteredMistakes = null; // original filteredMistakes, restored when exiting drill
 let repertoireStudyCache = null; // localStorage cached: {studies:[{id,color,name,pgnHash,trie:{}}], lastUpdated}
 const REPERTOIRE_CACHE_KEY = 'mistakelab_repertoire';
-const REPERTOIRE_CACHE_VERSION = 3; // bump to force re-parse (v3: studyName in trie entries)
+const REPERTOIRE_CACHE_VERSION = 4; // v4: multi-study trie arrays, retry fetch
 const LICHESS_CLIENT_ID = 'mistakelab';
 const LICHESS_REDIRECT_URI = location.origin + location.pathname;
 let lichessToken = localStorage.getItem('mistakelab_lichess_token') || null;
@@ -11751,14 +11751,23 @@ async function fetchStudyPGN(studyId) {
   const url = `https://lichess.org/api/study/${studyId}.pgn?clocks=false&orientation=true`;
   const headers = {};
   if (lichessToken) headers['Authorization'] = `Bearer ${lichessToken}`;
-  try {
-    const resp = await fetch(url, { headers });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    return await resp.text();
-  } catch (e) {
-    console.error(`[Repertoire] Failed to fetch study ${studyId}:`, e);
-    return null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const resp = await fetch(url, { headers });
+      if (resp.status === 429) {
+        const wait = (attempt + 1) * 2000;
+        console.warn(`[Repertoire] Rate limited fetching ${studyId}, retrying in ${wait}ms...`);
+        await new Promise(r => setTimeout(r, wait));
+        continue;
+      }
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      return await resp.text();
+    } catch (e) {
+      console.error(`[Repertoire] Failed to fetch study ${studyId} (attempt ${attempt + 1}):`, e);
+      if (attempt < 2) await new Promise(r => setTimeout(r, 1000));
+    }
   }
+  return null;
 }
 
 async function hashString(str) {
@@ -11835,12 +11844,20 @@ async function loadRepertoireTrie() {
       continue;
     }
 
-    // Merge into main trie (first study wins per position)
+    // Merge into main trie (all unique moves per position across studies)
+    let newPositions = 0;
     for (const [posKey, move] of studyTrie) {
       if (!mergedTrie.has(posKey)) {
-        mergedTrie.set(posKey, move);
+        mergedTrie.set(posKey, [move]);
+        newPositions++;
+      } else {
+        const existing = mergedTrie.get(posKey);
+        if (!existing.some(e => e.uci === move.uci)) {
+          existing.push(move);
+        }
       }
     }
+    console.log(`[Repertoire] Study ${study.id} (${study.color}): ${studyTrie.size} positions, ${newPositions} new → merged total: ${mergedTrie.size}`);
 
     // Merge comments (first study wins per position)
     for (const [posKey, text] of studyComments) {
@@ -11898,6 +11915,17 @@ async function loadRepertoireTrie() {
   }
 }
 
+// Trie helpers — trie values are arrays of {san, uci, ...chapterMeta}
+function trieFirst(posKey) {
+  const arr = repertoireTrie?.get(posKey);
+  return arr ? arr[0] : null;
+}
+function trieMatchesMove(posKey, san, uci) {
+  const arr = repertoireTrie?.get(posKey);
+  if (!arr) return false;
+  return arr.some(e => e.uci === uci || e.san === san);
+}
+
 // ── Deviation & Gap Detection ──
 
 function detectRepertoireDeviations() {
@@ -11940,12 +11968,13 @@ function detectRepertoireDeviations() {
           // Position not in repertoire — we're off-book, stop
           break;
         }
-        const expected = repertoireTrie.get(posKey);
-        lastChapterUrl = expected.chapterUrl || lastChapterUrl;
-        lastChapterTitle = expected.chapterTitle || lastChapterTitle;
-        lastStudyName = expected.studyName || lastStudyName;
+        const entries = repertoireTrie.get(posKey);
+        const primary = entries[0];
+        lastChapterUrl = primary.chapterUrl || lastChapterUrl;
+        lastChapterTitle = primary.chapterTitle || lastChapterTitle;
+        lastStudyName = primary.studyName || lastStudyName;
         const playedUci = move.from + move.to + (move.promotion || '');
-        if (expected.uci !== playedUci && expected.san !== move.san) {
+        if (!entries.some(e => e.uci === playedUci || e.san === move.san)) {
           // Deviation found
           if (!deviated) {
             deviations.push({
@@ -11953,7 +11982,7 @@ function detectRepertoireDeviations() {
               movePly: i + 1,
               fenBefore: fen,
               playedMove: { san: move.san, uci: playedUci },
-              repertoireMove: expected,
+              repertoireMove: primary,
               positionKey: posKey,
               opening: game.opening?.name || '',
               playerColor,
@@ -12483,7 +12512,7 @@ function onRepFenInput() {
   }
 
   const posKey = fenPositionKey(raw);
-  const trieEntry = repertoireTrie ? repertoireTrie.get(posKey) : null;
+  const trieEntry = trieFirst(posKey);
 
   // Show position on the board
   if (boardObj) {
@@ -12734,7 +12763,7 @@ function evaluateRepertoireMove(source, target, move) {
 
   const playedUci = source + target + (move.promotion || '');
   const expected = m.repertoireMove;
-  const isCorrect = (playedUci === expected.uci) || (move.san === expected.san);
+  const isCorrect = trieMatchesMove(m.positionKey, move.san, playedUci);
   const isLastItem = currentMistakeIdx >= filteredMistakes.length - 1;
 
   if (isCorrect) {
@@ -12917,7 +12946,7 @@ function getRepertoireContinuations(fen) {
         from: move.from,
         to: move.to,
         resultingPosKey: posKey,
-        repertoireMove: repertoireTrie.get(posKey),
+        repertoireMove: trieFirst(posKey),
       });
     }
     chess.undo();
@@ -13127,9 +13156,9 @@ function evaluateRepertoireContinuationMove(source, target, move) {
     return;
   }
 
-  const expected = repertoireTrie.get(beforePosKey);
+  const expected = trieFirst(beforePosKey);
   const playedUci = source + target + (move.promotion || '');
-  const isCorrect = (playedUci === expected.uci) || (move.san === expected.san);
+  const isCorrect = trieMatchesMove(beforePosKey, move.san, playedUci);
 
   if (isCorrect) {
     // Redo the move (board already shows the correct position from drag)
@@ -13174,7 +13203,7 @@ function repContShowAnswer() {
   const posKey = fenPositionKey(gameEngine.fen());
   if (!repertoireTrie.has(posKey)) { repContActive = false; return; }
 
-  const expected = repertoireTrie.get(posKey);
+  const expected = trieFirst(posKey);
   const move = gameEngine.move(expected.san, { sloppy: true });
   if (!move) { repContActive = false; return; }
 
@@ -13251,7 +13280,7 @@ function buildLeadUpFromTrie(targetPosKey, playerColor) {
 
     if (isUserTurn) {
       if (!repertoireTrie.has(posKey)) break;
-      const entry = repertoireTrie.get(posKey);
+      const entry = trieFirst(posKey);
       const fenBefore = chess.fen();
       const move = chess.move(entry.san, { sloppy: true });
       if (!move) break;
