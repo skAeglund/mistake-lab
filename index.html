@@ -13385,7 +13385,8 @@ function replayRepertoireBeginning() {
   const total = line.length;
   function scheduleNext(idx) {
     if (idx >= total) {
-      transitionFromLeadUpToDrill();
+      // Delay transition so the last move animation completes
+      repReplayTimer = setTimeout(() => transitionFromLeadUpToDrill(), 400);
       return;
     }
     const delay = 500;
@@ -13550,11 +13551,17 @@ function repLeadUpPlayMove(source, target, move) {
 
 function transitionFromLeadUpToDrill() {
   repLeadUpActive = false;
+  if (repReplayTimer) { clearTimeout(repReplayTimer); repReplayTimer = null; }
   // Reset the game engine to the deviation FEN
   const m = filteredMistakes[currentMistakeIdx];
   if (!m) return;
   gameEngine = new Chess(m.fenBefore);
-  boardObj.position(m.fenBefore, false);
+  // Only set board if not already at the correct position (avoids animation restart after replay)
+  const currentFen = boardObj ? boardObj.fen() : null;
+  const targetFen = m.fenBefore.split(' ')[0];
+  if (currentFen !== targetFen) {
+    boardObj.position(m.fenBefore, false);
+  }
 
   // Reset drill timer and attempts
   repertoireDrillStartTime = Date.now();
