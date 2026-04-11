@@ -1316,7 +1316,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Exit opening filter when switching to Repertoire or Review tabs</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">RepertoireCheck: line navigation during continuation practice</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1834,6 +1834,8 @@ let repContActive = false;        // in repertoire continuation mode (ungraded)
 let repContMode = 'random';       // 'random' | 'all'
 let repContPendingBranches = [];  // [{fen, opponentMove, depth}] — unsolved branches for 'all' mode
 let repContDepth = 0;             // current depth in continuation
+let repContLine = null;           // {baseFen, moves: [{san, uci, fen, from, to, isUser}], currentIdx}
+let repContBrowsing = false;      // true when navigating to a non-terminal repContLine position
 let repLeadUpActive = false;      // navigating the lead-up moves before the deviation
 let repLeadUpLine = null;         // {baseFen, moves: [{san, uci, fen, isUser}], targetFen}
 let repLeadUpIdx = -1;            // current position in lead-up (-1 = starting position)
@@ -7137,6 +7139,8 @@ function loadPosition(globalIdx) {
   contWrongMovePending = false;
   clearPremove();
   repContActive = false;
+  repContLine = null;
+  repContBrowsing = false;
   repLeadUpActive = false;
   repLeadUpLine = null;
   repLeadUpIdx = -1;
@@ -12873,6 +12877,8 @@ function startRepertoireContinuation(mode) {
   repContMode = mode;
   repContPendingBranches = [];
   repContDepth = 0;
+  repContLine = { baseFen: gameEngine.fen(), moves: [], currentIdx: -1 };
+  repContBrowsing = false;
 
   // Current position on gameEngine is after the user's correct move (opponent to move)
   advanceRepertoireContinuation();
@@ -12894,6 +12900,21 @@ function advanceRepertoireContinuation() {
       // Play the opponent's branch move
       const move = gameEngine.move(branch.san, { sloppy: true });
       if (move) {
+        // Truncate line back to branch point and add the new branch move
+        if (repContLine) {
+          const branchFenKey = fenPositionKey(branch.fen);
+          let truncIdx = -1;
+          for (let i = repContLine.moves.length - 1; i >= 0; i--) {
+            if (fenPositionKey(repContLine.moves[i].fen) === branchFenKey) { truncIdx = i; break; }
+          }
+          if (truncIdx === -1 && fenPositionKey(repContLine.baseFen) === branchFenKey) truncIdx = -1;
+          else if (truncIdx >= 0) { /* found */ } else truncIdx = -1;
+          repContLine.moves.length = truncIdx + 1;
+          const uci = move.from + move.to + (move.promotion || '');
+          repContLine.moves.push({ san: move.san, uci, fen: gameEngine.fen(), from: move.from, to: move.to, isUser: false });
+          repContLine.currentIdx = repContLine.moves.length - 1;
+          renderRepContLine();
+        }
         boardObj.position(gameEngine.fen(), true);
         showLastMoveHighlight(move.from, move.to);
         const branchesLeft = repContPendingBranches.filter(b => b.depth === branch.depth).length;
@@ -12936,6 +12957,12 @@ function advanceRepertoireContinuation() {
   if (!opMove) { repContActive = false; return; }
 
   repContDepth++;
+  if (repContLine) {
+    const uci = opMove.from + opMove.to + (opMove.promotion || '');
+    repContLine.moves.push({ san: opMove.san, uci, fen: gameEngine.fen(), from: opMove.from, to: opMove.to, isUser: false });
+    repContLine.currentIdx = repContLine.moves.length - 1;
+    renderRepContLine();
+  }
   boardObj.position(gameEngine.fen(), true);
   setTimeout(() => {
     showLastMoveHighlight(opMove.from, opMove.to);
@@ -12945,6 +12972,72 @@ function advanceRepertoireContinuation() {
     ? ` <span style="font-size:10px;color:var(--text-muted);">(${continuations.length} opponent responses)</span>`
     : '';
   showRepContPrompt(chosen.repertoireMove, branchInfo);
+}
+
+function renderRepContLine() {
+  const cont = document.getElementById('contLineContainer');
+  if (!cont || !repContLine || !repContLine.moves.length) { if (cont) cont.innerHTML = ''; return; }
+
+  const moves = repContLine.moves;
+  // Determine starting move number from baseFen
+  const baseParts = repContLine.baseFen.split(' ');
+  const baseFullMove = parseInt(baseParts[5]) || 1;
+  const baseTurnIsBlack = baseParts[1] === 'b';
+
+  let html = '<div style="font-size:12px;line-height:1.8;padding:4px 0;">';
+  for (let i = 0; i < moves.length; i++) {
+    const mv = moves[i];
+    const fenParts = mv.fen.split(' ');
+    // The move that produced this FEN: if fen says black to move, white just moved
+    const whiteJustMoved = fenParts[1] === 'b';
+    // Calculate move number: base + number of white moves played so far
+    let moveNum;
+    if (whiteJustMoved) {
+      // Count white moves up to and including this one
+      let wCount = 0;
+      for (let j = 0; j <= i; j++) { if (moves[j].fen.split(' ')[1] === 'b') wCount++; }
+      moveNum = baseFullMove + wCount - (baseTurnIsBlack ? 0 : 0);
+      // Simpler: derive from FEN fullmove counter
+      moveNum = parseInt(fenParts[5]) || 1;
+      html += `<span style="opacity:0.4;font-size:10px;">${moveNum}.</span> `;
+    } else if (i === 0 && !whiteJustMoved) {
+      moveNum = parseInt(fenParts[5]) || 1;
+      html += `<span style="opacity:0.4;font-size:10px;">${moveNum}…</span>`;
+    }
+
+    const isCurrent = i === repContLine.currentIdx;
+    const style = isCurrent
+      ? 'font-weight:700;color:var(--accent);text-decoration:underline;cursor:pointer;'
+      : (i > repContLine.currentIdx ? 'opacity:0.35;cursor:pointer;' : 'opacity:0.7;cursor:pointer;');
+    html += `<span style="${style}" onclick="repContLineGoTo(${i})">${mv.san}</span> `;
+  }
+  html += '</div>';
+  cont.innerHTML = html;
+}
+
+function repContLineGoTo(idx) {
+  if (!repContLine) return;
+  idx = Math.max(-1, Math.min(idx, repContLine.moves.length - 1));
+  repContLine.currentIdx = idx;
+
+  if (idx === -1) {
+    gameEngine = new Chess(repContLine.baseFen);
+    boardObj.position(repContLine.baseFen, false);
+    clearLastMoveHighlight();
+  } else {
+    const mv = repContLine.moves[idx];
+    gameEngine = new Chess(mv.fen);
+    boardObj.position(mv.fen, false);
+    showLastMoveHighlight(mv.from, mv.to);
+  }
+
+  repContBrowsing = idx < repContLine.moves.length - 1;
+  renderRepContLine();
+}
+
+function repContLineStep(delta) {
+  if (!repContLine) return;
+  repContLineGoTo(repContLine.currentIdx + delta);
 }
 
 function showRepContPrompt(repertoireMove, extraInfo) {
@@ -12960,6 +13053,12 @@ function showRepContPrompt(repertoireMove, extraInfo) {
 }
 
 function evaluateRepertoireContinuationMove(source, target, move) {
+  // If browsing back in the line, truncate and resume live play
+  if (repContBrowsing && repContLine) {
+    repContLine.moves.length = repContLine.currentIdx + 1;
+    repContBrowsing = false;
+  }
+
   // Find the expected move from the trie for the current position
   const posKey = fenPositionKey(gameEngine.fen());
 
@@ -12982,6 +13081,13 @@ function evaluateRepertoireContinuationMove(source, target, move) {
     // Redo the move (board already shows the correct position from drag)
     gameEngine.move(move.san, { sloppy: true });
     showLastMoveHighlight(source, target);
+
+    if (repContLine) {
+      const uci = source + target + (move.promotion || '');
+      repContLine.moves.push({ san: move.san, uci, fen: gameEngine.fen(), from: source, to: target, isUser: true });
+      repContLine.currentIdx = repContLine.moves.length - 1;
+      renderRepContLine();
+    }
 
     showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
       `✓ <code>${escHtml(move.san)}</code>`, '');
@@ -13017,6 +13123,13 @@ function repContShowAnswer() {
   const expected = repertoireTrie.get(posKey);
   const move = gameEngine.move(expected.san, { sloppy: true });
   if (!move) { repContActive = false; return; }
+
+  if (repContLine) {
+    const uci = move.from + move.to + (move.promotion || '');
+    repContLine.moves.push({ san: move.san, uci, fen: gameEngine.fen(), from: move.from, to: move.to, isUser: true });
+    repContLine.currentIdx = repContLine.moves.length - 1;
+    renderRepContLine();
+  }
 
   boardObj.position(gameEngine.fen(), true);
   bestMoveArrow = { from: expected.uci.slice(0, 2), to: expected.uci.slice(2, 4) };
@@ -13616,6 +13729,10 @@ document.addEventListener('keydown', (e) => {
   if (repLeadUpActive && repLeadUpLine) {
     if (e.key === 'ArrowLeft') { repLeadUpStep(-1); e.preventDefault(); return; }
     if (e.key === 'ArrowRight') { repLeadUpStep(1); e.preventDefault(); return; }
+  }
+  if (repContActive && repContLine && repContLine.moves.length > 0) {
+    if (e.key === 'ArrowLeft') { repContLineStep(-1); e.preventDefault(); return; }
+    if (e.key === 'ArrowRight') { repContLineStep(1); e.preventDefault(); return; }
   }
   // Arrow keys: engine line takes priority (for wrong-move browsing during tactics)
   if (e.key === 'ArrowLeft') {
