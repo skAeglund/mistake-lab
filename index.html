@@ -12719,15 +12719,12 @@ function lichessStudyBtn(m) {
   // Try chapterUrl from [Site] header (most specific — includes chapter)
   const chapterUrl = m.repertoireMove.chapterUrl;
   if (chapterUrl && chapterUrl.includes('lichess.org/study/')) {
-    const leadUp = buildLeadUpFromTrie(m.positionKey, m.playerColor);
-    const ply = leadUp.length;
-    url = ply > 0 ? chapterUrl + '#' + ply : chapterUrl;
+    url = chapterUrl;
   }
 
   // Fallback: construct from study config if chapterUrl unavailable
   if (!url) {
     const studies = getRepertoireConfig();
-    // Find the study that covers this position's color
     const study = studies.find(s => s.color === m.playerColor);
     if (study) {
       url = `https://lichess.org/study/${study.id}`;
@@ -12735,7 +12732,20 @@ function lichessStudyBtn(m) {
   }
 
   if (!url) return '';
-  return `<div style="margin-top:4px;"><a href="${url}" target="_blank" class="btn btn-ghost btn-sm" style="font-size:11px;text-decoration:none;color:var(--text-secondary);">♟ Study on Lichess</a></div>`;
+
+  // Build search text from last few lead-up moves + the repertoire move
+  const leadUp = buildLeadUpFromTrie(m.positionKey, m.playerColor);
+  let searchText = '';
+  if (leadUp.length > 0) {
+    const tail = leadUp.slice(-4); // last 4 moves
+    searchText = tail.map(mv => mv.san).join(' ');
+    searchText += ' ' + m.repertoireMove.san;
+  } else {
+    searchText = m.repertoireMove.san;
+  }
+  const copyBtn = `<button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 6px;color:var(--text-muted);" onclick="event.preventDefault();navigator.clipboard.writeText('${searchText.replace(/'/g, "\\'")}');this.textContent='✓ Copied'" title="Copy moves to search in study">📋</button>`;
+
+  return `<div style="margin-top:4px;display:flex;gap:4px;align-items:center;"><a href="${url}" target="_blank" class="btn btn-ghost btn-sm" style="font-size:11px;text-decoration:none;color:var(--text-secondary);">♟ Study on Lichess</a>${copyBtn}</div>`;
 }
 
 // ── Repertoire Drill Mode ──
