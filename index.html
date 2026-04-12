@@ -1318,7 +1318,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix tactic post-solve nav, review eval bar, cont advantage threshold, review spoiler, study arrows</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix repertoire continuation hints + add retry failed moves</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1840,6 +1840,9 @@ let repContPendingBranches = [];  // [{fen, opponentMove, depth}] — unsolved b
 let repContDepth = 0;             // current depth in continuation
 let repContLine = null;           // {baseFen, moves: [{san, uci, fen, from, to, isUser}], currentIdx}
 let repContBrowsing = false;      // true when navigating to a non-terminal repContLine position
+let repContFailedFens = new Set();   // position keys where user failed during continuation
+let repContRetrying = false;         // true when replaying line to retry failed moves
+let repContRetryQueue = [];          // [{fen, moveIdx}] — remaining failed positions to retry
 let repLeadUpActive = false;      // navigating the lead-up moves before the deviation
 let repLeadUpLine = null;         // {baseFen, moves: [{san, uci, fen, isUser}], targetFen}
 let repLeadUpIdx = -1;            // current position in lead-up (-1 = starting position)
@@ -3936,10 +3939,20 @@ async function showHint() {
   // ── Repertoire mode hint: use repertoire move ──
   if (repertoireDrillMode && currentMistakeIdx >= 0) {
     const m = filteredMistakes[currentMistakeIdx];
-    if (m && m.type === 'repertoire' && m.repertoireMove) {
+    if (m && m.type === 'repertoire') {
+      // During continuation, hint from the trie for the current position
+      let hintUci = null;
+      if (repContActive && gameEngine) {
+        const posKey = fenPositionKey(gameEngine.fen());
+        const entry = trieFirst(posKey);
+        if (entry) hintUci = entry.uci;
+      } else if (m.repertoireMove) {
+        hintUci = m.repertoireMove.uci;
+      }
+      if (!hintUci) return;
       hintUsed = true;
-      const fromSq = m.repertoireMove.uci.substring(0, 2);
-      const toSq = m.repertoireMove.uci.substring(2, 4);
+      const fromSq = hintUci.substring(0, 2);
+      const toSq = hintUci.substring(2, 4);
       if (hintLevel === 0) {
         clearHintHighlights();
         const fromEl = document.querySelector(`.square-${fromSq}`);
@@ -6965,6 +6978,8 @@ function onBoardClick(e) {
         currentAttempts++;
         if (tacticMode) {
           evaluateTacticMove(move.from, move.to, move);
+        } else if (repContRetrying) {
+          evaluateRepContRetryMove(move.from, move.to, move);
         } else if (repContActive) {
           evaluateRepertoireContinuationMove(move.from, move.to, move);
         } else if (repertoireDrillMode) {
@@ -7152,6 +7167,9 @@ function loadPosition(globalIdx) {
   repContActive = false;
   repContLine = null;
   repContBrowsing = false;
+  repContFailedFens.clear();
+  repContRetrying = false;
+  repContRetryQueue = [];
   repLeadUpActive = false;
   repLeadUpLine = null;
   repLeadUpIdx = -1;
@@ -7561,6 +7579,8 @@ function onDrop(source, target) {
     currentAttempts++;
     if (tacticMode) {
       evaluateTacticMove(source, target, move);
+    } else if (repContRetrying) {
+      evaluateRepContRetryMove(source, target, move);
     } else if (repContActive) {
       evaluateRepertoireContinuationMove(source, target, move);
     } else if (repertoireDrillMode) {
@@ -13107,6 +13127,9 @@ function startRepertoireContinuation(mode) {
   repContDepth = 0;
   repContLine = { baseFen: gameEngine.fen(), moves: [], currentIdx: -1 };
   repContBrowsing = false;
+  repContFailedFens.clear();
+  repContRetrying = false;
+  repContRetryQueue = [];
 
   // Current position on gameEngine is after the user's correct move (opponent to move)
   advanceRepertoireContinuation();
@@ -13157,9 +13180,13 @@ function advanceRepertoireContinuation() {
     const nextBtn = !isLastDrill
       ? `<button class="btn btn-primary btn-sm" id="btnRepNext" style="font-size:12px;margin-top:8px;" onclick="loadPosition(${currentMistakeIdx + 1})">Next →</button>`
       : `<button class="btn btn-primary btn-sm" style="font-size:12px;margin-top:8px;" onclick="showRepertoireDrillSummary()">Finish drill</button>`;
+    const failCount = repContFailedFens.size;
+    const retryBtn = failCount > 0
+      ? `<div style="margin-top:6px;"><button class="btn btn-ghost btn-sm" style="font-size:11px;border-color:var(--yellow);color:var(--yellow);" onclick="startRepContRetry()">↺ Retry ${failCount} failed move${failCount > 1 ? 's' : ''}</button></div>`
+      : '';
     showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
       '♟ Line complete!',
-      `You've reached the end of this repertoire line.${nextBtn}`);
+      `You've reached the end of this repertoire line.${retryBtn}${nextBtn}`);
     return;
   }
 
@@ -13270,6 +13297,14 @@ function repContLineStep(delta) {
 }
 
 function showRepContPrompt(repertoireMove, extraInfo) {
+  // Reset hint state for the new position
+  hintLevel = 0;
+  hintArrow = null;
+  hintMove = null;
+  clearHintHighlights();
+  const hintBtn = document.getElementById('btnHint');
+  if (hintBtn) { hintBtn.classList.remove('hidden'); hintBtn.disabled = false; hintBtn.textContent = '💡 Hint'; hintBtn.style.borderColor = ''; hintBtn.style.color = ''; }
+
   const nextDevBtn = repertoireDrillMode && currentMistakeIdx < filteredMistakes.length - 1
     ? `<div style="margin-top:6px;"><button class="btn btn-ghost btn-sm" style="font-size:10px;color:var(--text-muted);" onclick="repContActive=false;loadPosition(${currentMistakeIdx + 1})">Skip to next deviation →</button></div>`
     : '';
@@ -13329,6 +13364,9 @@ function evaluateRepertoireContinuationMove(source, target, move) {
     // Wrong — show correct move, let them retry
     boardObj.position(gameEngine.fen(), false); // already undone
 
+    // Track this position as failed for continuation retry
+    repContFailedFens.add(fenPositionKey(gameEngine.fen()));
+
     // Track this deviation as failed for the retry loop
     if (repertoireDrillMode) {
       const devM = filteredMistakes[currentMistakeIdx];
@@ -13374,6 +13412,139 @@ function repContShowAnswer() {
     renderArrows();
     if (repContActive) advanceRepertoireContinuation();
   }, 1200);
+}
+
+// ── Repertoire Continuation Retry ──
+
+function startRepContRetry() {
+  if (!repContLine || repContFailedFens.size === 0) return;
+
+  // Build queue: find user-move indices at failed positions
+  repContRetryQueue = [];
+  const chess = new Chess(repContLine.baseFen);
+  for (let i = 0; i < repContLine.moves.length; i++) {
+    const mv = repContLine.moves[i];
+    if (mv.isUser) {
+      const posKey = fenPositionKey(chess.fen());
+      if (repContFailedFens.has(posKey)) {
+        repContRetryQueue.push({ moveIdx: i, preFen: chess.fen() });
+      }
+    }
+    chess.move(mv.san, { sloppy: true });
+  }
+
+  if (repContRetryQueue.length === 0) return;
+
+  repContRetrying = true;
+  repContActive = true;
+  advanceRepContRetry();
+}
+
+function advanceRepContRetry() {
+  if (repContRetryQueue.length === 0) {
+    // All retries done
+    repContRetrying = false;
+    repContActive = false;
+    const stillFailed = repContFailedFens.size;
+    const isLastDrill = currentMistakeIdx >= filteredMistakes.length - 1;
+    const nextBtn = !isLastDrill
+      ? `<button class="btn btn-primary btn-sm" id="btnRepNext" style="font-size:12px;margin-top:8px;" onclick="loadPosition(${currentMistakeIdx + 1})">Next →</button>`
+      : `<button class="btn btn-primary btn-sm" style="font-size:12px;margin-top:8px;" onclick="showRepertoireDrillSummary()">Finish drill</button>`;
+    const retryBtn = stillFailed > 0
+      ? `<div style="margin-top:6px;"><button class="btn btn-ghost btn-sm" style="font-size:11px;border-color:var(--yellow);color:var(--yellow);" onclick="startRepContRetry()">↺ Retry ${stillFailed} failed move${stillFailed > 1 ? 's' : ''}</button></div>`
+      : '';
+    showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
+      stillFailed > 0 ? '♟ Retry complete' : '♟ All correct!',
+      stillFailed > 0
+        ? `${stillFailed} move${stillFailed > 1 ? 's' : ''} still need work.${retryBtn}${nextBtn}`
+        : `You got all the moves right!${nextBtn}`);
+    return;
+  }
+
+  const next = repContRetryQueue[0];
+
+  // Replay the line up to just before the failed move (auto-play leading moves quickly)
+  const replayChess = new Chess(repContLine.baseFen);
+  boardObj.position(repContLine.baseFen, false);
+  clearHighlights();
+  clearLastMoveHighlight();
+
+  // Auto-play all moves before the target position
+  for (let i = 0; i < next.moveIdx; i++) {
+    const mv = repContLine.moves[i];
+    replayChess.move(mv.san, { sloppy: true });
+  }
+
+  gameEngine = new Chess(replayChess.fen());
+  boardObj.position(gameEngine.fen(), false);
+
+  // Show the last opponent move highlight if there was one
+  if (next.moveIdx > 0) {
+    const prevMv = repContLine.moves[next.moveIdx - 1];
+    showLastMoveHighlight(prevMv.from, prevMv.to);
+  }
+
+  // Update contLine display cursor
+  if (repContLine) {
+    repContLine.currentIdx = next.moveIdx - 1;
+    renderRepContLine();
+  }
+
+  const remaining = repContRetryQueue.length;
+  showRepContPrompt(null, ` <span style="font-size:10px;color:var(--text-muted);">(retry ${remaining} move${remaining > 1 ? 's' : ''} remaining)</span>`);
+}
+
+function evaluateRepContRetryMove(source, target, move) {
+  // Check against the trie for this position
+  gameEngine.undo();
+  const beforePosKey = fenPositionKey(gameEngine.fen());
+
+  if (!repertoireTrie.has(beforePosKey)) {
+    gameEngine.move(move.san, { sloppy: true });
+    return;
+  }
+
+  const playedUci = source + target + (move.promotion || '');
+  const isCorrect = trieMatchesMove(beforePosKey, move.san, playedUci);
+
+  if (isCorrect) {
+    gameEngine.move(move.san, { sloppy: true });
+    showLastMoveHighlight(source, target);
+
+    // Remove from failed set — they got it right
+    repContFailedFens.delete(beforePosKey);
+    repContRetryQueue.shift();
+
+    showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
+      `✓ <code>${escHtml(move.san)}</code>`, '');
+
+    setTimeout(() => {
+      if (repContRetrying) advanceRepContRetry();
+    }, 400);
+  } else {
+    // Still wrong — keep in failed set, show answer and move on
+    boardObj.position(gameEngine.fen(), false);
+
+    const expected = trieFirst(beforePosKey);
+    const correctMove = gameEngine.move(expected.san, { sloppy: true });
+    if (correctMove) {
+      boardObj.position(gameEngine.fen(), true);
+      bestMoveArrow = { from: expected.uci.slice(0, 2), to: expected.uci.slice(2, 4) };
+      showLastMoveHighlight(correctMove.from, correctMove.to);
+      renderArrows();
+    }
+
+    repContRetryQueue.shift();
+
+    showColorFeedback('var(--red)', 'rgba(239,83,80,0.08)',
+      `♟ The repertoire move is <code>${escHtml(expected.san)}</code>`, '');
+
+    setTimeout(() => {
+      bestMoveArrow = null;
+      renderArrows();
+      if (repContRetrying) advanceRepContRetry();
+    }, 1200);
+  }
 }
 
 // ── Repertoire Lead-Up (Start from Beginning) ──
