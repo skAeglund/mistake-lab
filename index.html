@@ -12733,33 +12733,28 @@ function lichessStudyBtn(m) {
 
   if (!url) return '';
 
-  // Build search text from last few lead-up moves + the repertoire move
+  // Build search text: repertoire move with move number, plus preceding trie moves if available
+  function fmtMove(san, fenBefore) {
+    const parts = fenBefore.split(' ');
+    const num = parts[5] || '1';
+    return parts[1] === 'w' ? num + '.' + san : num + '...' + san;
+  }
+
+  const devMove = fmtMove(m.repertoireMove.san, m.fenBefore);
   const leadUp = buildLeadUpFromTrie(m.positionKey, m.playerColor);
-  let searchText = '';
-  if (leadUp.length > 0) {
-    const tail = leadUp.slice(-4);
-    const parts = [];
-    for (const mv of tail) {
-      const fenParts = mv.fenBefore.split(' ');
-      const moveNum = fenParts[5] || '1';
-      const isWhite = fenParts[1] === 'w';
-      if (isWhite) {
-        parts.push(moveNum + '.' + mv.san);
-      } else {
-        parts.push(mv.san);
-      }
-    }
-    // Add the repertoire move with its move number
-    const devFenParts = m.fenBefore.split(' ');
-    const devMoveNum = devFenParts[5] || '1';
-    const devIsWhite = devFenParts[1] === 'w';
-    parts.push((devIsWhite ? devMoveNum + '.' : '') + m.repertoireMove.san);
+  // Only use lead-up if the trie walk actually reached the target position
+  const trieReached = leadUp.length > 0 && fenPositionKey(leadUp[leadUp.length - 1].fen) === m.positionKey;
+  let searchText;
+  if (trieReached && leadUp.length >= 2) {
+    const tail = leadUp.slice(-3);
+    const parts = tail.map(mv => {
+      const fp = mv.fenBefore.split(' ');
+      return fp[1] === 'w' ? (fp[5] || '1') + '.' + mv.san : mv.san;
+    });
+    parts.push(m.repertoireMove.san);
     searchText = parts.join(' ');
   } else {
-    const devFenParts = m.fenBefore.split(' ');
-    const devMoveNum = devFenParts[5] || '1';
-    const devIsWhite = devFenParts[1] === 'w';
-    searchText = (devIsWhite ? devMoveNum + '.' : '') + m.repertoireMove.san;
+    searchText = devMove;
   }
   const copyBtn = `<button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 6px;color:var(--text-muted);" onclick="event.preventDefault();navigator.clipboard.writeText('${searchText.replace(/'/g, "\\'")}');this.textContent='✓ Copied'" title="Copy moves to search in study">📋</button>`;
 
