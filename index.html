@@ -12713,13 +12713,28 @@ function chessableBtn(m) {
 }
 
 function lichessStudyBtn(m) {
-  if (!m || !m.repertoireMove || !m.repertoireMove.chapterUrl) return '';
-  const baseUrl = m.repertoireMove.chapterUrl;
-  if (!baseUrl.includes('lichess.org/study/')) return '';
-  // Compute ply within the study chapter by walking the trie
-  const leadUp = buildLeadUpFromTrie(m.positionKey, m.playerColor);
-  const ply = leadUp.length;
-  const url = ply > 0 ? baseUrl + '#' + ply : baseUrl;
+  if (!m || !m.repertoireMove) return '';
+  let url = null;
+
+  // Try chapterUrl from [Site] header (most specific — includes chapter)
+  const chapterUrl = m.repertoireMove.chapterUrl;
+  if (chapterUrl && chapterUrl.includes('lichess.org/study/')) {
+    const leadUp = buildLeadUpFromTrie(m.positionKey, m.playerColor);
+    const ply = leadUp.length;
+    url = ply > 0 ? chapterUrl + '#' + ply : chapterUrl;
+  }
+
+  // Fallback: construct from study config if chapterUrl unavailable
+  if (!url) {
+    const studies = getRepertoireConfig();
+    // Find the study that covers this position's color
+    const study = studies.find(s => s.color === m.playerColor);
+    if (study) {
+      url = `https://lichess.org/study/${study.id}`;
+    }
+  }
+
+  if (!url) return '';
   return `<div style="margin-top:4px;"><a href="${url}" target="_blank" class="btn btn-ghost btn-sm" style="font-size:11px;text-decoration:none;color:var(--text-secondary);">♟ Study on Lichess</a></div>`;
 }
 
