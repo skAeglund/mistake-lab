@@ -1318,7 +1318,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Replay beginning button with lerped move timing</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix tactic post-solve nav, review eval bar, cont advantage threshold, review spoiler, study arrows</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1660,6 +1660,7 @@ let selectedSquare = null;      // for click-to-move
 let deselectionPending = false; // true after mousedown on already-selected square; mouseup will deselect
 let engineLine = null;          // { baseFen, moves: [{uci,san,fen}], currentIdx: -1, userMove: {san,from,to} }
 const ENGINE_LINE_PLY = 6;     // max ply per engine line segment (extended on demand)
+const CONT_ADVANTAGE_GOOD_ENOUGH = 600; // cp threshold: moves keeping this advantage are "good enough" in continuation
 let browsingLine = false;       // true when stepping through engine line
 let contLine = null;            // { baseFen, moves: [{san,uci,fen,isUser}], currentIdx }
 let contLineBrowsing = false;   // true when navigating to a non-terminal contLine position
@@ -1712,6 +1713,7 @@ let tacticWrongAttempts = 0;     // wrong attempts across the entire tactic
 let tacticHintUsed = false;      // hint used during this tactic
 let tacticLine = null;           // { baseFen, moves: [{san,uci,fen,isUser}], currentIdx }
 let tacticAltLines = [];         // alternative opponent-response lines to solve after main line
+let tacticCompleted = false;     // true after tactic fully solved (prevents moves, enables feedback restore)
 let tacticAltIdx = -1;           // -1 = main line, 0+ = which alternative we're solving
 let tacticSolvedLines = [];      // completed lines (for skipping common prefixes in alt lines)
 let tacticPrefixUserMoves = 0;   // user moves auto-played in common prefix (for progress display)
@@ -3745,8 +3747,10 @@ function updateEvalBar() {
 
   const hasEngineLineEval = browsingLine && engineLine && (evalSfResult || afterMoveCpWhite !== null);
   const hasAnalysisEval = analysisMode && analysisPvs.length > 0;
+  const hasReviewEval = contLineReviewMode && afterMoveCpWhite !== null;
   const shouldShow = evalBarEnabled && (
     (hasAnalysisEval) ||
+    (hasReviewEval) ||
     (evalBarRevealed && !continuationMode && !tacticMode && currentMistakeIdx >= 0 && (preAnalysis || hasEngineLineEval))
   );
   const wasVisible = bar.classList.contains('visible');
@@ -7153,6 +7157,7 @@ function loadPosition(globalIdx) {
   repLeadUpIdx = -1;
   if (repReplayTimer) { clearTimeout(repReplayTimer); repReplayTimer = null; }
   tacticMode = false;
+  tacticCompleted = false;
   tacticStepIdx = 0;
   tacticMoves = [];
   tacticWrongAttempts = 0;
@@ -7397,6 +7402,8 @@ function onDragStart(source, piece) {
     selectSquare(source, chess);
     return true;
   }
+  // Tactic fully solved — no more moves allowed (user is reviewing the line)
+  if (tacticCompleted) return false;
   if (!gameEngine || browsingLine) return false;
   const m = filteredMistakes[currentMistakeIdx];
   if (!m) return false;
@@ -7792,6 +7799,7 @@ function finishTacticComplete(lastMoveSan) {
   updateSessionProgress();
   renderQueue();
   tacticMode = false;
+  tacticCompleted = true;
   document.getElementById('btnRetry').classList.remove('hidden');
   document.getElementById('btnHint').classList.add('hidden');
 }
@@ -8010,6 +8018,12 @@ function goToTacticLineMove(idx) {
     el.classList.toggle('active', i === idx);
   });
   updateNoteButton();
+
+  // Restore "Tactic complete!" feedback when navigating back to the final position
+  if (atEnd && tacticCompleted) {
+    const lastSan = tacticLine.moves[tacticLine.moves.length - 1]?.san || null;
+    finishTacticComplete(lastSan);
+  }
 }
 
 function tacticLineStep(delta) {
@@ -8533,7 +8547,7 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
       updateSessionProgress();
       renderQueue();
     }
-  } else if (wpDrop <= 10) {
+  } else if (wpDrop <= 10 || (continuationMode && afterCpPlayer >= CONT_ADVANTAGE_GOOD_ENOUGH)) {
     // No feedback highlight — engine line (normal) or opponent auto-play (continuation)
     // will immediately change the board position, making it irrelevant.
 
@@ -9343,6 +9357,16 @@ function exitEngineLine() {
   clearLastMoveHighlight();
   updateEvalBar();
   updateLineNavBar();
+
+  // Restore "Tactic complete!" feedback if exiting engine line after tactic was solved
+  if (tacticCompleted) {
+    const lastSan = tacticLine && tacticLine.moves.length > 0
+      ? tacticLine.moves[tacticLine.moves.length - 1].san : null;
+    finishTacticComplete(lastSan);
+    renderTacticLine();
+    // Navigate tactic line to the end so highlight is correct
+    if (tacticLine) goToTacticLineMove(tacticLine.moves.length - 1);
+  }
 }
 
 function tryAgainFromLine() {
@@ -9537,6 +9561,33 @@ function goToContLineMove(idx) {
   }
 
   renderContLine();
+
+  // Update eval bar with contLine move eval data (game review)
+  if (contLineReviewMode && idx >= 0) {
+    const mv = contLine.moves[idx];
+    const m = filteredMistakes[currentMistakeIdx];
+    if (mv && m) {
+      let cpPlayer = null;
+      if (mv.afterCp != null) {
+        cpPlayer = mv.afterCp;
+      } else if (mv.bestCp != null && mv.cpLoss != null) {
+        cpPlayer = mv.bestCp - mv.cpLoss;
+      } else if (mv.bestCp != null) {
+        cpPlayer = mv.bestCp;
+      }
+      if (cpPlayer != null) {
+        afterMoveCpWhite = m.playerColor === 'white' ? cpPlayer : -cpPlayer;
+      }
+    }
+  } else if (contLineReviewMode && idx === -1) {
+    // At starting position — use the first move's bestCp if available
+    const m = filteredMistakes[currentMistakeIdx];
+    const firstMove = contLine.moves.length > 0 ? contLine.moves[0] : null;
+    if (firstMove && firstMove.bestCp != null && m) {
+      afterMoveCpWhite = m.playerColor === 'white' ? firstMove.bestCp : -firstMove.bestCp;
+    }
+  }
+
   updateEvalBar();
   updateNoteButton();
   updateReviewGraphCursor(idx);
@@ -10046,11 +10097,6 @@ function showReviewKeyMoveInfo(moveIdx) {
     </div>
   `;
 
-  // Show what was played and what was best
-  const bestInfo = mv.bestMoveSan
-    ? `<div style="margin-top:4px;font-size:12px;">Best was <code>${escHtml(mv.bestMoveSan)}</code></div>`
-    : '';
-
   container.innerHTML = `
     <div class="feedback-box" style="background:${wpDropToColorDim(mv.wpDrop || 0)};border-left:3px solid ${cls.color || 'var(--border)'};">
       <div class="feedback-title" style="color:${cls.color || 'var(--text-primary)'}">
@@ -10058,7 +10104,6 @@ function showReviewKeyMoveInfo(moveIdx) {
       </div>
       <div class="feedback-text">
         <div>${mv.wpDrop != null ? `Lost ${mv.wpDrop}% winning chances (−${mv.cpLoss || 0}cp)` : ''}</div>
-        ${bestInfo}
         <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;">
           <button class="btn btn-primary btn-sm" style="font-size:11px;" onclick="startReviewRetry(${moveIdx})">↺ Retry</button>
           ${mv.bestMoveUci ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewBestArrow(${moveIdx})">Show best</button>` : ''}
@@ -11154,6 +11199,7 @@ const DRAW_COLOR_MAP = {
   green: { arrow: 'rgba(21, 120, 27, 0.65)', circle: 'rgba(21, 120, 27, 0.8)', ghost: 'rgba(21, 120, 27, 0.65)' },
   red:   { arrow: 'rgba(175, 30, 30, 0.65)', circle: 'rgba(175, 30, 30, 0.8)', ghost: 'rgba(175, 30, 30, 0.65)' },
   blue:  { arrow: 'rgba(40, 100, 220, 0.65)', circle: 'rgba(40, 100, 220, 0.8)', ghost: 'rgba(40, 100, 220, 0.65)' },
+  yellow:{ arrow: 'rgba(200, 180, 0, 0.65)', circle: 'rgba(200, 180, 0, 0.8)', ghost: 'rgba(200, 180, 0, 0.65)' },
 };
 function getDrawColor(e) {
   if (e.altKey) return 'blue';
@@ -11604,9 +11650,38 @@ function tokenizePGN(movetext) {
     if (ch === '{') {
       const end = movetext.indexOf('}', i);
       const commentText = end < 0 ? movetext.slice(i + 1) : movetext.slice(i + 1, end);
-      // Strip engine annotations like [%eval ...] and [%clk ...]
+      // Extract Lichess arrow/circle annotations before stripping
+      const studyColorMap = { G: 'green', R: 'red', B: 'blue', Y: 'yellow' };
+      const calMatches = [...commentText.matchAll(/\[%cal\s+([^\]]+)\]/g)];
+      const cslMatches = [...commentText.matchAll(/\[%csl\s+([^\]]+)\]/g)];
+      const pgnArrows = [];
+      const pgnCircles = [];
+      for (const cm of calMatches) {
+        for (const entry of cm[1].split(',')) {
+          const e = entry.trim();
+          if (e.length >= 5) {
+            const c = studyColorMap[e[0]] || 'green';
+            pgnArrows.push({ from: e.substring(1, 3), to: e.substring(3, 5), color: c });
+          }
+        }
+      }
+      for (const cm of cslMatches) {
+        for (const entry of cm[1].split(',')) {
+          const e = entry.trim();
+          if (e.length >= 3) {
+            const c = studyColorMap[e[0]] || 'green';
+            pgnCircles.push({ square: e.substring(1, 3), color: c });
+          }
+        }
+      }
+      // Strip engine annotations like [%eval ...], [%clk ...], [%csl ...], [%cal ...]
       const cleaned = commentText.replace(/\[%[^\]]*\]/g, '').trim();
-      if (cleaned) tokens.push({ type: 'comment', text: cleaned });
+      if (cleaned || pgnArrows.length > 0 || pgnCircles.length > 0) {
+        const tok = { type: 'comment', text: cleaned };
+        if (pgnArrows.length > 0) tok.arrows = pgnArrows;
+        if (pgnCircles.length > 0) tok.circles = pgnCircles;
+        tokens.push(tok);
+      }
       i = end < 0 ? movetext.length : end + 1;
       continue;
     }
@@ -11678,14 +11753,17 @@ function walkPGNTokens(chess, tokens, cursor, trie, repertoireColor, warnings, i
         const commentPosKey = lastMoveWasRepertoireTurn
           ? fenPositionKey(lastMoveFen)
           : fenPositionKey(chess.fen());
+        const commentObj = { text: tok.text || '', arrows: tok.arrows || [], circles: tok.circles || [] };
         if (!comments.has(commentPosKey)) {
-          comments.set(commentPosKey, tok.text);
+          comments.set(commentPosKey, commentObj);
         } else {
-          // Append if multiple comments for the same position (from different chapters)
+          // Merge if multiple comments for the same position (from different chapters/blocks)
           const existing = comments.get(commentPosKey);
-          if (!existing.includes(tok.text)) {
-            comments.set(commentPosKey, existing + '\n\n' + tok.text);
+          if (commentObj.text && !existing.text.includes(commentObj.text)) {
+            existing.text = existing.text ? existing.text + '\n\n' + commentObj.text : commentObj.text;
           }
+          if (commentObj.arrows.length > 0) existing.arrows.push(...commentObj.arrows);
+          if (commentObj.circles.length > 0) existing.circles.push(...commentObj.circles);
         }
       }
       cursor.idx++;
@@ -11861,10 +11939,19 @@ async function loadRepertoireTrie() {
     }
     console.log(`[Repertoire] Study ${study.id} (${study.color}): ${studyTrie.size} positions, ${newPositions} new → merged total: ${mergedTrie.size}`);
 
-    // Merge comments (first study wins per position)
-    for (const [posKey, text] of studyComments) {
+    // Merge comments (first study wins per position, merge arrows/circles)
+    for (const [posKey, commentData] of studyComments) {
+      // Backward compat: old cache may have stored plain strings
+      const obj = typeof commentData === 'string'
+        ? { text: commentData, arrows: [], circles: [] }
+        : commentData;
       if (!allComments.has(posKey)) {
-        allComments.set(posKey, text);
+        allComments.set(posKey, { text: obj.text || '', arrows: [...(obj.arrows || [])], circles: [...(obj.circles || [])] });
+      } else {
+        // Merge arrows/circles from additional studies
+        const existing = allComments.get(posKey);
+        if (obj.arrows?.length) existing.arrows.push(...obj.arrows);
+        if (obj.circles?.length) existing.circles.push(...obj.circles);
       }
     }
   }
@@ -11890,14 +11977,14 @@ async function loadRepertoireTrie() {
   if (allComments.size > 0 && gistData) {
     if (!gistData.notes) gistData.notes = {};
     let imported = 0;
-    for (const [posKey, text] of allComments) {
+    for (const [posKey, commentData] of allComments) {
       const existing = gistData.notes[posKey];
       if (existing && existing.source !== 'study') continue; // don't overwrite user notes
       const now = new Date().toISOString();
       gistData.notes[posKey] = {
-        text,
-        arrows: [],
-        circles: [],
+        text: commentData.text || '',
+        arrows: commentData.arrows || [],
+        circles: commentData.circles || [],
         source: 'study', // marks this as auto-imported, safe to overwrite on refresh
         created: existing?.created || now,
         updated: now,
