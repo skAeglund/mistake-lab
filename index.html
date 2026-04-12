@@ -12737,11 +12737,29 @@ function lichessStudyBtn(m) {
   const leadUp = buildLeadUpFromTrie(m.positionKey, m.playerColor);
   let searchText = '';
   if (leadUp.length > 0) {
-    const tail = leadUp.slice(-4); // last 4 moves
-    searchText = tail.map(mv => mv.san).join(' ');
-    searchText += ' ' + m.repertoireMove.san;
+    const tail = leadUp.slice(-4);
+    const parts = [];
+    for (const mv of tail) {
+      const fenParts = mv.fenBefore.split(' ');
+      const moveNum = fenParts[5] || '1';
+      const isWhite = fenParts[1] === 'w';
+      if (isWhite) {
+        parts.push(moveNum + '.' + mv.san);
+      } else {
+        parts.push(mv.san);
+      }
+    }
+    // Add the repertoire move with its move number
+    const devFenParts = m.fenBefore.split(' ');
+    const devMoveNum = devFenParts[5] || '1';
+    const devIsWhite = devFenParts[1] === 'w';
+    parts.push((devIsWhite ? devMoveNum + '.' : '') + m.repertoireMove.san);
+    searchText = parts.join(' ');
   } else {
-    searchText = m.repertoireMove.san;
+    const devFenParts = m.fenBefore.split(' ');
+    const devMoveNum = devFenParts[5] || '1';
+    const devIsWhite = devFenParts[1] === 'w';
+    searchText = (devIsWhite ? devMoveNum + '.' : '') + m.repertoireMove.san;
   }
   const copyBtn = `<button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 6px;color:var(--text-muted);" onclick="event.preventDefault();navigator.clipboard.writeText('${searchText.replace(/'/g, "\\'")}');this.textContent='✓ Copied'" title="Copy moves to search in study">📋</button>`;
 
