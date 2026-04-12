@@ -12737,7 +12737,7 @@ function lichessStudyBtn(m) {
   function fmtMove(san, fenBefore) {
     const parts = fenBefore.split(' ');
     const num = parts[5] || '1';
-    return parts[1] === 'w' ? num + '.' + san : num + '...' + san;
+    return parts[1] === 'w' ? num + '.' + san : san;
   }
 
   const devMove = fmtMove(m.repertoireMove.san, m.fenBefore);
