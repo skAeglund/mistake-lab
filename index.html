@@ -1318,7 +1318,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix repertoire continuation hints + add retry failed moves</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix type filter bypass when 2 of 3 options selected</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -6365,7 +6365,7 @@ function applyFilters() {
       if (isBlunder && !filters.severity.has('blunder')) return false;
       if (!isBlunder && !filters.severity.has('mistake')) return false;
     }
-    if (filters.type.size < 2) {
+    if (filters.type.size < 3) {
       const itemType = m.type || 'mistake';
       if (!filters.type.has(itemType)) return false;
     }
