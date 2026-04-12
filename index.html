@@ -12858,9 +12858,13 @@ function evaluateRepertoireMove(source, target, move) {
       ? `<button class="btn btn-primary btn-sm" id="btnRepNext" style="font-size:12px;margin-top:8px;" onclick="loadPosition(${currentMistakeIdx + 1})">Next →</button>`
       : `<button class="btn btn-primary btn-sm" style="font-size:12px;margin-top:8px;" onclick="showRepertoireDrillSummary()">Finish drill</button>`;
 
+    // Check for study note at this position
+    const repNote = getNoteForFen(m.fenBefore);
+    const noteHtml = repNote ? `<div style="margin-top:6px;padding:6px 8px;border-radius:6px;background:var(--bg-secondary);font-size:11px;color:var(--text-secondary);white-space:pre-wrap;">📝 ${escHtml(repNote.text)}</div>` : '';
+
     showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
       `♟ Correct! <code>${escHtml(move.san)}</code>`,
-      `That's your repertoire move.${srsInfo}${contBtns}${chessableBtn(m)}${lichessStudyBtn(m)}${nextBtn}`);
+      `That's your repertoire move.${srsInfo}${noteHtml}${contBtns}${chessableBtn(m)}${lichessStudyBtn(m)}${nextBtn}`);
     updateSessionProgress();
     renderQueue();
   } else {
@@ -12916,9 +12920,12 @@ function revealRepertoireAnswer(m, expected, isLastItem) {
     ? `<button class="btn btn-primary btn-sm" id="btnRepNext" style="font-size:12px;margin-top:8px;" onclick="loadPosition(${currentMistakeIdx + 1})">Next →</button>`
     : `<button class="btn btn-primary btn-sm" style="font-size:12px;margin-top:8px;" onclick="showRepertoireDrillSummary()">Finish drill</button>`;
 
+  const repNote = getNoteForFen(m.fenBefore);
+  const noteHtml = repNote ? `<div style="margin-top:6px;padding:6px 8px;border-radius:6px;background:var(--bg-secondary);font-size:11px;color:var(--text-secondary);white-space:pre-wrap;">📝 ${escHtml(repNote.text)}</div>` : '';
+
   showColorFeedback('var(--red)', 'rgba(239,83,80,0.08)',
     `♟ The repertoire move is <code>${escHtml(expected.san)}</code>`,
-    `You played <code>${escHtml(m.playedMove.san)}</code>.${srsInfo}${contBtns}${chessableBtn(m)}${lichessStudyBtn(m)}${nextBtn}`);
+    `You played <code>${escHtml(m.playedMove.san)}</code>.${srsInfo}${noteHtml}${contBtns}${chessableBtn(m)}${lichessStudyBtn(m)}${nextBtn}`);
   updateSessionProgress();
   renderQueue();
 }
