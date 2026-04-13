@@ -1398,7 +1398,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Filter practice: scoreboard, save mistakes, settings quick-start, repertoire hints, castling fix, DB/Maia indicator</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Review retry: wp%-based eval stability check (16→18→20→22, stops when delta < 2%)</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -8597,9 +8597,35 @@ async function evaluateMove(from, to, move) {
   try {
     let bestCp, bestMoveUci, bestMoveSan;
 
-    // Wait for pre-analysis to reach at least depth 16 (gate only — then read live global)
-    sfLog('evaluateMove', `awaiting preAnalysis depth≥16… currentDepth=${preAnalysisDepth} preAnalysisFen=${preAnalysisFen?.split(' ').slice(0,2).join(' ')}…`);
-    await waitForPreAnalysis(16);
+    // Wait for pre-analysis — review retry uses eval stability check across depth intervals
+    if (contLineReviewRetryIdx >= 0) {
+      // Step through depth gates: 16 → 18 → 20 → 22, stop when eval (wp%) is stable
+      const RETRY_DEPTH_STEP = 2;
+      const RETRY_MAX_DEPTH = SILENT_EVAL_DEPTH; // 22
+      const RETRY_WP_THRESHOLD = 2; // wp% change below this = stable
+      let checkDepth = 16;
+      sfLog('evaluateMove', `REVIEW RETRY: stability check starting, max depth=${RETRY_MAX_DEPTH}`);
+      await waitForPreAnalysis(checkDepth);
+      let prevWp = cpToWinPct(preAnalysis?.bestCp ?? 0);
+      sfLog('evaluateMove', `REVIEW RETRY: depth ${preAnalysisDepth} bestCp=${preAnalysis?.bestCp} wp=${prevWp.toFixed(1)}`);
+
+      while (checkDepth < RETRY_MAX_DEPTH && !preAnalysisComplete) {
+        checkDepth = Math.min(checkDepth + RETRY_DEPTH_STEP, RETRY_MAX_DEPTH);
+        await waitForPreAnalysis(checkDepth);
+        if (currentMistakeIdx !== mistakeIdx) {
+          sfLog('evaluateMove', `ABORT: user navigated away during retry stability check`);
+          return;
+        }
+        const curWp = cpToWinPct(preAnalysis?.bestCp ?? 0);
+        const wpDelta = Math.abs(curWp - prevWp);
+        sfLog('evaluateMove', `REVIEW RETRY: depth ${preAnalysisDepth} bestCp=${preAnalysis?.bestCp} wp=${curWp.toFixed(1)} delta=${wpDelta.toFixed(1)} ${wpDelta < RETRY_WP_THRESHOLD ? 'STABLE' : 'CHANGED'}`);
+        if (wpDelta < RETRY_WP_THRESHOLD) break; // eval stable — proceed
+        prevWp = curWp;
+      }
+    } else {
+      sfLog('evaluateMove', `awaiting preAnalysis depth≥16… currentDepth=${preAnalysisDepth} preAnalysisFen=${preAnalysisFen?.split(' ').slice(0,2).join(' ')}…`);
+      await waitForPreAnalysis(16);
+    }
     const pre = preAnalysis; // read live global — highest depth available right now
     sfLog('evaluateMove', `preAnalysis live: depth=${pre?.depth} bestMove=${pre?.bestMove} mistakeIdx snapshot=${mistakeIdx} current=${currentMistakeIdx}`);
     if (currentMistakeIdx !== mistakeIdx) {
