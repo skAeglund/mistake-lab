@@ -1398,7 +1398,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Review retry: wp%-based eval stability check (16→18→20→22, stops when delta < 2%)</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Review retry eval stability check; fix note arrows auto-showing without opening note panel</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -15162,14 +15162,10 @@ function deleteNote() {
 }
 
 function checkForNote(fen) {
-  // Called on position changes — update button state and show note arrows if present
+  // Called on position changes — update button state, hide stale arrows
   hideNoteArrows();
   if (notePanelOpen) closeNotePanel();
   updateNoteButton();
-  const note = getNoteForFen(fen);
-  if (note) {
-    showNoteArrows(note);
-  }
 }
 
 // ─── Keyboard shortcuts ───
