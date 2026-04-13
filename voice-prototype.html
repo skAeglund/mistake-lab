@@ -735,12 +735,14 @@
     if (listening) {
       listening = false;
       recognition.stop();
+      stopBtKeepAlive();
       btnMic.classList.remove('listening');
       micStatus.textContent = 'Tap to start listening';
     } else {
       listening = true;
       try {
         recognition.start();
+        startBtKeepAlive();
         btnMic.classList.add('listening');
         micStatus.textContent = 'Listening…';
       } catch(e) {
@@ -951,6 +953,36 @@
     };
     speechSynthesis.onvoiceschanged = populate;
     populate();
+  }
+
+  // ═══════════════════════════════════════════
+  //  BLUETOOTH AUDIO KEEPALIVE
+  // ═══════════════════════════════════════════
+
+  // Bluetooth A2DP sleeps the audio channel after silence, causing the first
+  // ~200-500ms of TTS to be clipped. A near-silent oscillator keeps it awake.
+  let btKeepAliveCtx = null;
+
+  function startBtKeepAlive() {
+    if (btKeepAliveCtx) return;
+    try {
+      btKeepAliveCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = btKeepAliveCtx.createOscillator();
+      const gain = btKeepAliveCtx.createGain();
+      gain.gain.value = 0.001; // inaudible but keeps channel alive
+      osc.connect(gain);
+      gain.connect(btKeepAliveCtx.destination);
+      osc.start();
+    } catch(e) {
+      // AudioContext not available — ignore
+    }
+  }
+
+  function stopBtKeepAlive() {
+    if (btKeepAliveCtx) {
+      btKeepAliveCtx.close().catch(() => {});
+      btKeepAliveCtx = null;
+    }
   }
 
   function initToggles() {
