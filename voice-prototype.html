@@ -352,280 +352,323 @@
   const browserWarning = document.getElementById('browserWarning');
 
   // ═══════════════════════════════════════════
-  //  WORD → CHESS TOKEN MAPPING
+  //  LEXICON — unified word → value mapping
   // ═══════════════════════════════════════════
 
-  const PIECE_WORDS = {
-    'knight': 'N', 'night': 'N', 'horse': 'N', 'nite': 'N', 'ninth': 'N',
+  // Every recognized word maps to a value token. Unknown words are stripped.
+  const LEX = {
+    // Pieces
+    'knight': 'N', 'night': 'N', 'horse': 'N', 'nite': 'N', 'ninth': 'N', 'nice': 'N', 'knife': 'N',
     'bishop': 'B', 'bitch': 'B', 'tissue': 'B',
-    'rook': 'R', 'brooke': 'R', 'brook': 'R', 'rock': 'R', 'rookie': 'R', 'truck': 'R', 'took': 'R',
-    'queen': 'Q', 'cream': 'Q', 'green': 'Q', 'clean': 'Q',
+    'rook': 'R', 'brooke': 'R', 'brook': 'R', 'rock': 'R', 'rookie': 'R', 'truck': 'R', 'took': 'R', 'luke': 'R',
+    'queen': 'Q', 'cream': 'Q', 'clean': 'Q',
     'king': 'K', 'keen': 'K', 'thing': 'K',
-    'pawn': 'P', 'pond': 'P', 'palm': 'P', 'on': 'P',
-  };
-
-  // NATO alphabet + common phonetic aliases for files
-  const FILE_WORDS = {
-    // a-file
-    'alpha': 'a', 'anna': 'a', 'apple': 'a', 'able': 'a', 'ace': 'a', 'ay': 'a', 'a': 'a', 'eh': 'a',
-    // b-file
-    'bravo': 'b', 'beta': 'b', 'baker': 'b', 'boy': 'b', 'bee': 'b', 'b': 'b', 'be': 'b',
-    // c-file
-    'charlie': 'c', 'cat': 'c', 'chris': 'c', 'center': 'c', 'sea': 'c', 'see': 'c', 'c': 'c',
-    // d-file
-    'delta': 'd', 'david': 'd', 'dog': 'd', 'dee': 'd', 'd': 'd', 'day': 'd',
-    // e-file
-    'echo': 'e', 'edward': 'e', 'easy': 'e', 'eagle': 'e', 'e': 'e',
-    // f-file
-    'foxtrot': 'f', 'fox': 'f', 'frank': 'f', 'fred': 'f', 'f': 'f',
-    // g-file
-    'golf': 'g', 'george': 'g', 'go': 'g', 'gee': 'g', 'g': 'g', 'genie': 'g',
-    // h-file
-    'hotel': 'h', 'henry': 'h', 'harry': 'h', 'h': 'h', 'age': 'h', 'each': 'h',
-  };
-
-  const RANK_WORDS = {
-    '1': '1', 'one': '1', 'won': '1', 'want': '1',
-    '2': '2', 'two': '2', 'to': '2', 'too': '2', 'tu': '2',
+    'pawn': 'P', 'pond': 'P', 'palm': 'P',
+    // Files — bare letters
+    'a': 'a', 'b': 'b', 'c': 'c', 'd': 'd', 'e': 'e', 'f': 'f', 'g': 'g', 'h': 'h',
+    // Files — phonetic / NATO
+    'alpha': 'a', 'alfa': 'a', 'anna': 'a', 'apple': 'a', 'able': 'a', 'ay': 'a', 'eh': 'a', 'ace': 'a',
+    'bravo': 'b', 'beta': 'b', 'baker': 'b', 'boy': 'b', 'bee': 'b', 'be': 'b',
+    'charlie': 'c', 'cat': 'c', 'chris': 'c', 'sea': 'c', 'see': 'c',
+    'delta': 'd', 'david': 'd', 'dog': 'd', 'dee': 'd', 'day': 'd',
+    'echo': 'e', 'edward': 'e', 'easy': 'e', 'eagle': 'e',
+    'foxtrot': 'f', 'fox': 'f', 'frank': 'f', 'fred': 'f',
+    'golf': 'g', 'george': 'g', 'gee': 'g',
+    'hotel': 'h', 'henry': 'h', 'harry': 'h', 'age': 'h', 'each': 'h',
+    // Ranks
+    '1': '1', 'one': '1', 'won': '1',
+    '2': '2', 'two': '2', 'too': '2', 'tu': '2',
     '3': '3', 'three': '3', 'tree': '3', 'free': '3',
-    '4': '4', 'four': '4', 'for': '4', 'fore': '4',
+    '4': '4', 'four': '4', 'fore': '4',
     '5': '5', 'five': '5', 'fife': '5', 'hive': '5',
-    '6': '6', 'six': '6', 'sex': '6', 'sicks': '6',
+    '6': '6', 'six': '6',
     '7': '7', 'seven': '7',
-    '8': '8', 'eight': '8', 'ate': '8', 'ait': '8',
+    '8': '8', 'eight': '8', 'ate': '8',
+    // Capture / special
+    'takes': 'x', 'take': 'x', 'capture': 'x', 'captures': 'x',
+    'promote': '=', 'promotes': '=', 'promotion': '=', 'equals': '=',
+    'castle': 'O', 'castles': 'O',
+    'short': 'O-O', 'kingside': 'O-O', 'king side': 'O-O',
+    'long': 'O-O-O', 'queenside': 'O-O-O', 'queen side': 'O-O-O',
+    // Confirmation
+    'yes': 'YES', 'yeah': 'YES', 'yep': 'YES', 'yup': 'YES', 'correct': 'YES',
+    'confirm': 'YES', 'ok': 'YES', 'okay': 'YES', 'sure': 'YES', 'go': 'YES', 'play': 'YES',
+    'no': 'NO', 'nah': 'NO', 'nope': 'NO', 'cancel': 'NO', 'wrong': 'NO', 'undo': 'NO',
+    'to': '_IGNORE', 'the': '_IGNORE', 'on': '_IGNORE', 'of': '_IGNORE',
+    'uh': '_IGNORE', 'um': '_IGNORE', 'and': '_IGNORE', 'hmm': '_IGNORE',
+    'check': '_IGNORE', 'mate': '_IGNORE',
   };
 
-  const CAPTURE_WORDS = new Set(['takes', 'take', 'capture', 'captures', 'x']);
-  const CASTLE_SHORT = new Set(['short', 'castle', 'castles', 'kingside']);
-  const CASTLE_LONG = new Set(['long', 'queenside']);
-  const PROMOTE_WORDS = new Set(['promote', 'promotes', 'promotion', 'equals']);
-
-  const YES_WORDS = new Set(['yes', 'yeah', 'yep', 'yup', 'correct', 'confirm', 'ok', 'okay', 'do it', 'play', 'sure', 'go']);
-  const NO_WORDS = new Set(['no', 'nah', 'nope', 'cancel', 'wrong', 'undo', 'nevermind', 'never mind']);
+  const FILES = new Set('abcdefgh');
+  const RANKS = new Set('12345678');
+  const PIECES = new Set('PNBRQK');
 
   // ═══════════════════════════════════════════
-  //  VOICE → MOVE PARSER
+  //  INPUT NORMALIZATION
   // ═══════════════════════════════════════════
 
-  function parseVoiceText(rawText) {
+  function heardToValues(rawText) {
     const words = rawText.toLowerCase().trim().split(/\s+/);
-    logSystem(`Heard: "${rawText}"`);
 
-    // Check for yes/no confirmation first
-    const fullPhrase = words.join(' ');
-    if (pendingMove) {
-      for (const w of YES_WORDS) {
-        if (fullPhrase.includes(w)) return { type: 'confirm', value: true };
-      }
-      for (const w of NO_WORDS) {
-        if (fullPhrase.includes(w)) return { type: 'confirm', value: false };
-      }
-    }
-
-    // Check for castle
-    let isCastle = false, castleSide = null;
-    for (const w of words) {
-      if (CASTLE_SHORT.has(w)) { isCastle = true; castleSide = castleSide || 'short'; }
-      if (CASTLE_LONG.has(w)) { isCastle = true; castleSide = 'long'; }
-    }
-    if (isCastle) {
-      return { type: 'move', castle: castleSide };
-    }
-
-    // Extract tokens
-    let piece = null;
-    let files = [];
-    let ranks = [];
-    let hasCapture = false;
-    let promotion = null;
-    let promoteNext = false;
-
-    // Pre-process: split combined square tokens like "e4" → ["e", "4"]
+    // Split combined squares: "e4" → ["e", "4"], "d3" → ["d", "3"]
     for (let i = 0; i < words.length; i++) {
       const sq = words[i].match(/^([a-h])([1-8])$/);
-      if (sq) {
-        words.splice(i, 1, sq[1], sq[2]);
-        i++; // skip the rank we just inserted
-      }
+      if (sq) { words.splice(i, 1, sq[1], sq[2]); i++; }
     }
 
+    // Map words to value tokens, drop unknowns and _IGNORE
+    const values = [];
     for (const w of words) {
-      if (promoteNext && PIECE_WORDS[w]) {
-        promotion = PIECE_WORDS[w];
-        promoteNext = false;
-        continue;
-      }
-      if (PROMOTE_WORDS.has(w)) { promoteNext = true; continue; }
-      if (CAPTURE_WORDS.has(w)) { hasCapture = true; continue; }
-
-      if (PIECE_WORDS[w] && piece === null && files.length === 0 && ranks.length === 0) {
-        piece = PIECE_WORDS[w];
-        if (piece === 'P') piece = null; // pawns have no letter
-        continue;
-      }
-
-      if (FILE_WORDS[w]) { files.push(FILE_WORDS[w]); continue; }
-      if (RANK_WORDS[w]) { ranks.push(RANK_WORDS[w]); continue; }
+      const v = LEX[w];
+      if (v && v !== '_IGNORE') values.push(v);
+      // Unknown words silently dropped (noise from speech recognizer)
     }
-
-    // Build interpretation
-    let toFile = null, toRank = null, fromFile = null, fromRank = null;
-
-    if (files.length >= 2 && ranks.length >= 2) {
-      // Full UCI-style: e.g. "echo 2 echo 4" → e2e4
-      fromFile = files[0]; fromRank = ranks[0];
-      toFile = files[1]; toRank = ranks[1];
-    } else if (files.length === 2 && ranks.length === 1) {
-      // Disambiguation by file: "knight alpha charlie 3" → Nac3
-      fromFile = files[0]; toFile = files[1]; toRank = ranks[0];
-    } else if (files.length === 1 && ranks.length === 2) {
-      // Disambiguation by rank: "rook 1 charlie 6" → R1c6
-      fromRank = ranks[0]; toFile = files[0]; toRank = ranks[1];
-    } else if (files.length === 1 && ranks.length === 1) {
-      // Simple: "knight charlie 3" → Nc3
-      toFile = files[0]; toRank = ranks[0];
-    } else if (files.length === 1 && ranks.length === 0) {
-      // Just a file (probably incomplete, but try)
-      toFile = files[0];
-    }
-
-    return {
-      type: 'move',
-      piece, toFile, toRank, fromFile, fromRank, hasCapture, promotion
-    };
+    return values;
   }
 
   // ═══════════════════════════════════════════
-  //  LEGAL MOVE DISAMBIGUATION
+  //  BUILD MOVE PHRASINGS (Lichess-style)
   // ═══════════════════════════════════════════
+  //
+  // For each legal move, generate all reasonable ways a human might say it.
+  // Each phrasing is an array of value tokens.
+  // Returns: Map<san, { phrasings: string[][], isSan: boolean, uci: string }>
 
-  function parseSan(san) {
-    // Parse a SAN string into components
-    const orig = san;
-    let piece = null, fromFile = null, fromRank = null;
-    let toFile = null, toRank = null, capture = false, promotion = null;
-    let castle = null;
-
-    if (san === 'O-O') return { castle: 'short', san: orig };
-    if (san === 'O-O-O') return { castle: 'long', san: orig };
-
-    // Strip check/mate
-    san = san.replace(/[+#]$/, '');
-
-    // Promotion
-    const promoMatch = san.match(/=([NBRQ])$/);
-    if (promoMatch) {
-      promotion = promoMatch[1];
-      san = san.slice(0, -2);
-    }
-
-    // Piece
-    if (/^[NBRQK]/.test(san)) {
-      piece = san[0];
-      san = san.slice(1);
-    }
-
-    // Capture
-    if (san.includes('x')) {
-      capture = true;
-      san = san.replace('x', '');
-    }
-
-    // Remaining should be [fromDisambig]toSquare
-    // toSquare is always last 2 chars: file + rank
-    if (san.length >= 2) {
-      toRank = san[san.length - 1];
-      toFile = san[san.length - 2];
-      const disambig = san.slice(0, -2);
-      if (disambig.length === 1) {
-        if (/[a-h]/.test(disambig)) fromFile = disambig;
-        else if (/[1-8]/.test(disambig)) fromRank = disambig;
-      } else if (disambig.length === 2) {
-        fromFile = disambig[0];
-        fromRank = disambig[1];
-      }
-    }
-
-    return { piece, fromFile, fromRank, toFile, toRank, capture, promotion, castle, san: orig };
-  }
-
-  function matchVoiceToMove(parsed) {
+  function buildMovePhrasings() {
     const legalMoves = game.moves({ verbose: true });
-    const legalSans = game.moves();
+    const moveMap = new Map(); // san → { phrasings, uci }
 
-    // Castle handling
-    if (parsed.castle) {
-      const target = parsed.castle === 'short' ? 'O-O' : 'O-O-O';
-      // O-O also matches at start of O-O-O, so check exact
-      if (legalSans.includes(target)) return target;
-      // Maybe they said "castle" without specifying — if only one castle is legal, use it
-      const castleMoves = legalSans.filter(m => m.startsWith('O-O'));
-      if (castleMoves.length === 1) return castleMoves[0];
+    // Count how many pieces of each type can move to each square (for disambiguation)
+    const piecesToSquare = {}; // "N_f3" → [{from, san}]
+    for (const m of legalMoves) {
+      if (m.piece === 'p') continue;
+      const key = `${m.piece.toUpperCase()}_${m.to}`;
+      if (!piecesToSquare[key]) piecesToSquare[key] = [];
+      piecesToSquare[key].push(m);
+    }
+
+    for (const m of legalMoves) {
+      const san = m.san;
+      const piece = m.piece.toUpperCase();
+      const fromF = m.from[0], fromR = m.from[1];
+      const toF = m.to[0], toR = m.to[1];
+      const isCapture = m.captured !== undefined;
+      const phrasings = [];
+
+      // Castling
+      if (m.flags.includes('k')) { // kingside
+        phrasings.push(['O-O']);
+        phrasings.push(['O']);       // just "castle" if only one castle legal
+        moveMap.set(san, { phrasings, uci: m.from + m.to });
+        continue;
+      }
+      if (m.flags.includes('q')) { // queenside
+        phrasings.push(['O-O-O']);
+        phrasings.push(['O']);
+        moveMap.set(san, { phrasings, uci: m.from + m.to });
+        continue;
+      }
+
+      // Promotion
+      const promoMatch = san.match(/=([NBRQ])/);
+      const promoSuffix = promoMatch ? [promoMatch[1]] : [];
+      const promoWithEq = promoMatch ? ['=', promoMatch[1]] : [];
+
+      if (piece === 'P') {
+        // Pawn moves
+        // "e4", "pawn e4"
+        phrasings.push([toF, toR, ...promoSuffix]);
+        phrasings.push(['P', toF, toR, ...promoSuffix]);
+
+        if (isCapture) {
+          // "e takes d5", "exd5"
+          phrasings.push([fromF, 'x', toF, toR, ...promoSuffix]);
+          phrasings.push([fromF, toF, toR, ...promoSuffix]);
+          phrasings.push(['P', 'x', toF, toR, ...promoSuffix]);
+        }
+
+        // Full UCI: "e2 e4"
+        phrasings.push([fromF, fromR, toF, toR, ...promoSuffix]);
+
+        if (promoMatch) {
+          // Also allow "promote queen" form
+          phrasings.push([toF, toR, ...promoWithEq]);
+          if (isCapture) phrasings.push([fromF, 'x', toF, toR, ...promoWithEq]);
+        }
+      } else {
+        // Piece moves
+        const ambigKey = `${piece}_${m.to}`;
+        const siblings = piecesToSquare[ambigKey] || [];
+        const needsDisambig = siblings.length > 1;
+
+        // Standard: "Knight f3"
+        phrasings.push([piece, toF, toR]);
+
+        // With capture: "Knight takes f3"
+        if (isCapture) {
+          phrasings.push([piece, 'x', toF, toR]);
+        }
+
+        // Disambiguated: "Knight g f3" or "Knight 1 f3"
+        if (needsDisambig) {
+          // Check what disambiguation is needed
+          const sameFile = siblings.some(s => s.from[0] === fromF && s.from !== m.from);
+          const sameRank = siblings.some(s => s.from[1] === fromR && s.from !== m.from);
+
+          if (!sameFile) {
+            // File disambiguates
+            phrasings.push([piece, fromF, toF, toR]);
+            if (isCapture) phrasings.push([piece, fromF, 'x', toF, toR]);
+          }
+          if (!sameRank) {
+            // Rank disambiguates
+            phrasings.push([piece, fromR, toF, toR]);
+            if (isCapture) phrasings.push([piece, fromR, 'x', toF, toR]);
+          }
+          // Full disambiguation
+          phrasings.push([piece, fromF, fromR, toF, toR]);
+        }
+
+        // Full UCI: "g1 f3"
+        phrasings.push([fromF, fromR, toF, toR]);
+      }
+
+      moveMap.set(san, { phrasings, uci: m.from + m.to + (promoMatch ? promoMatch[1].toLowerCase() : '') });
+    }
+
+    return moveMap;
+  }
+
+  // ═══════════════════════════════════════════
+  //  FUZZY TOKEN MATCHING
+  // ═══════════════════════════════════════════
+
+  // Edit distance on token arrays, with chess-aware substitution costs.
+  // Identical = 0, similar (same category) = 0.3, different = 1.0, insert/delete = 0.6
+  function tokenDistance(heard, target) {
+    const n = heard.length, m = target.length;
+    const dp = Array.from({ length: n + 1 }, () => new Float32Array(m + 1));
+
+    for (let i = 0; i <= n; i++) dp[i][0] = i * 0.6;
+    for (let j = 0; j <= m; j++) dp[0][j] = j * 0.6;
+
+    for (let i = 1; i <= n; i++) {
+      for (let j = 1; j <= m; j++) {
+        const h = heard[i - 1], t = target[j - 1];
+        let subCost;
+        if (h === t) {
+          subCost = 0;
+        } else if (FILES.has(h) && FILES.has(t)) {
+          subCost = 0.8; // file→file confusion (b/d/e)
+        } else if (RANKS.has(h) && RANKS.has(t)) {
+          subCost = 0.8; // rank→rank confusion
+        } else if (PIECES.has(h) && PIECES.has(t)) {
+          subCost = 0.9; // piece→piece confusion
+        } else {
+          subCost = 1.2; // cross-category = very costly
+        }
+
+        dp[i][j] = Math.min(
+          dp[i - 1][j] + 0.6,     // delete (extra heard token)
+          dp[i][j - 1] + 0.8,     // insert (missing heard token)
+          dp[i - 1][j - 1] + subCost // substitute
+        );
+      }
+    }
+    return dp[n][m];
+  }
+
+  // Main match function: returns best SAN or null
+  function matchMove(heardValues) {
+    if (heardValues.length === 0) return null;
+
+    // Handle confirmation
+    if (pendingMove) {
+      if (heardValues.includes('YES')) return { type: 'confirm', value: true };
+      if (heardValues.includes('NO')) return { type: 'confirm', value: false };
+    }
+
+    // Handle bare castle
+    if (heardValues.includes('O-O') || heardValues.includes('O-O-O') || heardValues.includes('O')) {
+      // Filter to just the castle-relevant tokens
+      const castleVals = heardValues.filter(v => v === 'O' || v === 'O-O' || v === 'O-O-O');
+      const wantsLong = castleVals.includes('O-O-O');
+      const legalSans = game.moves();
+      if (wantsLong && legalSans.includes('O-O-O')) return { type: 'move', san: 'O-O-O' };
+      if (!wantsLong && legalSans.includes('O-O')) return { type: 'move', san: 'O-O' };
+      // Bare "castle" — pick whichever is legal, or the only one
+      const castles = legalSans.filter(s => s.startsWith('O-O'));
+      if (castles.length === 1) return { type: 'move', san: castles[0] };
       return null;
     }
 
-    if (!parsed.toFile || !parsed.toRank) return null;
+    // Strip non-move tokens for matching
+    const moveValues = heardValues.filter(v => v !== 'YES' && v !== 'NO');
+    if (moveValues.length === 0) return null;
 
-    // Score each legal move against the parsed tokens
-    let candidates = [];
+    const moveMap = buildMovePhrasings();
+    let bestSan = null, bestCost = Infinity, secondCost = Infinity;
+    let bestIsSan = false;
+    const results = [];
 
-    for (const m of legalMoves) {
-      const p = parseSan(m.san);
-      let score = 0;
+    for (const [san, { phrasings }] of moveMap) {
+      let moveBestCost = Infinity;
 
-      // Target square must match
-      if (p.toFile !== parsed.toFile || p.toRank !== parsed.toRank) continue;
+      for (const phrasing of phrasings) {
+        const cost = tokenDistance(moveValues, phrasing);
+        // Normalize by target length to avoid bias toward short phrasings
+        const normCost = cost / Math.max(phrasing.length, 1);
 
-      score += 10; // target square match
-
-      const isPawn = (m.piece === 'p');
-
-      // Piece matching
-      if (parsed.piece) {
-        // User said a piece name — must match
-        const movePiece = isPawn ? null : m.piece.toUpperCase();
-        if (movePiece === parsed.piece) score += 5;
-        else continue; // wrong piece, skip entirely
-      } else {
-        // No piece word spoken — strongly prefer pawn moves
-        if (isPawn) score += 6;
-        else score -= 3;
+        if (normCost < moveBestCost) moveBestCost = normCost;
       }
 
-      // Disambiguation
-      if (parsed.fromFile) {
-        if (p.fromFile === parsed.fromFile || m.from[0] === parsed.fromFile) score += 3;
-        else score -= 2;
-      }
-      if (parsed.fromRank) {
-        if (p.fromRank === parsed.fromRank || m.from[1] === parsed.fromRank) score += 3;
-        else score -= 2;
-      }
+      // SAN-form bonus: if this is the "standard" way to say the move, slight preference
+      const isSanForm = phrasings.some(p => {
+        const s = p.join('');
+        return s === san.replace(/[+#x=]/g, '');
+      });
 
-      // Capture hint
-      if (parsed.hasCapture && p.capture) score += 1;
-
-      // Promotion
-      if (parsed.promotion) {
-        if (p.promotion === parsed.promotion) score += 4;
-        else if (p.promotion) score -= 1; // wrong promotion piece
-        else continue; // said promote but move isn't a promotion
-      }
-
-      candidates.push({ san: m.san, score, move: m });
+      results.push({ san, cost: moveBestCost, isSan: isSanForm });
     }
 
-    if (candidates.length === 0) return null;
+    // Sort by cost
+    results.sort((a, b) => a.cost - b.cost);
 
-    // Sort by score descending
-    candidates.sort((a, b) => b.score - a.score);
+    if (results.length === 0) return null;
 
-    // If top candidate is clearly best, use it
-    if (candidates.length === 1) return candidates[0].san;
-    if (candidates[0].score > candidates[1].score) return candidates[0].san;
+    bestCost = results[0].cost;
+    secondCost = results.length > 1 ? results[1].cost : Infinity;
 
-    // Ambiguous — return null
-    logEntry('error', `Ambiguous: ${candidates.map(c => c.san).join(', ')}`);
+    // If best match is too expensive, reject
+    if (bestCost > 0.75) {
+      logEntry('error', `No confident match (best: ${results[0].san} cost=${bestCost.toFixed(2)})`);
+      return null;
+    }
+
+    // If there's a clear winner
+    if (secondCost - bestCost > 0.1) {
+      return { type: 'move', san: results[0].san };
+    }
+
+    // Tied — collect all moves within 0.1 of best
+    const tied = results.filter(r => r.cost - bestCost <= 0.1);
+
+    // Tiebreaker 1: prefer SAN-standard phrasing
+    const sanTied = tied.filter(r => r.isSan);
+    if (sanTied.length === 1) return { type: 'move', san: sanTied[0].san };
+
+    // Tiebreaker 2: prefer pawn moves (user didn't say a piece name)
+    const heardPiece = moveValues.some(v => PIECES.has(v));
+    if (!heardPiece) {
+      const pawnTied = tied.filter(r => {
+        const m = game.moves({ verbose: true }).find(mv => mv.san === r.san);
+        return m && m.piece === 'p';
+      });
+      if (pawnTied.length === 1) return { type: 'move', san: pawnTied[0].san };
+    }
+
+    // Still ambiguous
+    logEntry('error', `Ambiguous (${tied.map(r => `${r.san}:${r.cost.toFixed(2)}`).join(', ')})`);
     return null;
   }
 
@@ -758,10 +801,21 @@
   // ═══════════════════════════════════════════
 
   async function handleVoiceInput(rawText) {
-    const parsed = parseVoiceText(rawText);
+    logSystem(`Heard: "${rawText}"`);
+    const values = heardToValues(rawText);
+    logSystem(`Tokens: [${values.join(', ')}]`);
 
-    if (parsed.type === 'confirm' && pendingMove) {
-      if (parsed.value) {
+    if (values.length === 0) return;
+
+    const result = matchMove(values);
+    if (!result) {
+      micStatus.innerHTML = `<span class="heard">"${rawText}"</span> — no match`;
+      await speak("No matching move. Try again.");
+      return;
+    }
+
+    if (result.type === 'confirm' && pendingMove) {
+      if (result.value) {
         confirmRow.classList.add('hidden');
         await executePendingMove();
       } else {
@@ -773,7 +827,7 @@
       return;
     }
 
-    if (parsed.type !== 'move') return;
+    if (result.type !== 'move') return;
 
     // Not our turn?
     const turn = game.turn() === 'w' ? 'white' : 'black';
@@ -782,13 +836,7 @@
       return;
     }
 
-    const san = matchVoiceToMove(parsed);
-    if (!san) {
-      micStatus.innerHTML = `<span class="heard">"${rawText}"</span> — no legal move found`;
-      await speak("No matching move found. Try again.");
-      return;
-    }
-
+    const san = result.san;
     const spokenMove = moveToSpeech(san);
 
     if (settings.confirm) {
