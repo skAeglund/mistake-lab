@@ -1267,6 +1267,84 @@
     background: var(--accent); cursor: pointer;
     border: 2px solid var(--bg-panel);
   }
+
+  /* ─── Continuation Settings Panel ─── */
+  .cont-settings {
+    padding: 12px 16px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--bg-card);
+    animation: fadeSlideIn 0.3s ease;
+  }
+  .cont-settings-section {
+    margin-bottom: 12px;
+  }
+  .cont-settings-section:last-of-type { margin-bottom: 0; }
+  .cont-settings-header {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+  }
+  .cont-settings-header h4 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+    color: var(--text-muted); margin: 0; font-weight: 600; flex: 1;
+  }
+  .cont-settings-toggle {
+    position: relative; width: 32px; height: 18px; flex-shrink: 0;
+  }
+  .cont-settings-toggle input {
+    opacity: 0; width: 0; height: 0; position: absolute;
+  }
+  .cont-settings-toggle .toggle-track {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    background: var(--bg-input); border-radius: 9px; cursor: pointer;
+    transition: background 0.2s;
+  }
+  .cont-settings-toggle input:checked + .toggle-track {
+    background: var(--accent);
+  }
+  .cont-settings-toggle .toggle-thumb {
+    position: absolute; top: 2px; left: 2px; width: 14px; height: 14px;
+    background: #fff; border-radius: 50%; transition: transform 0.2s;
+    pointer-events: none;
+  }
+  .cont-settings-toggle input:checked ~ .toggle-thumb {
+    transform: translateX(14px);
+  }
+  .cont-settings-chips {
+    display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px;
+  }
+  .cont-settings-chips label {
+    font-size: 11px; padding: 3px 8px; border-radius: 12px;
+    border: 1px solid var(--border); background: var(--bg-panel);
+    color: var(--text-secondary); cursor: pointer; user-select: none;
+    transition: all 0.15s;
+  }
+  .cont-settings-chips label:hover {
+    border-color: var(--accent);
+  }
+  .cont-settings-chips input { display: none; }
+  .cont-settings-chips input:checked + span {
+    /* handled via parent label */
+  }
+  .cont-settings-chips label:has(input:checked) {
+    background: var(--accent); color: #fff; border-color: var(--accent);
+  }
+  .cont-settings-row {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 4px;
+  }
+  .cont-settings-row-label {
+    font-size: 11px; color: var(--text-secondary); min-width: 52px; flex-shrink: 0;
+  }
+  .cont-settings-note {
+    font-size: 10px; color: var(--text-muted); font-style: italic;
+    margin-top: 2px;
+  }
+  .cont-settings-divider {
+    border: none; border-top: 1px solid var(--border); margin: 10px 0;
+  }
+  .cont-settings-footer {
+    display: flex; gap: 8px; margin-top: 12px;
+  }
+  .cont-settings-disabled {
+    opacity: 0.4; pointer-events: none;
+  }
 </style>
 </head>
 <body>
@@ -1318,7 +1396,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix type filter bypass when 2 of 3 options selected</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add database-based continuation practice (Lichess Explorer) + practice from opening filter</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1477,6 +1555,7 @@
         <button class="btn btn-ghost btn-sm" onclick="filterReset()">↺ Reset</button>
         <button class="btn btn-ghost btn-sm" onclick="exitOpeningFilter(false)" style="border-color:var(--accent);color:var(--accent)">✓ Done</button>
         <button class="btn btn-ghost btn-sm" onclick="clearOpeningFilter()">✕ Clear</button>
+        <button class="btn btn-primary btn-sm" onclick="startFilterCont()" id="btnFilterPlay">▶ Play</button>
       </div>
     </div>
     <div class="analysis-panel hidden" id="analysisPanel">
@@ -1864,6 +1943,15 @@ let maiaInputNames = null;    // discovered from the ONNX model
 let maiaOutputNames = null;
 let maiaElo = 2000;           // ELO for Maia predictions (adjustable via slider)
 let maiaPrecision = 0.75;     // 1.0 = argmax, 0.0 = high temperature sampling
+
+// ─── Lichess Explorer (Database moves) settings ───
+let explorerEnabled = true;
+let explorerRatings = [1600, 1800, 2000];
+let explorerSpeeds = ['blitz', 'rapid', 'classical'];
+let explorerMinGames = 5;
+let explorerMinFreq = 0.05;
+let explorerNotifyMaia = true;
+let practiceContItem = null; // synthetic item for filter continuation practice
 
 // ─── Debug logging toggle ───
 const DEBUG_SF = true;
@@ -5775,6 +5863,12 @@ function toggleOpeningFilter() {
 
 function enterOpeningFilter() {
   if (analysisMode) exitAnalysisMode();
+  cleanupPracticeCont();
+  continuationMode = false;
+  silentContinuation = false;
+  contLine = null;
+  contLineBrowsing = false;
+  contLineSubtitle = '';
   buildFenIndex();
   openingFilterMode = true;
 
@@ -6393,6 +6487,8 @@ function applyFilters() {
 function showMainApp() {
   if (appShown) return; // prevent double initialization
   appShown = true;
+
+  loadContSettings();
 
   // Sync filter chip UI with saved filter state
   document.querySelectorAll('.filter-chip[data-filter]').forEach(el => {
@@ -7117,6 +7213,16 @@ function renderQueue() {
 
 // ─── Load a position ───
 function loadPosition(globalIdx) {
+  // Clean up any synthetic practice item from filter continuation
+  if (practiceContItem) {
+    const pIdx = filteredMistakes.indexOf(practiceContItem);
+    if (pIdx >= 0) {
+      filteredMistakes.splice(pIdx, 1);
+      // Adjust target index if it was after the removed item
+      if (globalIdx > pIdx) globalIdx--;
+    }
+    practiceContItem = null;
+  }
   if (globalIdx < 0 || globalIdx >= filteredMistakes.length) return;
   if (analysisMode) exitAnalysisMode();
   const prevSession = preAnalysisSession;
@@ -9647,6 +9753,424 @@ function updateLineNavBar() {
   document.body.classList.toggle('cont-info-merged', !!(contLineSubtitle && contLine));
 }
 
+// ─── Lichess Explorer (Database Moves) ───
+function loadContSettings() {
+  try {
+    const raw = localStorage.getItem('mistakelab_cont_settings');
+    if (!raw) return;
+    const s = JSON.parse(raw);
+    if (s.explorerEnabled !== undefined) explorerEnabled = s.explorerEnabled;
+    if (Array.isArray(s.explorerRatings)) explorerRatings = s.explorerRatings;
+    if (Array.isArray(s.explorerSpeeds)) explorerSpeeds = s.explorerSpeeds;
+    if (s.explorerMinGames !== undefined) explorerMinGames = s.explorerMinGames;
+    if (s.explorerMinFreq !== undefined) explorerMinFreq = s.explorerMinFreq;
+    if (s.explorerNotifyMaia !== undefined) explorerNotifyMaia = s.explorerNotifyMaia;
+    if (s.maiaElo !== undefined) { maiaElo = s.maiaElo; }
+    if (s.maiaPrecision !== undefined) { maiaPrecision = s.maiaPrecision; }
+  } catch(e) {}
+}
+
+function saveContSettings() {
+  try {
+    localStorage.setItem('mistakelab_cont_settings', JSON.stringify({
+      explorerEnabled, explorerRatings, explorerSpeeds,
+      explorerMinGames, explorerMinFreq, explorerNotifyMaia,
+      maiaElo, maiaPrecision,
+    }));
+  } catch(e) {}
+}
+
+async function fetchExplorerMoves(fen) {
+  if (!explorerEnabled || explorerRatings.length === 0 || explorerSpeeds.length === 0) return null;
+  if (!lichessToken) return null; // Explorer requires Lichess authentication
+  const params = new URLSearchParams({
+    fen,
+    variant: 'standard',
+    speeds: explorerSpeeds.join(','),
+    ratings: explorerRatings.join(','),
+    topGames: '0',
+    recentGames: '0',
+    moves: '12',
+  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
+    const resp = await fetch(`https://explorer.lichess.ovh/lichess?${params}`, {
+      signal: controller.signal,
+      headers: { 'Authorization': `Bearer ${lichessToken}` },
+    });
+    clearTimeout(timeout);
+    if (!resp.ok) return null;
+    const text = await resp.text();
+    // ndjson: may have multiple lines, take last non-empty
+    const lines = text.trim().split('\n').filter(l => l.trim());
+    if (lines.length === 0) return null;
+    return JSON.parse(lines[lines.length - 1]);
+  } catch(e) {
+    clearTimeout(timeout);
+    return null;
+  }
+}
+
+function pickExplorerMove(data) {
+  if (!data || !data.moves || data.moves.length === 0) return null;
+  const totalGames = data.white + data.draws + data.black;
+  if (totalGames === 0) return null;
+
+  // Filter moves by minimum games and minimum frequency
+  const candidates = data.moves.filter(mv => {
+    const games = mv.white + mv.draws + mv.black;
+    const freq = games / totalGames;
+    return games >= explorerMinGames && freq >= explorerMinFreq;
+  });
+  if (candidates.length === 0) return null;
+
+  // Weighted random pick by game count
+  const weights = candidates.map(mv => mv.white + mv.draws + mv.black);
+  const totalWeight = weights.reduce((a, b) => a + b, 0);
+  let r = Math.random() * totalWeight;
+  for (let i = 0; i < candidates.length; i++) {
+    r -= weights[i];
+    if (r <= 0) return candidates[i];
+  }
+  return candidates[candidates.length - 1];
+}
+
+function buildContSettingsHtml() {
+  const allRatings = [1600, 1800, 2000, 2200, 2500];
+  const allSpeeds = [
+    { val: 'bullet', label: 'Bullet' },
+    { val: 'blitz', label: 'Blitz' },
+    { val: 'rapid', label: 'Rapid' },
+    { val: 'classical', label: 'Classical' },
+  ];
+
+  const ratingChips = allRatings.map(r => {
+    const checked = explorerRatings.includes(r) ? 'checked' : '';
+    const label = r === 2500 ? '2500+' : `${r}–${r + 199}`;
+    return `<label><input type="checkbox" name="cs-rating" value="${r}" ${checked}><span>${label}</span></label>`;
+  }).join('');
+
+  const speedChips = allSpeeds.map(s => {
+    const checked = explorerSpeeds.includes(s.val) ? 'checked' : '';
+    return `<label><input type="checkbox" name="cs-speed" value="${s.val}" ${checked}><span>${s.label}</span></label>`;
+  }).join('');
+
+  const noAuth = !lichessToken;
+  const dbDisabledClass = (explorerEnabled && !noAuth) ? '' : ' cont-settings-disabled';
+
+  return `
+    <div class="cont-settings" id="contSettingsPanel">
+      <div class="cont-settings-section">
+        <div class="cont-settings-header">
+          <h4>📊 Database moves</h4>
+          <label class="cont-settings-toggle">
+            <input type="checkbox" id="csExplorerToggle" ${explorerEnabled && !noAuth ? 'checked' : ''} ${noAuth ? 'disabled' : ''}
+              onchange="onContSettingsExplorerToggle(this.checked)">
+            <div class="toggle-track"></div>
+            <div class="toggle-thumb"></div>
+          </label>
+        </div>
+        ${noAuth ? '<div class="cont-settings-note" style="color:var(--text-warning,#e6a117);font-style:normal;margin-bottom:8px;">⚠ Requires Lichess login — connect via Repertoire tab</div>' : ''}
+        <div id="csExplorerBody" class="${dbDisabledClass}">
+          <div class="cont-settings-row">
+            <span class="cont-settings-row-label">Rating</span>
+            <div class="cont-settings-chips" id="csRatingChips">${ratingChips}</div>
+          </div>
+          <div class="cont-settings-row">
+            <span class="cont-settings-row-label">Speed</span>
+            <div class="cont-settings-chips" id="csSpeedChips">${speedChips}</div>
+          </div>
+          <div class="cont-settings-row" style="margin-top:4px;">
+            <span class="cont-settings-row-label">Min games</span>
+            <input type="number" id="csMinGames" value="${explorerMinGames}" min="1" max="200"
+              style="width:52px;font-size:12px;padding:2px 6px;border-radius:6px;border:1px solid var(--border);background:var(--bg-input);color:var(--text-primary);text-align:center;">
+          </div>
+          <div class="cont-settings-note">Moves played fewer times are ignored. Falls back to Maia when no moves qualify.</div>
+        </div>
+      </div>
+
+      <hr class="cont-settings-divider">
+
+      <div class="cont-settings-section">
+        <div class="cont-settings-header">
+          <h4>🧠 Maia opponent</h4>
+        </div>
+        <div class="cont-settings-note" style="margin-bottom:8px;">Used when database coverage runs out</div>
+        <div class="maia-slider-row">
+          <span class="maia-slider-label">Strength</span>
+          <input type="range" class="maia-slider" id="csMaiaElo"
+                 min="1600" max="2200" step="25" value="${maiaElo}"
+                 oninput="document.getElementById('csMaiaEloVal').textContent=this.value">
+          <span class="maia-slider-value" id="csMaiaEloVal">${maiaElo}</span>
+        </div>
+        <div class="maia-slider-row">
+          <span class="maia-slider-label">Precision</span>
+          <input type="range" class="maia-slider" id="csMaiaPrecision"
+                 min="0" max="1" step="0.05" value="${maiaPrecision}"
+                 oninput="document.getElementById('csMaiaPrecVal').textContent=parseFloat(this.value).toFixed(2)">
+          <span class="maia-slider-value" id="csMaiaPrecVal">${maiaPrecision.toFixed(2)}</span>
+        </div>
+      </div>
+
+      <hr class="cont-settings-divider">
+
+      <div class="cont-settings-row" style="margin-bottom:0;">
+        <label style="font-size:11px;color:var(--text-secondary);display:flex;align-items:center;gap:6px;cursor:pointer;">
+          <input type="checkbox" id="csNotifyMaia" ${explorerNotifyMaia ? 'checked' : ''}
+            style="accent-color:var(--accent);">
+          Notify when switching to Maia
+        </label>
+      </div>
+
+      <div class="cont-settings-footer">
+        <button class="btn btn-primary btn-sm" style="flex:1;font-size:12px;" onclick="applyContSettingsAndStart()">▶ Start</button>
+        <button class="btn btn-ghost btn-sm" style="font-size:12px;" onclick="cancelContSettings()">Cancel</button>
+      </div>
+    </div>
+  `;
+}
+
+function onContSettingsExplorerToggle(checked) {
+  const body = document.getElementById('csExplorerBody');
+  if (body) body.classList.toggle('cont-settings-disabled', !checked);
+}
+
+function applyContSettingsAndStart() {
+  // Read all values from the panel
+  const toggleEl = document.getElementById('csExplorerToggle');
+  if (toggleEl && !toggleEl.disabled) {
+    explorerEnabled = toggleEl.checked;
+  }
+
+  explorerRatings = [];
+  document.querySelectorAll('#csRatingChips input:checked').forEach(cb => {
+    explorerRatings.push(parseInt(cb.value));
+  });
+
+  explorerSpeeds = [];
+  document.querySelectorAll('#csSpeedChips input:checked').forEach(cb => {
+    explorerSpeeds.push(cb.value);
+  });
+
+  const minGamesInput = document.getElementById('csMinGames');
+  if (minGamesInput) explorerMinGames = Math.max(1, parseInt(minGamesInput.value) || 5);
+
+  explorerNotifyMaia = document.getElementById('csNotifyMaia')?.checked ?? true;
+
+  // Read Maia sliders
+  const eloSlider = document.getElementById('csMaiaElo');
+  if (eloSlider) {
+    maiaElo = parseInt(eloSlider.value);
+    const mainEloSlider = document.getElementById('maiaEloSlider');
+    if (mainEloSlider) mainEloSlider.value = maiaElo;
+    const mainEloVal = document.getElementById('maiaEloValue');
+    if (mainEloVal) mainEloVal.textContent = maiaElo;
+  }
+  const precSlider = document.getElementById('csMaiaPrecision');
+  if (precSlider) {
+    maiaPrecision = parseFloat(precSlider.value);
+    const mainPrecSlider = document.getElementById('maiaPrecisionSlider');
+    if (mainPrecSlider) mainPrecSlider.value = maiaPrecision;
+    const mainPrecVal = document.getElementById('maiaPrecisionValue');
+    if (mainPrecVal) mainPrecVal.textContent = maiaPrecision.toFixed(2);
+  }
+
+  saveContSettings();
+
+  // Remove the settings panel
+  const panel = document.getElementById('contSettingsPanel');
+  if (panel) panel.remove();
+
+  startContinuationMode();
+}
+
+function cancelContSettings() {
+  const panel = document.getElementById('contSettingsPanel');
+  if (panel) panel.remove();
+  // Re-show the original continuation options
+  const m = filteredMistakes[currentMistakeIdx];
+  const data = window._deferredEngineLine;
+  if (data) {
+    showContinuationOptions(m, data.move, data.contUci);
+  }
+}
+
+function showContinuationSettings() {
+  // Remove existing continuation options
+  const opts = document.getElementById('continuationOptions');
+  if (opts) opts.remove();
+
+  const container = document.getElementById('feedbackContainer');
+  const div = document.createElement('div');
+  div.innerHTML = buildContSettingsHtml();
+  const firstFeedback = container.querySelector('.feedback-box');
+  if (firstFeedback) {
+    firstFeedback.insertAdjacentElement('afterend', div.firstElementChild);
+  } else {
+    container.insertBefore(div.firstElementChild, container.firstChild);
+  }
+}
+
+// ─── Filter Continuation (practice from opening explorer) ───
+function startFilterCont() {
+  if (!filterChess) return;
+  // Replace the filter actions area with the continuation settings panel
+  const actionsDiv = document.querySelector('.opening-filter-panel .filter-actions');
+  if (!actionsDiv) return;
+  const settingsHtml = buildContSettingsHtml();
+  // Swap the Start button handler to our filter-specific one
+  const patched = settingsHtml
+    .replace('onclick="applyContSettingsAndStart()"', 'onclick="applyFilterContAndStart()"')
+    .replace('onclick="cancelContSettings()"', 'onclick="cancelFilterCont()"');
+  actionsDiv.outerHTML = '<div id="filterContSettingsWrap">' + patched + '</div>';
+}
+
+function cancelFilterCont() {
+  // Restore the original filter-actions
+  const wrap = document.getElementById('filterContSettingsWrap');
+  if (wrap) {
+    wrap.outerHTML = `
+      <div class="filter-actions">
+        <button class="btn btn-ghost btn-sm" onclick="filterFlipBoard()">⇅ Flip</button>
+        <button class="btn btn-ghost btn-sm" onclick="filterReset()">↺ Reset</button>
+        <button class="btn btn-ghost btn-sm" onclick="exitOpeningFilter(false)" style="border-color:var(--accent);color:var(--accent)">✓ Done</button>
+        <button class="btn btn-ghost btn-sm" onclick="clearOpeningFilter()">✕ Clear</button>
+        <button class="btn btn-primary btn-sm" onclick="startFilterCont()" id="btnFilterPlay">▶ Play</button>
+      </div>`;
+  }
+}
+
+function applyFilterContAndStart() {
+  // Read settings from the panel (same as applyContSettingsAndStart)
+  const toggleEl = document.getElementById('csExplorerToggle');
+  if (toggleEl && !toggleEl.disabled) {
+    explorerEnabled = toggleEl.checked;
+  }
+  explorerRatings = [];
+  document.querySelectorAll('#csRatingChips input:checked').forEach(cb => {
+    explorerRatings.push(parseInt(cb.value));
+  });
+  explorerSpeeds = [];
+  document.querySelectorAll('#csSpeedChips input:checked').forEach(cb => {
+    explorerSpeeds.push(cb.value);
+  });
+  const minGamesInput = document.getElementById('csMinGames');
+  if (minGamesInput) explorerMinGames = Math.max(1, parseInt(minGamesInput.value) || 5);
+  explorerNotifyMaia = document.getElementById('csNotifyMaia')?.checked ?? true;
+  const eloSlider = document.getElementById('csMaiaElo');
+  if (eloSlider) {
+    maiaElo = parseInt(eloSlider.value);
+    const mainEloSlider = document.getElementById('maiaEloSlider');
+    if (mainEloSlider) mainEloSlider.value = maiaElo;
+    const mainEloVal = document.getElementById('maiaEloValue');
+    if (mainEloVal) mainEloVal.textContent = maiaElo;
+  }
+  const precSlider = document.getElementById('csMaiaPrecision');
+  if (precSlider) {
+    maiaPrecision = parseFloat(precSlider.value);
+    const mainPrecSlider = document.getElementById('maiaPrecisionSlider');
+    if (mainPrecSlider) mainPrecSlider.value = maiaPrecision;
+    const mainPrecVal = document.getElementById('maiaPrecisionValue');
+    if (mainPrecVal) mainPrecVal.textContent = maiaPrecision.toFixed(2);
+  }
+  saveContSettings();
+
+  // Capture state from the filter before exiting
+  const fen = filterChess.fen();
+  const orientation = boardObj.orientation();
+  const fenParts = fen.split(' ');
+  const moveNum = parseInt(fenParts[5]) || 1;
+
+  // Create synthetic practice item
+  practiceContItem = {
+    type: 'practice',
+    playerColor: orientation,
+    fenBefore: fen,
+    gameId: '_practice',
+    movePly: 0,
+    moveNumber: moveNum,
+    wpDrop: 0,
+    cpLoss: 0,
+    bestMove: null,
+    bestMoveSan: null,
+    bestCp: 0,
+  };
+
+  // Push to filteredMistakes and set as current
+  filteredMistakes.push(practiceContItem);
+  const practiceIdx = filteredMistakes.length - 1;
+
+  // Exit opening filter (without clearing the position filter)
+  exitOpeningFilter(false);
+
+  // Set up gameEngine at the practice position
+  gameEngine = new Chess(fen);
+  boardObj.position(fen, false);
+  boardObj.orientation(orientation);
+  currentMistakeIdx = practiceIdx;
+
+  // Hide review list, show practice state
+  document.getElementById('posInfoCard').style.display = '';
+  document.getElementById('feedbackContainer').innerHTML = '';
+  if (document.body.classList.contains('mobile-browsing')) {
+    document.body.classList.remove('mobile-browsing');
+    document.body.classList.add('mobile-training');
+  }
+
+  // Enter silent continuation
+  contLine = { baseFen: fen, moves: [], currentIdx: -1 };
+  contLineBrowsing = false;
+  continuationMode = true;
+  silentContinuation = true;
+  updateEvalBar();
+
+  // Determine whose turn it is
+  const sideToMove = fenParts[1]; // 'w' or 'b'
+  const userTurnChar = orientation === 'white' ? 'w' : 'b';
+
+  if (sideToMove === userTurnChar) {
+    // User's turn — start pre-analysis and wait
+    currentSolveFen = fen;
+    startPreAnalysis(currentSolveFen);
+    document.getElementById('btnHint').classList.add('hidden');
+    document.getElementById('posInfoContent').innerHTML = `
+      <div style="font-size:13px;line-height:1.7">
+        <div style="color:var(--blue);font-weight:600;">Practice</div>
+        <div>Your turn · Find the best move</div>
+        <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
+        <div style="margin-top:6px;">
+          <button class="btn btn-ghost btn-sm" style="font-size:11px;border-color:var(--accent);color:var(--accent);" onclick="stopAndReviewContinuation()">📋 Stop & Review</button>
+        </div>
+      </div>`;
+  } else {
+    // Opponent's turn — let them play first
+    document.getElementById('btnHint').classList.add('hidden');
+    document.getElementById('posInfoContent').innerHTML = `
+      <div style="font-size:13px;line-height:1.7">
+        <div style="color:var(--blue);font-weight:600;">Practice</div>
+        <div>Opponent is thinking…</div>
+      </div>`;
+    advanceContinuation('');
+  }
+}
+
+function cleanupPracticeCont() {
+  if (!practiceContItem) return;
+  // Remove synthetic item from filteredMistakes
+  const idx = filteredMistakes.indexOf(practiceContItem);
+  if (idx >= 0) filteredMistakes.splice(idx, 1);
+  practiceContItem = null;
+  currentMistakeIdx = -1;
+}
+
+function practiceEndBtns() {
+  if (!practiceContItem) return '';
+  return '<div style="margin-top:8px;display:flex;gap:8px;">' +
+    '<button class="btn btn-ghost btn-sm" style="font-size:12px;" onclick="enterOpeningFilter()">↩ Back to openings</button>' +
+    '</div>';
+}
+
 // ─── Continuation Practice ───
 function showContinuationOptions(m, move, contUci) {
   continuationContUci = contUci;
@@ -9658,7 +10182,7 @@ function showContinuationOptions(m, move, contUci) {
   div.id = 'continuationOptions';
   div.style.cssText = 'display:flex;gap:8px;animation:fadeSlideIn 0.3s ease;';
   div.innerHTML = `
-    <button class="btn btn-primary btn-sm" onclick="startContinuationMode()" style="font-size:12px;">▶ Play Continuation</button>
+    <button class="btn btn-primary btn-sm" onclick="showContinuationSettings()" style="font-size:12px;">▶ Play Continuation</button>
     <button class="btn btn-ghost btn-sm" onclick="showDeferredEngineLine()" style="font-size:12px;">Show engine line</button>
   `;
   // Insert after the first feedback box
@@ -9881,7 +10405,8 @@ function stopAndReviewContinuation() {
   showColorFeedback('var(--accent)', 'rgba(66,133,244,0.08)',
     'Continuation ended',
     `${moveCount} moves played.` +
-    `<div style="margin-top:8px;"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="startContLineReview()">📋 Review Game</button></div>`
+    `<div style="margin-top:8px;"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="startContLineReview()">📋 Review Game</button></div>` +
+    practiceEndBtns()
   );
 
   updateSessionProgress();
@@ -10663,10 +11188,11 @@ async function advanceContinuation(contUci) {
     const reviewBtn = wasSilent && contLine && contLine.moves.some(mv => mv.classification)
       ? '<div style="margin-top:8px;"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="startContLineReview()">📋 Review Game</button></div>'
       : '';
+    const endBtns = reviewBtn + practiceEndBtns();
     if (gameEngine.in_checkmate()) {
-      showFeedback('correct', 'Checkmate!', 'You delivered checkmate!' + reviewBtn);
+      showFeedback('correct', 'Checkmate!', 'You delivered checkmate!' + endBtns);
     } else if (gameEngine.in_draw()) {
-      showFeedback('info', 'Draw', 'The position is drawn.' + reviewBtn);
+      showFeedback('info', 'Draw', 'The position is drawn.' + endBtns);
     }
     if (wasSilent) renderContLine(); // show classification symbols
     document.getElementById('btnRetry').classList.remove('hidden');
@@ -10677,9 +11203,24 @@ async function advanceContinuation(contUci) {
 
   let opponentUci;
   let moveSource = '';
+  let switchedToMaia = false;
 
-  // Try Maia 3 first for human-like opponent moves
-  if (maiaReady) {
+  // Try Lichess Explorer database first
+  if (explorerEnabled) {
+    const explorerData = await fetchExplorerMoves(gameEngine.fen());
+    const picked = pickExplorerMove(explorerData);
+    if (picked) {
+      opponentUci = picked.uci;
+      const games = picked.white + picked.draws + picked.black;
+      moveSource = `DB (${games})`;
+    } else if (explorerData) {
+      // Explorer responded but no moves passed the filter — genuine exhaustion
+      switchedToMaia = true;
+    }
+  }
+
+  // Fallback: try Maia 3 for human-like opponent moves
+  if (!opponentUci && maiaReady) {
     const maiaMove = await maiaPredict(gameEngine.fen());
     if (maiaMove) {
       opponentUci = maiaMove;
@@ -10700,7 +11241,7 @@ async function advanceContinuation(contUci) {
         continuationMode = false;
         silentContinuation = false;
         hideMaiaControls();
-        showFeedback('info', 'Continuation ended', 'Could not determine opponent\'s best response.');
+        showFeedback('info', 'Continuation ended', 'Could not determine opponent\'s best response.' + practiceEndBtns());
         document.getElementById('btnRetry').classList.remove('hidden');
         document.getElementById('btnHint').classList.add('hidden');
         clearHintHighlights();
@@ -10720,7 +11261,7 @@ async function advanceContinuation(contUci) {
     continuationMode = false;
     silentContinuation = false;
     hideMaiaControls();
-    showFeedback('info', 'Continuation ended', 'Could not play opponent\'s move.');
+    showFeedback('info', 'Continuation ended', 'Could not play opponent\'s move.' + practiceEndBtns());
     document.getElementById('btnRetry').classList.remove('hidden');
     document.getElementById('btnHint').classList.add('hidden');
     clearHintHighlights();
@@ -10755,10 +11296,11 @@ async function advanceContinuation(contUci) {
     const reviewBtn2 = wasSilent2 && contLine && contLine.moves.some(mv => mv.classification)
       ? '<div style="margin-top:8px;"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="startContLineReview()">📋 Review Game</button></div>'
       : '';
+    const endBtns2 = reviewBtn2 + practiceEndBtns();
     if (gameEngine.in_checkmate()) {
-      showFeedback('wrong', 'Checkmated', 'The opponent delivered checkmate.' + reviewBtn2);
+      showFeedback('wrong', 'Checkmated', 'The opponent delivered checkmate.' + endBtns2);
     } else if (gameEngine.in_draw()) {
-      showFeedback('info', 'Draw', 'The position is drawn.' + reviewBtn2);
+      showFeedback('info', 'Draw', 'The position is drawn.' + endBtns2);
     }
     if (wasSilent2) renderContLine(); // show classification symbols
     document.getElementById('btnRetry').classList.remove('hidden');
@@ -10779,7 +11321,7 @@ async function advanceContinuation(contUci) {
     const reviewBtn3 = wasSilent3 && contLine && contLine.moves.some(mv => mv.classification)
       ? '<div style="margin-top:8px;"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="startContLineReview()">📋 Review Game</button></div>'
       : '';
-    showFeedback('info', 'Continuation ended', 'Unexpected turn.' + reviewBtn3);
+    showFeedback('info', 'Continuation ended', 'Unexpected turn.' + reviewBtn3 + practiceEndBtns());
     if (wasSilent3) renderContLine();
     document.getElementById('btnRetry').classList.remove('hidden');
     document.getElementById('btnHint').classList.add('hidden');
@@ -10812,6 +11354,7 @@ async function advanceContinuation(contUci) {
       <div style="font-size:13px;line-height:1.7">
         ${headerHtml}
         <div>Move ${moveCount + 1} · Your turn</div>
+        ${switchedToMaia && explorerNotifyMaia ? '<div style="font-size:11px;color:var(--text-muted);">📊→🧠 Switched to Maia</div>' : ''}
         <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
         ${stopReviewBtn}
       </div>
@@ -10831,6 +11374,7 @@ async function advanceContinuation(contUci) {
         <div style="font-size:13px;line-height:1.7">
           <div style="color:#4caf50;font-weight:600;">${ICON_ADVANTAGE} Convert the Advantage (+${evalDisplay})</div>
           <div>Opponent played <code class="mono">${escHtml(result.san)}</code> <span style="font-size:10px;color:var(--text-muted)">(${moveSource})</span></div>
+          ${switchedToMaia && explorerNotifyMaia ? '<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">📊→🧠 Database exhausted — switched to Maia</div>' : ''}
           <div>Find the best move!</div>
           <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
         </div>
@@ -10842,6 +11386,7 @@ async function advanceContinuation(contUci) {
         <div style="font-size:13px;line-height:1.7">
           <div style="color:var(--blue);font-weight:600;">Continuation Practice</div>
           <div>Opponent played <code class="mono">${escHtml(result.san)}</code> <span style="font-size:10px;color:var(--text-muted)">(${moveSource})</span></div>
+          ${switchedToMaia && explorerNotifyMaia ? '<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">📊→🧠 Database exhausted — switched to Maia</div>' : ''}
           <div>Find the best move!</div>
           <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
         </div>
@@ -10952,6 +11497,62 @@ function retryPosition() {
   // For tactics and advantage items, reload from scratch (resets all state properly)
   if (m.type === 'tactic' || m.type === 'advantage') {
     loadPosition(currentMistakeIdx);
+    return;
+  }
+
+  // For practice items, restart the continuation from the same position
+  if (m.type === 'practice') {
+    currentAttempts = 0;
+    continuationMode = false;
+    silentContinuation = false;
+    contLine = null;
+    contLineBrowsing = false;
+    contLineSubtitle = '';
+    contWrongMovePending = false;
+    clearPremove();
+    hideMaiaControls();
+    clearHighlights();
+    clearLastMoveHighlight();
+    clearHintHighlights();
+    hideArrow();
+    engineLine = null;
+    browsingLine = false;
+    updateLineNavBar();
+    document.getElementById('feedbackContainer').innerHTML = '';
+    document.getElementById('contLineContainer').innerHTML = '';
+    document.getElementById('btnRetry').classList.add('hidden');
+
+    gameEngine = new Chess(m.fenBefore);
+    boardObj.position(m.fenBefore, false);
+    contLine = { baseFen: m.fenBefore, moves: [], currentIdx: -1 };
+    continuationMode = true;
+    silentContinuation = true;
+    updateEvalBar();
+
+    const fenParts = m.fenBefore.split(' ');
+    const sideToMove = fenParts[1];
+    const userTurnChar = m.playerColor === 'white' ? 'w' : 'b';
+    if (sideToMove === userTurnChar) {
+      currentSolveFen = m.fenBefore;
+      startPreAnalysis(currentSolveFen);
+      document.getElementById('btnHint').classList.add('hidden');
+      document.getElementById('posInfoCard').style.display = '';
+      document.getElementById('posInfoContent').innerHTML = `
+        <div style="font-size:13px;line-height:1.7">
+          <div style="color:var(--blue);font-weight:600;">Practice</div>
+          <div>Your turn · Find the best move</div>
+          <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
+        </div>`;
+    } else {
+      document.getElementById('btnHint').classList.add('hidden');
+      document.getElementById('posInfoCard').style.display = '';
+      document.getElementById('posInfoContent').innerHTML = `
+        <div style="font-size:13px;line-height:1.7">
+          <div style="color:var(--blue);font-weight:600;">Practice</div>
+          <div>Opponent is thinking…</div>
+        </div>`;
+      advanceContinuation('');
+    }
     return;
   }
 
@@ -11497,7 +12098,7 @@ function _renderMobilePopup() {
 
   let btns = '';
   if (contOpts) {
-    btns += `<button class="btn btn-primary btn-sm" style="flex:1;min-height:40px;" onclick="closeMobileFeedback();startContinuationMode()">▶ Continue</button>`;
+    btns += `<button class="btn btn-primary btn-sm" style="flex:1;min-height:40px;" onclick="closeMobileFeedback();showContinuationSettings()">▶ Continue</button>`;
     btns += `<button class="btn btn-ghost btn-sm" style="min-height:40px;" onclick="closeMobileFeedback();showDeferredEngineLine()">Engine line</button>`;
   }
   if (retryVisible) {
