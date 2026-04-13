@@ -1287,13 +1287,15 @@
   }
   .cont-settings-toggle {
     position: relative; width: 32px; height: 18px; flex-shrink: 0;
+    display: inline-block; cursor: pointer;
   }
   .cont-settings-toggle input {
-    opacity: 0; width: 0; height: 0; position: absolute;
+    position: absolute; opacity: 0; width: 0; height: 0;
+    margin: 0; padding: 0; pointer-events: none;
   }
   .cont-settings-toggle .toggle-track {
-    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
-    background: var(--bg-input); border-radius: 9px; cursor: pointer;
+    position: absolute; top: 0; left: 0; width: 32px; height: 18px;
+    background: var(--bg-input); border-radius: 9px;
     transition: background 0.2s;
   }
   .cont-settings-toggle input:checked + .toggle-track {
@@ -1302,7 +1304,7 @@
   .cont-settings-toggle .toggle-thumb {
     position: absolute; top: 2px; left: 2px; width: 14px; height: 14px;
     background: #fff; border-radius: 50%; transition: transform 0.2s;
-    pointer-events: none;
+    pointer-events: none; z-index: 1;
   }
   .cont-settings-toggle input:checked ~ .toggle-thumb {
     transform: translateX(14px);
@@ -1396,7 +1398,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add database-based continuation practice (Lichess Explorer) + practice from opening filter</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix DB toggle styling + filter practice moves blocked by exitOpeningFilter wipe</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -10097,12 +10099,16 @@ function applyFilterContAndStart() {
     bestCp: 0,
   };
 
-  // Push to filteredMistakes and set as current
+  // Lightweight exit from opening filter — don't call exitOpeningFilter() since it
+  // runs applyFilters() which replaces filteredMistakes and wipes our practice item
+  savedFilterOrientation = boardObj ? boardObj.orientation() : null;
+  openingFilterMode = false;
+  savedBoardState = null;
+  updateOpeningFilterUI();
+
+  // Now push practice item (filteredMistakes is intact)
   filteredMistakes.push(practiceContItem);
   const practiceIdx = filteredMistakes.length - 1;
-
-  // Exit opening filter (without clearing the position filter)
-  exitOpeningFilter(false);
 
   // Set up gameEngine at the practice position
   gameEngine = new Chess(fen);
