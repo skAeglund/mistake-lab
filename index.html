@@ -1398,7 +1398,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hide 'Select a game' overlay when starting filter practice</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire deviation check during filter practice (ply &lt; 20)</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -8405,6 +8405,31 @@ async function evaluateMove(from, to, move) {
   const m = filteredMistakes[mistakeIdx];
   const container = document.getElementById('feedbackContainer');
   clearHintHighlights();
+
+  // ── Repertoire check during filter practice (ply < 20) ──
+  if (practiceContItem && repertoireTrie && repertoireTrie.size > 0 && currentSolveFen) {
+    const fenParts = currentSolveFen.split(' ');
+    const moveNum = parseInt(fenParts[5]) || 1;
+    const ply = (moveNum - 1) * 2 + (fenParts[1] === 'b' ? 1 : 0);
+    if (ply < 20) {
+      const posKey = fenPositionKey(currentSolveFen);
+      const playedUci = from + to + (move.promotion || '');
+      if (repertoireTrie.has(posKey) && !trieMatchesMove(posKey, move.san, playedUci)) {
+        // Deviation from repertoire — undo and prompt retry
+        const repEntries = repertoireTrie.get(posKey);
+        const repMoves = repEntries.map(e => e.san).join(' or ');
+        gameEngine.undo();
+        boardObj.position(gameEngine.fen(), false);
+        currentAttempts--;
+        clearLastMoveHighlight();
+        showColorFeedback('var(--yellow)', 'rgba(230,161,23,0.08)',
+          '📖 Deviated from repertoire!',
+          `You played <code class="mono">${escHtml(move.san)}</code>, but your repertoire says <code class="mono">${escHtml(repMoves)}</code>.` +
+          `<div style="margin-top:6px;"><button class="btn btn-ghost btn-sm" style="border-color:var(--accent);color:var(--accent);" onclick="document.getElementById('feedbackContainer').innerHTML=''">↺ Try again</button></div>`);
+        return;
+      }
+    }
+  }
 
   sfLog('evaluateMove', `START move=${move.san} (${from}→${to}) mistakeIdx=${mistakeIdx} fen=${m.fenBefore.split(' ').slice(0,2).join(' ')}… session=${preAnalysisSession}`);
 
