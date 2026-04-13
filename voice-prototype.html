@@ -380,7 +380,7 @@
     'bravo': 'b', 'beta': 'b', 'baker': 'b', 'boy': 'b', 'bee': 'b', 'be': 'b',
     'charlie': 'c', 'cat': 'c', 'chris': 'c', 'sea': 'c', 'see': 'c',
     'delta': 'd', 'david': 'd', 'dog': 'd', 'dee': 'd', 'day': 'd',
-    'echo': 'e', 'edward': 'e', 'easy': 'e', 'eagle': 'e', 'he': 'e', '9': 'e', 'nine': 'e',
+    'echo': 'e', 'edward': 'e', 'easy': 'e', 'eagle': 'e', 'he': 'e',
     'foxtrot': 'f', 'fox': 'f', 'frank': 'f', 'fred': 'f', 'of': 'f',
     'golf': 'g', 'george': 'g', 'gee': 'g',
     'hotel': 'h', 'henry': 'h', 'harry': 'h', 'age': 'h', 'each': 'h',
@@ -419,6 +419,34 @@
   function heardToValues(rawText) {
     const words = rawText.toLowerCase().trim().split(/\s+/);
 
+    // Expand compound words that encode multiple chess tokens.
+    // "ninety" = "knight e", "ninety-five" = "knight e five"
+    const EXPAND = {
+      'ninety': ['knight', 'e'],
+      'ninety-five': ['knight', 'e', 'five'],
+      'ninety-four': ['knight', 'e', 'four'],
+      'ninety-three': ['knight', 'e', 'three'],
+      'ninety-two': ['knight', 'e', 'two'],
+      'ninety-one': ['knight', 'e', 'one'],
+      'ninety-six': ['knight', 'e', 'six'],
+      'ninety-seven': ['knight', 'e', 'seven'],
+      'ninety-eight': ['knight', 'e', 'eight'],
+    };
+    for (let i = 0; i < words.length; i++) {
+      const exp = EXPAND[words[i]];
+      if (exp) { words.splice(i, 1, ...exp); i += exp.length - 1; }
+    }
+
+    // Handle raw digit strings: "95" → recognizer wrote ninety-five as digits
+    // Digit 9 at start encodes "knight e" + remaining rank digit(s)
+    for (let i = 0; i < words.length; i++) {
+      const w = words[i];
+      if (/^9[1-8]$/.test(w)) {
+        words.splice(i, 1, 'knight', 'e', w[1]);
+        i += 2;
+      }
+    }
+
     // Aggressively split merged tokens that contain chess characters.
     // Handles: "e4"→["e","4"], "ad1"→["a","d","1"], "ae1"→["a","e","1"]
     for (let i = 0; i < words.length; i++) {
@@ -430,7 +458,7 @@
       const chars = [];
       let allChess = true;
       for (const ch of w) {
-        if (/[a-h1-9]/.test(ch)) chars.push(ch);
+        if (/[a-h1-8]/.test(ch)) chars.push(ch);
         else { allChess = false; break; }
       }
       if (allChess && chars.length >= 2) {
