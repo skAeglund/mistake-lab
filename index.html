@@ -1398,7 +1398,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix opponent move failure in continuation (castling/edge case fallback)</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Filter practice: scoreboard, save mistakes, settings quick-start, repertoire hints, castling fix, DB/Maia indicator</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1558,6 +1558,7 @@
         <button class="btn btn-ghost btn-sm" onclick="exitOpeningFilter(false)" style="border-color:var(--accent);color:var(--accent)">✓ Done</button>
         <button class="btn btn-ghost btn-sm" onclick="clearOpeningFilter()">✕ Clear</button>
         <button class="btn btn-primary btn-sm" onclick="startFilterCont()" id="btnFilterPlay">▶ Play</button>
+        <button class="btn btn-ghost btn-sm" onclick="startFilterCont(true)" style="font-size:10px;padding:4px 6px;" title="Continuation settings">⚙</button>
       </div>
     </div>
     <div class="analysis-panel hidden" id="analysisPanel">
@@ -1746,6 +1747,8 @@ let browsingLine = false;       // true when stepping through engine line
 let contLine = null;            // { baseFen, moves: [{san,uci,fen,isUser}], currentIdx }
 let contLineBrowsing = false;   // true when navigating to a non-terminal contLine position
 let contLineSubtitle = '';     // "Opponent played Nf3 (Maia)" — shown in cont line header on mobile
+let lastOpponentSource = '';   // 'DB (42)' | 'Maia' | 'Stockfish' — shown as indicator during practice
+let explorerApiNotified = false; // true after showing "API unavailable" once per practice session
 let afterMoveCpWhite = null;    // cp from white's POV after user's move (for eval bar during line browsing)
 let continuationMode = false;   // true when in continuation practice
 let contWrongMovePending = false; // true when showing refutation engine line during continuation
@@ -1954,6 +1957,7 @@ let explorerMinGames = 5;
 let explorerMinFreq = 0.05;
 let explorerNotifyMaia = true;
 let practiceContItem = null; // synthetic item for filter continuation practice
+let practiceRepIgnored = false; // true after user clicks "Ignore Repertoire"
 
 // ─── Debug logging toggle ───
 const DEBUG_SF = true;
@@ -4059,6 +4063,30 @@ async function showHint() {
     }
   }
 
+  // ── Filter practice repertoire hint: use trie move ──
+  if (practiceContItem && !practiceRepIgnored && repertoireTrie && currentSolveFen) {
+    const posKey = fenPositionKey(currentSolveFen);
+    const entry = trieFirst(posKey);
+    if (entry && entry.uci) {
+      hintUsed = true;
+      const fromSq = entry.uci.substring(0, 2);
+      const toSq = entry.uci.substring(2, 4);
+      if (hintLevel === 0) {
+        clearHintHighlights();
+        const fromEl = document.querySelector(`.square-${fromSq}`);
+        if (fromEl) fromEl.classList.add('square-hint');
+        hintLevel = 1;
+        if (btn) { btn.disabled = false; btn.textContent = '💡 Hint (2/2)'; btn.style.borderColor = 'var(--blue)'; btn.style.color = 'var(--blue)'; }
+      } else if (hintLevel === 1) {
+        hintArrow = { from: fromSq, to: toSq };
+        renderArrows();
+        hintLevel = 2;
+        if (btn) { btn.disabled = true; btn.textContent = '💡 Hint'; }
+      }
+      return;
+    }
+  }
+
   if (hintLevel === 0) {
     // First press: wait for depth 20, freeze move, pause analysis, highlight piece
     hintUsed = true;
@@ -5722,6 +5750,27 @@ function extractAllMistakes() {
     return true;
   });
 
+  // Merge saved practice mistakes from Gist
+  if (gistData?.practiceMistakes?.length) {
+    for (const pm of gistData.practiceMistakes) {
+      // Skip if already present (by posId)
+      const pid = `${pm.gameId}_${pm.movePly}`;
+      if (allMistakes.some(m => posId(m) === pid)) continue;
+      allMistakes.push({
+        ...pm,
+        game: {
+          id: pm.gameId,
+          speed: 'practice',
+          opening: { name: pm._opening || 'Practice' },
+          createdAt: pm._createdAt || Date.now(),
+          _source: 'practice',
+          rated: false,
+          players: {},
+        },
+      });
+    }
+  }
+
   // Sort by severity (biggest win% drop / tactic swing first)
   allMistakes.sort((a, b) => b.wpDrop - a.wpDrop);
   // Discard games with zero positions (no mistakes and no tactics)
@@ -6065,6 +6114,7 @@ function applyOpeningFilterFromBoard() {
 
 function filterMakeMove(from, to, animate) {
   if (!filterChess) return null;
+  window._scoreboardShowAll = false;
   const move = filterChess.move({ from, to, promotion: 'q' });
   if (!move) return null;
 
@@ -6082,6 +6132,7 @@ function filterMakeMove(from, to, animate) {
 
 function filterUndoMove() {
   if (!filterChess || filterMoveIdx <= 0) return;
+  window._scoreboardShowAll = false;
   filterMoveIdx--;
   filterChess.load(filterMoveHistory[filterMoveIdx]);
   boardObj.position(filterChess.fen());
@@ -6091,6 +6142,7 @@ function filterUndoMove() {
 
 function filterRedoMove() {
   if (!filterChess || filterMoveIdx >= filterMoveHistory.length - 1) return;
+  window._scoreboardShowAll = false;
   filterMoveIdx++;
   filterChess.load(filterMoveHistory[filterMoveIdx]);
   boardObj.position(filterChess.fen());
@@ -6117,6 +6169,7 @@ function filterFlipBoard() {
 
 function filterReset() {
   if (!filterChess) return;
+  window._scoreboardShowAll = false;
   filterChess.reset();
   filterMoveHistory = [filterChess.fen()];
   filterMoveIdx = 0;
@@ -6255,32 +6308,41 @@ function replayFilterMoveSans() {
   return result;
 }
 
+// Look up the most common opening name for a position from the user's games
+function lookupOpeningName(fen) {
+  if (!gameFenIndex) return '';
+  const key = fenPositionKey(fen);
+  const nameCount = {};
+  for (const game of allGames) {
+    const fens = gameFenIndex.get(game.id);
+    if (fens && fens.has(key) && game.opening?.name) {
+      nameCount[game.opening.name] = (nameCount[game.opening.name] || 0) + 1;
+    }
+  }
+  let best = '', maxC = 0;
+  for (const [name, c] of Object.entries(nameCount)) {
+    if (c > maxC) { maxC = c; best = name; }
+  }
+  return best;
+}
+
 // Render the opening line display in the left panel
 function renderOpeningLineDisplay(moveSans) {
   const el = document.getElementById('openingLineDisplay');
   if (!el) return;
   if (moveSans.length === 0) {
-    el.innerHTML = '<div class="opening-name">Starting position</div>';
+    let startHtml = '<div class="opening-name">Starting position</div>';
+    if (filterChess) {
+      const posKey = fenPositionKey(filterChess.fen());
+      const scores = gistData?.practiceScoreboard?.[posKey];
+      if (scores && scores.length > 0) startHtml += buildPracticeScoreboardHtml(scores);
+    }
+    el.innerHTML = startHtml;
     return;
   }
 
   // Find opening name from any matching game
-  let openingName = '';
-  if (filterChess && gameFenIndex) {
-    const key = fenPositionKey(filterChess.fen());
-    const nameCount = {};
-    for (const game of allGames) {
-      const fens = gameFenIndex.get(game.id);
-      if (fens && fens.has(key) && game.opening?.name) {
-        nameCount[game.opening.name] = (nameCount[game.opening.name] || 0) + 1;
-      }
-    }
-    // Pick the most common opening name
-    let maxC = 0;
-    for (const [name, c] of Object.entries(nameCount)) {
-      if (c > maxC) { maxC = c; openingName = name; }
-    }
-  }
+  const openingName = filterChess ? lookupOpeningName(filterChess.fen()) : '';
 
   let html = '';
   if (openingName) html += `<div class="opening-name">${escapeHtml(openingName)}</div>`;
@@ -6301,11 +6363,62 @@ function renderOpeningLineDisplay(moveSans) {
     }
   }
   el.innerHTML = html;
+
+  // Render practice scoreboard for this position
+  const posKey = filterChess ? fenPositionKey(filterChess.fen()) : '';
+  const scores = gistData?.practiceScoreboard?.[posKey];
+  if (scores && scores.length > 0) {
+    const sbDiv = document.createElement('div');
+    sbDiv.innerHTML = buildPracticeScoreboardHtml(scores);
+    el.appendChild(sbDiv.firstElementChild);
+  }
+}
+
+function buildPracticeScoreboardHtml(scores) {
+  const showAll = window._scoreboardShowAll;
+  const display = showAll ? scores : scores.slice(-5);
+  const wins = display.filter(s => s.result === 'win').length;
+  const draws = display.filter(s => s.result === 'draw').length;
+  const losses = display.filter(s => s.result === 'loss').length;
+  const total = display.length;
+
+  // W/D/L bar
+  const wPct = total ? (wins / total * 100) : 0;
+  const dPct = total ? (draws / total * 100) : 0;
+  const lPct = total ? (losses / total * 100) : 0;
+
+  const barHtml = total > 0 ? `
+    <div style="display:flex;height:6px;border-radius:3px;overflow:hidden;margin-top:4px;width:100%;">
+      ${wPct > 0 ? `<div style="width:${wPct}%;background:#4caf50;" title="${wins} win${wins!==1?'s':''}"></div>` : ''}
+      ${dPct > 0 ? `<div style="width:${dPct}%;background:#9e9e9e;" title="${draws} draw${draws!==1?'s':''}"></div>` : ''}
+      ${lPct > 0 ? `<div style="width:${lPct}%;background:#f44336;" title="${losses} loss${losses!==1?'es':''}"></div>` : ''}
+    </div>` : '';
+
+  const countHtml = `<span style="color:#4caf50;">+${wins}</span> <span style="color:#9e9e9e;">=${draws}</span> <span style="color:#f44336;">−${losses}</span>`;
+
+  let filterLabel = '';
+  if (scores.length > 5) {
+    if (!showAll) {
+      filterLabel = `<span style="cursor:pointer;text-decoration:underline;" onclick="window._scoreboardShowAll=true;applyOpeningFilterFromBoard()">all (${scores.length})</span>`;
+    } else {
+      filterLabel = `<span style="cursor:pointer;text-decoration:underline;" onclick="window._scoreboardShowAll=false;applyOpeningFilterFromBoard()">last 5</span>`;
+    }
+  }
+
+  return `
+    <div style="margin-top:8px;padding:8px 0;border-top:1px solid var(--border);font-size:11px;color:var(--text-muted);">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <span style="font-weight:600;">Practice ${countHtml}</span>
+        ${filterLabel}
+      </div>
+      ${barHtml}
+    </div>`;
 }
 
 // Navigate to a specific half-move in the filter line
 function navigateFilterLine(targetIdx) {
   if (!filterChess || targetIdx < 0 || targetIdx >= filterMoveHistory.length) return;
+  window._scoreboardShowAll = false;
   filterMoveIdx = targetIdx;
   filterChess.load(filterMoveHistory[filterMoveIdx]);
   boardObj.position(filterChess.fen());
@@ -6497,6 +6610,7 @@ function escapeHtml(str) {
 
 function applyFilters() {
   filteredMistakes = allMistakes.filter(m => {
+    const isPractice = m.gameId?.startsWith('_practice');
     if (filters.color.size < 2 && !filters.color.has(m.playerColor)) return false;
     if (filters.severity.size < 2 && m.type !== 'tactic' && m.type !== 'advantage') {
       const isBlunder = m.wpDrop >= 15;
@@ -6507,21 +6621,23 @@ function applyFilters() {
       const itemType = m.type || 'mistake';
       if (!filters.type.has(itemType)) return false;
     }
-    if (filters.platform.size < 2) {
-      const isChesscom = m.game?._source === 'chesscom' || m.gameId.startsWith('chesscom_');
-      if (isChesscom && !filters.platform.has('chesscom')) return false;
-      if (!isChesscom && !filters.platform.has('lichess')) return false;
+    if (!isPractice) {
+      if (filters.platform.size < 2) {
+        const isChesscom = m.game?._source === 'chesscom' || m.gameId.startsWith('chesscom_');
+        if (isChesscom && !filters.platform.has('chesscom')) return false;
+        if (!isChesscom && !filters.platform.has('lichess')) return false;
+      }
+      if (filters.speed.size < 4) {
+        const speed = m.game?.speed || '';
+        if (!filters.speed.has(speed)) return false;
+      }
+      if (filters.rated.size < 2) {
+        const isRated = m.game?.rated !== false;
+        if (isRated && !filters.rated.has('rated')) return false;
+        if (!isRated && !filters.rated.has('casual')) return false;
+      }
+      if (openingFilterFen && !gameMatchesOpeningFen(m.gameId)) return false;
     }
-    if (filters.speed.size < 4) {
-      const speed = m.game?.speed || '';
-      if (!filters.speed.has(speed)) return false;
-    }
-    if (filters.rated.size < 2) {
-      const isRated = m.game?.rated !== false;
-      if (isRated && !filters.rated.has('rated')) return false;
-      if (!isRated && !filters.rated.has('casual')) return false;
-    }
-    if (openingFilterFen && !gameMatchesOpeningFen(m.gameId)) return false;
     if (hideTimeTrouble && m.type === 'mistake' && m.timeTrouble) return false;
     return true;
   });
@@ -6808,6 +6924,7 @@ function renderReviewList() {
     item.onclick = () => loadPosition(globalIdx);
 
     const opening = m.game?.opening?.name || 'Unknown';
+    const isPracticeMistake = m.gameId?.startsWith('_practice');
     const isTactic = m.type === 'tactic';
     const isAdvantage = m.type === 'advantage';
     const lossClass = (isTactic || isAdvantage) ? '' : (m.wpDrop >= 15 ? 'loss-blunder' : 'loss-mistake');
@@ -6836,7 +6953,7 @@ function renderReviewList() {
         <span>${moveLabel}${hasNote ? ' <span style="font-size:11px" title="Has note">📝</span>' : ''}</span>
         ${statusText}
       </div>
-      <div class="review-item-opening">${escHtml(opening)}</div>
+      <div class="review-item-opening">${isPracticeMistake ? '<span style="color:var(--blue);font-weight:600;">Practice</span> · ' : ''}${escHtml(opening)}</div>
       <div class="review-srs-info">
         ${!isNew ? `<span>reps: ${card.reps}</span><span>lapses: ${card.lapses}</span><span>stab: ${Math.round(card.stability)}d</span>` : '<span>First time</span>'}
       </div>
@@ -7512,8 +7629,12 @@ function loadPosition(globalIdx) {
     const clockInfo = m.clockRemaining != null
       ? `<div style="font-size:11px;margin-top:2px;color:var(--text-muted)">⏱ ${formatClockTime(m.clockRemaining)} remaining${m.moveTime != null ? ` · ${m.moveTime}s spent` : ''}${m.timeTrouble ? ' — <span style="color:var(--yellow)">time trouble</span>' : ''}</div>`
       : '';
+    const practiceTag = m.gameId?.startsWith('_practice')
+      ? '<div style="font-size:10px;color:var(--blue);font-weight:600;margin-bottom:2px;">PRACTICE</div>'
+      : '';
     document.getElementById('posInfoContent').innerHTML = `
       <div style="font-size:13px;line-height:1.7">
+        ${practiceTag}
         <div>Move <code class="mono">${m.moveNumber}${m.playerColor==='white'?'.':'…'}</code> — win% dropped <span style="color:var(--red);font-weight:600">−${m.wpDrop}%</span> <span style="color:var(--text-muted)">(${m.cpLoss}cp)</span></div>
         ${clockInfo}
         <div id="mistakeReveal">
@@ -8407,7 +8528,7 @@ async function evaluateMove(from, to, move) {
   clearHintHighlights();
 
   // ── Repertoire check during filter practice (ply < 20) ──
-  if (practiceContItem && repertoireTrie && repertoireTrie.size > 0 && currentSolveFen) {
+  if (practiceContItem && !practiceRepIgnored && repertoireTrie && repertoireTrie.size > 0 && currentSolveFen) {
     const fenParts = currentSolveFen.split(' ');
     const moveNum = parseInt(fenParts[5]) || 1;
     const ply = (moveNum - 1) * 2 + (fenParts[1] === 'b' ? 1 : 0);
@@ -8415,20 +8536,34 @@ async function evaluateMove(from, to, move) {
       const posKey = fenPositionKey(currentSolveFen);
       const playedUci = from + to + (move.promotion || '');
       if (repertoireTrie.has(posKey) && !trieMatchesMove(posKey, move.san, playedUci)) {
-        // Deviation from repertoire — undo and prompt retry
-        const repEntries = repertoireTrie.get(posKey);
-        const repMoves = repEntries.map(e => e.san).join(' or ');
+        // Deviation from repertoire — undo and let user think / use hint
         gameEngine.undo();
         boardObj.position(gameEngine.fen(), false);
         currentAttempts--;
         clearLastMoveHighlight();
+        clearHintHighlights();
+        hintLevel = 0;
+        hintMove = null;
+        // Show hint button so user can get the repertoire move
+        const hintBtn = document.getElementById('btnHint');
+        if (hintBtn) { hintBtn.classList.remove('hidden'); hintBtn.disabled = false; hintBtn.textContent = '💡 Hint'; hintBtn.style.borderColor = ''; hintBtn.style.color = ''; }
         showColorFeedback('var(--yellow)', 'rgba(230,161,23,0.08)',
           '📖 Deviated from repertoire!',
-          `You played <code class="mono">${escHtml(move.san)}</code>, but your repertoire says <code class="mono">${escHtml(repMoves)}</code>.` +
-          `<div style="margin-top:6px;"><button class="btn btn-ghost btn-sm" style="border-color:var(--accent);color:var(--accent);" onclick="document.getElementById('feedbackContainer').innerHTML=''">↺ Try again</button></div>`);
+          `<code class="mono">${escHtml(move.san)}</code> is not in your repertoire.` +
+          `<div style="margin-top:6px;"><button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="ignorePracticeRepertoire()">Ignore Repertoire</button></div>`);
         return;
       }
     }
+  }
+
+  // Clear any stale repertoire deviation feedback from a previous attempt
+  if (practiceContItem && container.querySelector('.feedback-box')) {
+    container.innerHTML = '';
+    // Re-hide hint button (was shown during deviation)
+    const hintBtnClear = document.getElementById('btnHint');
+    if (hintBtnClear) hintBtnClear.classList.add('hidden');
+    hintLevel = 0;
+    hintMove = null;
   }
 
   sfLog('evaluateMove', `START move=${move.san} (${from}→${to}) mistakeIdx=${mistakeIdx} fen=${m.fenBefore.split(' ').slice(0,2).join(' ')}… session=${preAnalysisSession}`);
@@ -10005,29 +10140,26 @@ function onContSettingsExplorerToggle(checked) {
   if (body) body.classList.toggle('cont-settings-disabled', !checked);
 }
 
-function applyContSettingsAndStart() {
-  // Read all values from the panel
+function hasContSettings() {
+  return !!localStorage.getItem('mistakelab_cont_settings');
+}
+
+function readContSettingsFromPanel() {
   const toggleEl = document.getElementById('csExplorerToggle');
   if (toggleEl && !toggleEl.disabled) {
     explorerEnabled = toggleEl.checked;
   }
-
   explorerRatings = [];
   document.querySelectorAll('#csRatingChips input:checked').forEach(cb => {
     explorerRatings.push(parseInt(cb.value));
   });
-
   explorerSpeeds = [];
   document.querySelectorAll('#csSpeedChips input:checked').forEach(cb => {
     explorerSpeeds.push(cb.value);
   });
-
   const minGamesInput = document.getElementById('csMinGames');
   if (minGamesInput) explorerMinGames = Math.max(1, parseInt(minGamesInput.value) || 5);
-
   explorerNotifyMaia = document.getElementById('csNotifyMaia')?.checked ?? true;
-
-  // Read Maia sliders
   const eloSlider = document.getElementById('csMaiaElo');
   if (eloSlider) {
     maiaElo = parseInt(eloSlider.value);
@@ -10044,13 +10176,13 @@ function applyContSettingsAndStart() {
     const mainPrecVal = document.getElementById('maiaPrecisionValue');
     if (mainPrecVal) mainPrecVal.textContent = maiaPrecision.toFixed(2);
   }
-
   saveContSettings();
+}
 
-  // Remove the settings panel
+function applyContSettingsAndStart() {
+  readContSettingsFromPanel();
   const panel = document.getElementById('contSettingsPanel');
   if (panel) panel.remove();
-
   startContinuationMode();
 }
 
@@ -10065,7 +10197,14 @@ function cancelContSettings() {
   }
 }
 
-function showContinuationSettings() {
+function showContinuationSettings(forceSettings) {
+  // Quick start if settings already configured (unless ⚙ pressed)
+  if (!forceSettings && hasContSettings()) {
+    const opts = document.getElementById('continuationOptions');
+    if (opts) opts.remove();
+    startContinuationMode();
+    return;
+  }
   // Remove existing continuation options
   const opts = document.getElementById('continuationOptions');
   if (opts) opts.remove();
@@ -10082,13 +10221,17 @@ function showContinuationSettings() {
 }
 
 // ─── Filter Continuation (practice from opening explorer) ───
-function startFilterCont() {
+function startFilterCont(forceSettings) {
   if (!filterChess) return;
+  // Quick start if settings already configured (unless ⚙ pressed)
+  if (!forceSettings && hasContSettings()) {
+    launchFilterPractice();
+    return;
+  }
   // Replace the filter actions area with the continuation settings panel
   const actionsDiv = document.querySelector('.opening-filter-panel .filter-actions');
   if (!actionsDiv) return;
   const settingsHtml = buildContSettingsHtml();
-  // Swap the Start button handler to our filter-specific one
   const patched = settingsHtml
     .replace('onclick="applyContSettingsAndStart()"', 'onclick="applyFilterContAndStart()"')
     .replace('onclick="cancelContSettings()"', 'onclick="cancelFilterCont()"');
@@ -10096,7 +10239,6 @@ function startFilterCont() {
 }
 
 function cancelFilterCont() {
-  // Restore the original filter-actions
   const wrap = document.getElementById('filterContSettingsWrap');
   if (wrap) {
     wrap.outerHTML = `
@@ -10106,44 +10248,31 @@ function cancelFilterCont() {
         <button class="btn btn-ghost btn-sm" onclick="exitOpeningFilter(false)" style="border-color:var(--accent);color:var(--accent)">✓ Done</button>
         <button class="btn btn-ghost btn-sm" onclick="clearOpeningFilter()">✕ Clear</button>
         <button class="btn btn-primary btn-sm" onclick="startFilterCont()" id="btnFilterPlay">▶ Play</button>
+        <button class="btn btn-ghost btn-sm" onclick="startFilterCont(true)" style="font-size:10px;padding:4px 6px;" title="Continuation settings">⚙</button>
       </div>`;
   }
 }
 
 function applyFilterContAndStart() {
-  // Read settings from the panel (same as applyContSettingsAndStart)
-  const toggleEl = document.getElementById('csExplorerToggle');
-  if (toggleEl && !toggleEl.disabled) {
-    explorerEnabled = toggleEl.checked;
+  readContSettingsFromPanel();
+  // Remove the settings wrapper
+  const wrap = document.getElementById('filterContSettingsWrap');
+  if (wrap) {
+    wrap.outerHTML = `
+      <div class="filter-actions">
+        <button class="btn btn-ghost btn-sm" onclick="filterFlipBoard()">⇅ Flip</button>
+        <button class="btn btn-ghost btn-sm" onclick="filterReset()">↺ Reset</button>
+        <button class="btn btn-ghost btn-sm" onclick="exitOpeningFilter(false)" style="border-color:var(--accent);color:var(--accent)">✓ Done</button>
+        <button class="btn btn-ghost btn-sm" onclick="clearOpeningFilter()">✕ Clear</button>
+        <button class="btn btn-primary btn-sm" onclick="startFilterCont()" id="btnFilterPlay">▶ Play</button>
+        <button class="btn btn-ghost btn-sm" onclick="startFilterCont(true)" style="font-size:10px;padding:4px 6px;" title="Continuation settings">⚙</button>
+      </div>`;
   }
-  explorerRatings = [];
-  document.querySelectorAll('#csRatingChips input:checked').forEach(cb => {
-    explorerRatings.push(parseInt(cb.value));
-  });
-  explorerSpeeds = [];
-  document.querySelectorAll('#csSpeedChips input:checked').forEach(cb => {
-    explorerSpeeds.push(cb.value);
-  });
-  const minGamesInput = document.getElementById('csMinGames');
-  if (minGamesInput) explorerMinGames = Math.max(1, parseInt(minGamesInput.value) || 5);
-  explorerNotifyMaia = document.getElementById('csNotifyMaia')?.checked ?? true;
-  const eloSlider = document.getElementById('csMaiaElo');
-  if (eloSlider) {
-    maiaElo = parseInt(eloSlider.value);
-    const mainEloSlider = document.getElementById('maiaEloSlider');
-    if (mainEloSlider) mainEloSlider.value = maiaElo;
-    const mainEloVal = document.getElementById('maiaEloValue');
-    if (mainEloVal) mainEloVal.textContent = maiaElo;
-  }
-  const precSlider = document.getElementById('csMaiaPrecision');
-  if (precSlider) {
-    maiaPrecision = parseFloat(precSlider.value);
-    const mainPrecSlider = document.getElementById('maiaPrecisionSlider');
-    if (mainPrecSlider) mainPrecSlider.value = maiaPrecision;
-    const mainPrecVal = document.getElementById('maiaPrecisionValue');
-    if (mainPrecVal) mainPrecVal.textContent = maiaPrecision.toFixed(2);
-  }
-  saveContSettings();
+  launchFilterPractice();
+}
+
+function launchFilterPractice() {
+  if (!filterChess) return;
 
   // Capture state from the filter before exiting
   const fen = filterChess.fen();
@@ -10152,6 +10281,7 @@ function applyFilterContAndStart() {
   const moveNum = parseInt(fenParts[5]) || 1;
 
   // Create synthetic practice item
+  const practiceOpening = lookupOpeningName(fen) || 'Practice';
   practiceContItem = {
     type: 'practice',
     playerColor: orientation,
@@ -10164,7 +10294,11 @@ function applyFilterContAndStart() {
     bestMove: null,
     bestMoveSan: null,
     bestCp: 0,
+    game: { id: '_practice', opening: { name: practiceOpening }, speed: 'practice', _source: 'practice', rated: false, players: {} },
   };
+  practiceRepIgnored = false;
+  explorerApiNotified = false;
+  lastOpponentSource = '';
 
   // Lightweight exit from opening filter — don't call exitOpeningFilter() since it
   // runs applyFilters() which replaces filteredMistakes and wipes our practice item
@@ -10235,14 +10369,126 @@ function cleanupPracticeCont() {
   const idx = filteredMistakes.indexOf(practiceContItem);
   if (idx >= 0) filteredMistakes.splice(idx, 1);
   practiceContItem = null;
+  practiceRepIgnored = false;
+  explorerApiNotified = false;
   currentMistakeIdx = -1;
+}
+
+function recordPracticeResult(result, finalCpWhite) {
+  if (!practiceContItem) return;
+  if (!gistData) gistData = { positions: {}, notes: {}, version: 1 };
+  if (!gistData.practiceScoreboard) gistData.practiceScoreboard = {};
+  const posKey = fenPositionKey(practiceContItem.fenBefore);
+  if (!gistData.practiceScoreboard[posKey]) gistData.practiceScoreboard[posKey] = [];
+  const moveCount = contLine ? contLine.moves.filter(mv => mv.isUser).length : 0;
+  gistData.practiceScoreboard[posKey].push({
+    ts: Date.now(),
+    result, // 'win' | 'draw' | 'loss'
+    finalCp: finalCpWhite != null ? Math.round(finalCpWhite) : null,
+    moves: moveCount,
+  });
+  debounceSyncToGist();
+  console.log(`[Practice] Recorded ${result} at ${posKey.split(' ').slice(0,1).join('')}… (${moveCount} moves)`);
+}
+
+function evalToResult(cpWhite) {
+  if (cpWhite == null) return 'draw';
+  const m = filteredMistakes[currentMistakeIdx];
+  const userCp = (m?.playerColor === 'black') ? -cpWhite : cpWhite;
+  if (userCp >= 100) return 'win';
+  if (userCp <= -100) return 'loss';
+  return 'draw';
 }
 
 function practiceEndBtns() {
   if (!practiceContItem) return '';
-  return '<div style="margin-top:8px;display:flex;gap:8px;">' +
+  return '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">' +
+    '<button class="btn btn-ghost btn-sm" style="font-size:12px;" onclick="retryPosition()">▶ Play again</button>' +
     '<button class="btn btn-ghost btn-sm" style="font-size:12px;" onclick="enterOpeningFilter()">↩ Back to openings</button>' +
     '</div>';
+}
+
+function ignorePracticeRepertoire() {
+  practiceRepIgnored = true;
+  document.getElementById('feedbackContainer').innerHTML = '';
+  // Hide hint button again (silent continuation doesn't show hints)
+  const hintBtn = document.getElementById('btnHint');
+  if (hintBtn) hintBtn.classList.add('hidden');
+  clearHintHighlights();
+  hintLevel = 0;
+  hintMove = null;
+}
+
+function savePracticeMistake(moveIdx) {
+  if (!contLine || !contLine.moves[moveIdx]) return;
+  const mv = contLine.moves[moveIdx];
+  if (!mv.isUser || !mv.wpDrop || mv.wpDrop <= 2) return;
+
+  const fenBefore = moveIdx > 0 ? contLine.moves[moveIdx - 1].fen : contLine.baseFen;
+  const fenParts = fenBefore.split(' ');
+  const moveNum = parseInt(fenParts[5]) || 1;
+  const ply = (moveNum - 1) * 2 + (fenParts[1] === 'b' ? 1 : 0);
+
+  // Determine player color from the practice item or the loaded mistake
+  const playerColor = practiceContItem
+    ? practiceContItem.playerColor
+    : (filteredMistakes[currentMistakeIdx]?.playerColor || 'white');
+
+  // Dedup: check if already saved (same fenBefore + same move)
+  if (!gistData) gistData = { positions: {}, notes: {}, version: 1 };
+  if (!gistData.practiceMistakes) gistData.practiceMistakes = [];
+  const already = gistData.practiceMistakes.some(pm =>
+    pm.fenBefore === fenBefore && pm.sanPlayed === mv.san
+  );
+  if (already) {
+    const btn = document.getElementById(`btnSaveMistake${moveIdx}`);
+    if (btn) { btn.textContent = '✓ Already saved'; btn.disabled = true; }
+    return;
+  }
+
+  const gameId = `_practice_${Date.now()}`;
+  const mistake = {
+    type: 'mistake',
+    gameId,
+    movePly: ply,
+    fenBefore,
+    sanPlayed: mv.san,
+    userUci: mv.uci,
+    cpLoss: Math.round(mv.cpLoss || 0),
+    cpBefore: Math.round(mv.bestCp || 0),
+    cpAfter: Math.round((mv.bestCp || 0) - (mv.cpLoss || 0)),
+    wpDrop: mv.wpDrop,
+    playerColor,
+    moveNumber: moveNum,
+    bestEval: { eval: mv.bestCp || 0 },
+    _opening: lookupOpeningName(fenBefore) || filteredMistakes[currentMistakeIdx]?.game?.opening?.name || 'Practice',
+    _createdAt: Date.now(),
+  };
+
+  // Save to Gist data
+  gistData.practiceMistakes.push(mistake);
+  debounceSyncToGist();
+
+  // Add to live lists so it appears immediately in review
+  const liveEntry = {
+    ...mistake,
+    game: {
+      id: gameId,
+      speed: 'practice',
+      opening: { name: mistake._opening },
+      createdAt: mistake._createdAt,
+      _source: 'practice',
+      rated: false,
+      players: {},
+    },
+  };
+  allMistakes.push(liveEntry);
+  filteredMistakes.push(liveEntry); // Don't applyFilters() — it would drop the active practiceContItem
+
+  // Update button to show saved
+  const btn = document.getElementById(`btnSaveMistake${moveIdx}`);
+  if (btn) { btn.textContent = '✓ Saved'; btn.disabled = true; }
+  console.log(`[Practice] Saved mistake: ${mv.san} at ${fenBefore.split(' ').slice(0, 2).join(' ')}…`);
 }
 
 // ─── Continuation Practice ───
@@ -10257,6 +10503,7 @@ function showContinuationOptions(m, move, contUci) {
   div.style.cssText = 'display:flex;gap:8px;animation:fadeSlideIn 0.3s ease;';
   div.innerHTML = `
     <button class="btn btn-primary btn-sm" onclick="showContinuationSettings()" style="font-size:12px;">▶ Play Continuation</button>
+    <button class="btn btn-ghost btn-sm" onclick="showContinuationSettings(true)" style="font-size:10px;padding:4px 6px;" title="Continuation settings">⚙</button>
     <button class="btn btn-ghost btn-sm" onclick="showDeferredEngineLine()" style="font-size:12px;">Show engine line</button>
   `;
   // Insert after the first feedback box
@@ -10466,6 +10713,7 @@ function buildContLineReviewData() {
 
 function stopAndReviewContinuation() {
   if (!continuationMode && !silentContinuation) return;
+  recordPracticeResult(evalToResult(afterMoveCpWhite), afterMoveCpWhite);
   continuationMode = false;
   silentContinuation = false;
   hideMaiaControls();
@@ -10707,6 +10955,17 @@ function showReviewKeyMoveInfo(moveIdx) {
   const cls = MOVE_CLASSIFICATION[mv.classification] || {};
   const sym = mv.classification === 'good' ? '✓' : (mv.classification === 'best' ? '' : cls.symbol || '');
 
+  // Check if this mistake was already saved
+  const saveFenBefore = moveIdx > 0 ? contLine.moves[moveIdx - 1].fen : contLine.baseFen;
+  const alreadySaved = gistData?.practiceMistakes?.some(pm =>
+    pm.fenBefore === saveFenBefore && pm.sanPlayed === mv.san
+  );
+  const saveBtn = (mv.isUser && mv.wpDrop > 2)
+    ? (alreadySaved
+      ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" disabled>✓ Saved</button>`
+      : `<button class="btn btn-ghost btn-sm" style="font-size:11px;" id="btnSaveMistake${moveIdx}" onclick="savePracticeMistake(${moveIdx})">💾 Save</button>`)
+    : '';
+
   const container = document.getElementById('feedbackContainer');
   const navHtml = `
     <div style="display:flex;gap:8px;margin-top:10px;">
@@ -10728,6 +10987,7 @@ function showReviewKeyMoveInfo(moveIdx) {
           ${mv.bestMoveUci ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewBestArrow(${moveIdx})">Show best</button>` : ''}
           ${mv.bestMoveUci ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewBestLine(${moveIdx})">Show line</button>` : ''}
           <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewRefutation(${moveIdx})">Show refutation</button>
+          ${saveBtn}
         </div>
         ${navHtml}
       </div>
@@ -11264,8 +11524,10 @@ async function advanceContinuation(contUci) {
       : '';
     const endBtns = reviewBtn + practiceEndBtns();
     if (gameEngine.in_checkmate()) {
+      recordPracticeResult('win', null);
       showFeedback('correct', 'Checkmate!', 'You delivered checkmate!' + endBtns);
     } else if (gameEngine.in_draw()) {
+      recordPracticeResult('draw', null);
       showFeedback('info', 'Draw', 'The position is drawn.' + endBtns);
     }
     if (wasSilent) renderContLine(); // show classification symbols
@@ -11278,6 +11540,7 @@ async function advanceContinuation(contUci) {
   let opponentUci;
   let moveSource = '';
   let switchedToMaia = false;
+  let explorerApiFailed = false;
 
   // Try Lichess Explorer database first
   if (explorerEnabled) {
@@ -11290,6 +11553,9 @@ async function advanceContinuation(contUci) {
     } else if (explorerData) {
       // Explorer responded but no moves passed the filter — genuine exhaustion
       switchedToMaia = true;
+    } else {
+      // Explorer returned null — API failure, timeout, or no auth
+      explorerApiFailed = true;
     }
   }
 
@@ -11312,6 +11578,7 @@ async function advanceContinuation(contUci) {
       stopPreAnalysis();
       const result = await sfAnalyze(gameEngine.fen(), 16, 1);
       if (!result || !result.bestMove) {
+        recordPracticeResult(evalToResult(afterMoveCpWhite), afterMoveCpWhite);
         continuationMode = false;
         silentContinuation = false;
         hideMaiaControls();
@@ -11326,9 +11593,20 @@ async function advanceContinuation(contUci) {
     }
   }
 
-  const fromSq = opponentUci.substring(0, 2);
-  const toSq = opponentUci.substring(2, 4);
+  let fromSq = opponentUci.substring(0, 2);
+  let toSq = opponentUci.substring(2, 4);
   const promo = opponentUci.length > 4 ? opponentUci[4] : undefined;
+
+  // Remap king-captures-rook UCI (e1h1, e1a1, e8h8, e8a8) to king-destination format
+  // that chess.js expects (e1g1, e1c1, e8g8, e8c8)
+  const castlingRemap = { 'e1h1': 'g1', 'e1a1': 'c1', 'e8h8': 'g8', 'e8a8': 'c8' };
+  const remappedTo = castlingRemap[fromSq + toSq];
+  if (remappedTo) {
+    const piece = gameEngine.get(fromSq);
+    if (piece && piece.type === 'k') {
+      toSq = remappedTo;
+    }
+  }
 
   let result = gameEngine.move({ from: fromSq, to: toSq, promotion: promo });
   // Fallback: search legal moves for matching from/to (handles castling edge cases in chess.js)
@@ -11348,6 +11626,7 @@ async function advanceContinuation(contUci) {
     else console.warn(`[advanceContinuation] Move failed: ${opponentUci} in FEN: ${gameEngine.fen()}`);
   }
   if (!result) {
+    recordPracticeResult(evalToResult(afterMoveCpWhite), afterMoveCpWhite);
     continuationMode = false;
     silentContinuation = false;
     hideMaiaControls();
@@ -11365,6 +11644,7 @@ async function advanceContinuation(contUci) {
 
   // Record opponent's move in continuation line
   contLineSubtitle = `Opponent played ${escHtml(result.san)} (${moveSource})`;
+  lastOpponentSource = moveSource;
   const oppEvalData = silentContinuation && lastContUserAfterCp != null ? { _prevUserAfterCp: lastContUserAfterCp } : undefined;
   addContLineMove(result.san, opponentUci, gameEngine.fen(), false, oppEvalData);
 
@@ -11388,8 +11668,10 @@ async function advanceContinuation(contUci) {
       : '';
     const endBtns2 = reviewBtn2 + practiceEndBtns();
     if (gameEngine.in_checkmate()) {
+      recordPracticeResult('loss', null);
       showFeedback('wrong', 'Checkmated', 'The opponent delivered checkmate.' + endBtns2);
     } else if (gameEngine.in_draw()) {
+      recordPracticeResult('draw', null);
       showFeedback('info', 'Draw', 'The position is drawn.' + endBtns2);
     }
     if (wasSilent2) renderContLine(); // show classification symbols
@@ -11404,6 +11686,7 @@ async function advanceContinuation(contUci) {
   const userTurn = (m.playerColor === 'white' && gameEngine.turn() === 'w') ||
                    (m.playerColor === 'black' && gameEngine.turn() === 'b');
   if (!userTurn) {
+    recordPracticeResult(evalToResult(afterMoveCpWhite), afterMoveCpWhite);
     const wasSilent3 = silentContinuation;
     continuationMode = false;
     silentContinuation = false;
@@ -11440,11 +11723,21 @@ async function advanceContinuation(contUci) {
     const stopReviewBtn = (!isAdv && moveCount >= SILENT_REVIEW_MIN_MOVES)
       ? `<div style="margin-top:6px;"><button class="btn btn-ghost btn-sm" style="font-size:11px;border-color:var(--accent);color:var(--accent);" onclick="stopAndReviewContinuation()">📋 Stop & Review</button></div>`
       : '';
+    const sourceIcon = lastOpponentSource.startsWith('DB') ? '📊' : lastOpponentSource === 'Maia' ? '🧠' : '';
+    const sourceTag = lastOpponentSource && sourceIcon
+      ? `<span style="font-size:10px;color:var(--text-muted);margin-left:6px;">${sourceIcon} ${escHtml(lastOpponentSource)}</span>` : '';
+    let explorerNotice = '';
+    if (switchedToMaia && explorerNotifyMaia) {
+      explorerNotice = '<div style="font-size:11px;color:var(--text-muted);">📊→🧠 Switched to Maia</div>';
+    } else if (explorerApiFailed && !explorerApiNotified) {
+      explorerApiNotified = true;
+      explorerNotice = '<div style="font-size:11px;color:var(--text-warning,#e6a117);">📊 Database unavailable — using Maia</div>';
+    }
     document.getElementById('posInfoContent').innerHTML = `
       <div style="font-size:13px;line-height:1.7">
         ${headerHtml}
-        <div>Move ${moveCount + 1} · Your turn</div>
-        ${switchedToMaia && explorerNotifyMaia ? '<div style="font-size:11px;color:var(--text-muted);">📊→🧠 Switched to Maia</div>' : ''}
+        <div>Move ${moveCount + 1} · Your turn${sourceTag}</div>
+        ${explorerNotice}
         <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
         ${stopReviewBtn}
       </div>
@@ -11593,6 +11886,8 @@ function retryPosition() {
   // For practice items, restart the continuation from the same position
   if (m.type === 'practice') {
     currentAttempts = 0;
+    practiceRepIgnored = false;
+    explorerApiNotified = false;
     continuationMode = false;
     silentContinuation = false;
     contLine = null;
