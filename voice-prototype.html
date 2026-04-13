@@ -313,6 +313,13 @@
           <option value="black">Black</option>
         </select>
       </div>
+      <div class="setting-row">
+        <label>Match engine</label>
+        <select id="engineSelect">
+          <option value="v2">V2 — fuzzy phrasings</option>
+          <option value="v1">V1 — direct parse</option>
+        </select>
+      </div>
     </div>
 
     <!-- Move log -->
@@ -357,13 +364,13 @@
 
   // Every recognized word maps to a value token. Unknown words are stripped.
   const LEX = {
-    // Pieces
-    'knight': 'N', 'night': 'N', 'horse': 'N', 'nite': 'N', 'ninth': 'N', 'nice': 'N', 'knife': 'N',
-    'bishop': 'B', 'bitch': 'B', 'tissue': 'B',
-    'rook': 'R', 'brooke': 'R', 'brook': 'R', 'rock': 'R', 'rookie': 'R', 'truck': 'R', 'took': 'R', 'luke': 'R',
-    'queen': 'Q', 'cream': 'Q', 'clean': 'Q',
-    'king': 'K', 'keen': 'K', 'thing': 'K',
-    'pawn': 'P', 'pond': 'P', 'palm': 'P',
+    // Pieces (including plurals — speech recognizers often return these)
+    'knight': 'N', 'knights': 'N', 'night': 'N', 'nights': 'N', 'horse': 'N', 'nite': 'N', 'ninth': 'N', 'nice': 'N', 'knife': 'N', 'knit': 'N',
+    'bishop': 'B', 'bishops': 'B', 'bitch': 'B', 'tissue': 'B',
+    'rook': 'R', 'rooks': 'R', 'brooke': 'R', 'brook': 'R', 'rock': 'R', 'rookie': 'R', 'truck': 'R', 'took': 'R', 'luke': 'R',
+    'queen': 'Q', 'queens': 'Q', 'cream': 'Q', 'clean': 'Q',
+    'king': 'K', 'kings': 'K', 'keen': 'K', 'thing': 'K',
+    'pawn': 'P', 'pawns': 'P', 'pond': 'P', 'palm': 'P',
     // Files — bare letters
     'a': 'a', 'b': 'b', 'c': 'c', 'd': 'd', 'e': 'e', 'f': 'f', 'g': 'g', 'h': 'h',
     // Files — phonetic / NATO
@@ -418,11 +425,13 @@
 
     // Map words to value tokens, drop unknowns and _IGNORE
     const values = [];
+    const dropped = [];
     for (const w of words) {
       const v = LEX[w];
       if (v && v !== '_IGNORE') values.push(v);
-      // Unknown words silently dropped (noise from speech recognizer)
+      else if (!v) dropped.push(w);
     }
+    if (dropped.length > 0) logSystem(`Dropped: [${dropped.join(', ')}]`);
     return values;
   }
 
@@ -673,6 +682,109 @@
   }
 
   // ═══════════════════════════════════════════
+  //  V1 ENGINE — direct parse + filter (original)
+  // ═══════════════════════════════════════════
+
+  function matchMoveV1(heardValues, rawText) {
+    if (heardValues.length === 0) return null;
+
+    // Handle confirmation
+    if (pendingMove) {
+      if (heardValues.includes('YES')) return { type: 'confirm', value: true };
+      if (heardValues.includes('NO')) return { type: 'confirm', value: false };
+    }
+
+    // Castle
+    if (heardValues.includes('O-O-O')) {
+      const sans = game.moves();
+      if (sans.includes('O-O-O')) return { type: 'move', san: 'O-O-O' };
+    }
+    if (heardValues.includes('O-O') || heardValues.includes('O')) {
+      const sans = game.moves();
+      if (sans.includes('O-O')) return { type: 'move', san: 'O-O' };
+      const castles = sans.filter(s => s.startsWith('O-O'));
+      if (castles.length === 1) return { type: 'move', san: castles[0] };
+    }
+
+    // Extract structured parts from value tokens
+    let piece = null, files = [], ranks = [], hasCapture = false, promotion = null;
+    let expectPromo = false;
+
+    for (const v of heardValues) {
+      if (v === 'YES' || v === 'NO' || v === 'O' || v === 'O-O' || v === 'O-O-O') continue;
+      if (expectPromo && PIECES.has(v) && v !== 'P') { promotion = v; expectPromo = false; continue; }
+      if (v === '=') { expectPromo = true; continue; }
+      if (v === 'x') { hasCapture = true; continue; }
+      if (PIECES.has(v) && piece === null && files.length === 0 && ranks.length === 0) {
+        piece = (v === 'P') ? null : v;
+        continue;
+      }
+      if (FILES.has(v)) { files.push(v); continue; }
+      if (RANKS.has(v)) { ranks.push(v); continue; }
+    }
+
+    // Build target square
+    let toFile = null, toRank = null, fromFile = null, fromRank = null;
+    if (files.length >= 2 && ranks.length >= 2) {
+      fromFile = files[0]; fromRank = ranks[0]; toFile = files[1]; toRank = ranks[1];
+    } else if (files.length === 2 && ranks.length === 1) {
+      fromFile = files[0]; toFile = files[1]; toRank = ranks[0];
+    } else if (files.length === 1 && ranks.length === 2) {
+      fromRank = ranks[0]; toFile = files[0]; toRank = ranks[1];
+    } else if (files.length === 1 && ranks.length === 1) {
+      toFile = files[0]; toRank = ranks[0];
+    }
+
+    if (!toFile || !toRank) return null;
+
+    // Score legal moves
+    const legalMoves = game.moves({ verbose: true });
+    let candidates = [];
+
+    for (const m of legalMoves) {
+      const isPawn = (m.piece === 'p');
+      const mTo = m.to;
+      if (mTo[0] !== toFile || mTo[1] !== toRank) continue;
+
+      let score = 10;
+
+      if (piece) {
+        const mp = isPawn ? null : m.piece.toUpperCase();
+        if (mp === piece) score += 5;
+        else continue;
+      } else {
+        if (isPawn) score += 6; else score -= 3;
+      }
+
+      if (fromFile) {
+        if (m.from[0] === fromFile) score += 3; else score -= 2;
+      }
+      if (fromRank) {
+        if (m.from[1] === fromRank) score += 3; else score -= 2;
+      }
+      if (hasCapture && m.captured) score += 1;
+
+      if (promotion) {
+        const mp = m.san.match(/=([NBRQ])/);
+        if (mp && mp[1] === promotion) score += 4;
+        else if (mp) score -= 1;
+        else continue;
+      }
+
+      candidates.push({ san: m.san, score });
+    }
+
+    if (candidates.length === 0) return null;
+    candidates.sort((a, b) => b.score - a.score);
+    if (candidates.length === 1 || candidates[0].score > candidates[1].score) {
+      return { type: 'move', san: candidates[0].san };
+    }
+
+    logEntry('error', `V1 Ambiguous: ${candidates.map(c => `${c.san}:${c.score}`).join(', ')}`);
+    return null;
+  }
+
+  // ═══════════════════════════════════════════
   //  TEXT-TO-SPEECH
   // ═══════════════════════════════════════════
 
@@ -807,9 +919,13 @@
 
     if (values.length === 0) return;
 
-    const result = matchMove(values);
+    const engine = document.getElementById('engineSelect').value;
+    const result = engine === 'v1'
+      ? matchMoveV1(values, rawText)
+      : matchMove(values);
+
     if (!result) {
-      micStatus.innerHTML = `<span class="heard">"${rawText}"</span> — no match`;
+      micStatus.innerHTML = `<span class="heard">"${rawText}"</span> — no match (${engine})`;
       await speak("No matching move. Try again.");
       return;
     }
