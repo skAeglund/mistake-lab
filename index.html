@@ -1398,7 +1398,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix empty opening filter: fallback rebuild positionMoveIndex when cache lost moveStats</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hide 'Select a game' overlay when starting filter practice</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -10161,6 +10161,7 @@ function applyFilterContAndStart() {
   // Hide review list, show practice state
   document.getElementById('posInfoCard').style.display = '';
   document.getElementById('feedbackContainer').innerHTML = '';
+  document.getElementById('emptyMsg').classList.add('hidden');
   if (document.body.classList.contains('mobile-browsing')) {
     document.body.classList.remove('mobile-browsing');
     document.body.classList.add('mobile-training');
