@@ -365,21 +365,23 @@
   // Every recognized word maps to a value token. Unknown words are stripped.
   const LEX = {
     // Pieces (including plurals — speech recognizers often return these)
-    'knight': 'N', 'knights': 'N', 'night': 'N', 'nights': 'N', 'horse': 'N', 'nite': 'N', 'ninth': 'N', 'nice': 'N', 'knife': 'N', 'knit': 'N',
-    'bishop': 'B', 'bishops': 'B', 'bitch': 'B', 'tissue': 'B',
-    'rook': 'R', 'rooks': 'R', 'brooke': 'R', 'brook': 'R', 'rock': 'R', 'rookie': 'R', 'truck': 'R', 'took': 'R', 'luke': 'R',
+    'knight': 'N', 'knights': 'N', 'night': 'N', 'nights': 'N', 'horse': 'N', 'nite': 'N',
+    'ninth': 'N', 'nice': 'N', 'knife': 'N', 'knit': 'N', 'height': 'N', 'light': 'N',
+    'bishop': 'B', 'bishops': 'B', 'bitch': 'B', 'tissue': 'B', 'chip': 'B',
+    'rook': 'R', 'rooks': 'R', 'brooke': 'R', 'brook': 'R', 'rock': 'R', 'rookie': 'R',
+    'truck': 'R', 'took': 'R', 'luke': 'R', 'crooked': 'R', 'crook': 'R', 'ruck': 'R',
     'queen': 'Q', 'queens': 'Q', 'cream': 'Q', 'clean': 'Q',
     'king': 'K', 'kings': 'K', 'keen': 'K', 'thing': 'K',
     'pawn': 'P', 'pawns': 'P', 'pond': 'P', 'palm': 'P',
     // Files — bare letters
     'a': 'a', 'b': 'b', 'c': 'c', 'd': 'd', 'e': 'e', 'f': 'f', 'g': 'g', 'h': 'h',
-    // Files — phonetic / NATO
+    // Files — phonetic / NATO + common mishearings
     'alpha': 'a', 'alfa': 'a', 'anna': 'a', 'apple': 'a', 'able': 'a', 'ay': 'a', 'eh': 'a', 'ace': 'a',
     'bravo': 'b', 'beta': 'b', 'baker': 'b', 'boy': 'b', 'bee': 'b', 'be': 'b',
     'charlie': 'c', 'cat': 'c', 'chris': 'c', 'sea': 'c', 'see': 'c',
     'delta': 'd', 'david': 'd', 'dog': 'd', 'dee': 'd', 'day': 'd',
-    'echo': 'e', 'edward': 'e', 'easy': 'e', 'eagle': 'e',
-    'foxtrot': 'f', 'fox': 'f', 'frank': 'f', 'fred': 'f',
+    'echo': 'e', 'edward': 'e', 'easy': 'e', 'eagle': 'e', 'he': 'e',
+    'foxtrot': 'f', 'fox': 'f', 'frank': 'f', 'fred': 'f', 'of': 'f',
     'golf': 'g', 'george': 'g', 'gee': 'g',
     'hotel': 'h', 'henry': 'h', 'harry': 'h', 'age': 'h', 'each': 'h',
     // Ranks
@@ -401,7 +403,7 @@
     'yes': 'YES', 'yeah': 'YES', 'yep': 'YES', 'yup': 'YES', 'correct': 'YES',
     'confirm': 'YES', 'ok': 'YES', 'okay': 'YES', 'sure': 'YES', 'go': 'YES', 'play': 'YES',
     'no': 'NO', 'nah': 'NO', 'nope': 'NO', 'cancel': 'NO', 'wrong': 'NO', 'undo': 'NO',
-    'to': '_IGNORE', 'the': '_IGNORE', 'on': '_IGNORE', 'of': '_IGNORE',
+    'to': '_IGNORE', 'the': '_IGNORE', 'on': '_IGNORE',
     'uh': '_IGNORE', 'um': '_IGNORE', 'and': '_IGNORE', 'hmm': '_IGNORE',
     'check': '_IGNORE', 'mate': '_IGNORE',
   };
@@ -417,10 +419,24 @@
   function heardToValues(rawText) {
     const words = rawText.toLowerCase().trim().split(/\s+/);
 
-    // Split combined squares: "e4" → ["e", "4"], "d3" → ["d", "3"]
+    // Aggressively split merged tokens that contain chess characters.
+    // Handles: "e4"→["e","4"], "ad1"→["a","d","1"], "ae1"→["a","e","1"]
     for (let i = 0; i < words.length; i++) {
-      const sq = words[i].match(/^([a-h])([1-8])$/);
-      if (sq) { words.splice(i, 1, sq[1], sq[2]); i++; }
+      const w = words[i];
+      if (LEX[w]) continue; // already a known word, don't split
+      if (w.length < 2) continue;
+
+      // Try to split into individual chess chars (files a-h, ranks 1-8)
+      const chars = [];
+      let allChess = true;
+      for (const ch of w) {
+        if (/[a-h1-8]/.test(ch)) chars.push(ch);
+        else { allChess = false; break; }
+      }
+      if (allChess && chars.length >= 2) {
+        words.splice(i, 1, ...chars);
+        i += chars.length - 1;
+      }
     }
 
     // Map words to value tokens, drop unknowns and _IGNORE
