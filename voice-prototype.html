@@ -302,6 +302,11 @@
         <select id="voiceSelect"></select>
       </div>
       <div class="setting-row">
+        <label>Speed <span id="speedLabel" style="color:var(--accent)">1.0×</span></label>
+        <input type="range" id="speedSlider" min="0.5" max="2.0" step="0.1" value="1.0"
+          style="width:120px;accent-color:var(--accent)">
+      </div>
+      <div class="setting-row">
         <label>Play as</label>
         <select id="colorSelect">
           <option value="white">White</option>
@@ -632,7 +637,7 @@
     return new Promise(resolve => {
       const u = new SpeechSynthesisUtterance(text);
       u.voice = selectedVoice;
-      u.rate = 1.0;
+      u.rate = parseFloat(document.getElementById('speedSlider').value);
       u.pitch = 1.0;
       u.onend = resolve;
       u.onerror = resolve;
@@ -908,21 +913,41 @@
     const populate = () => {
       const voices = speechSynthesis.getVoices();
       voiceSelect.innerHTML = '';
-      let defaultIdx = 0;
+      if (voices.length === 0) return;
+
+      // Filter English voices and score by quality
+      const enVoices = [];
       voices.forEach((v, i) => {
         if (!v.lang.startsWith('en')) return;
-        const opt = document.createElement('option');
-        opt.value = i;
-        opt.textContent = `${v.name} (${v.lang})`;
-        voiceSelect.appendChild(opt);
-        // Prefer a natural-sounding voice
-        if (v.name.includes('Google') && v.lang === 'en-US') defaultIdx = i;
-        if (v.default && !selectedVoice) defaultIdx = i;
+        let quality = 0;
+        const n = v.name.toLowerCase();
+        // Network/cloud voices tend to be higher quality
+        if (!v.localService) quality += 10;
+        // Prefer names suggesting high quality
+        if (n.includes('neural') || n.includes('natural')) quality += 8;
+        if (n.includes('enhanced') || n.includes('premium')) quality += 6;
+        if (n.includes('google')) quality += 4;
+        // Slight preference for US English
+        if (v.lang === 'en-US') quality += 1;
+        // Slight preference for female voices (often clearer for short phrases)
+        if (n.includes('female') || n.includes('zira') || n.includes('samantha')) quality += 1;
+        enVoices.push({ voice: v, idx: i, quality });
       });
-      if (voices.length > 0) {
-        voiceSelect.value = defaultIdx;
-        selectedVoice = voices[defaultIdx];
-      }
+
+      // Sort best first
+      enVoices.sort((a, b) => b.quality - a.quality);
+
+      let bestIdx = enVoices.length > 0 ? enVoices[0].idx : 0;
+      enVoices.forEach(ev => {
+        const opt = document.createElement('option');
+        opt.value = ev.idx;
+        const tag = ev.voice.localService ? '' : ' ☁';
+        opt.textContent = `${ev.voice.name}${tag}`;
+        voiceSelect.appendChild(opt);
+      });
+
+      voiceSelect.value = bestIdx;
+      selectedVoice = voices[bestIdx];
     };
     speechSynthesis.onvoiceschanged = populate;
     populate();
@@ -968,6 +993,12 @@
     voiceSelect.addEventListener('change', () => {
       const voices = speechSynthesis.getVoices();
       selectedVoice = voices[parseInt(voiceSelect.value)];
+    });
+
+    const speedSlider = document.getElementById('speedSlider');
+    const speedLabel = document.getElementById('speedLabel');
+    speedSlider.addEventListener('input', () => {
+      speedLabel.textContent = parseFloat(speedSlider.value).toFixed(1) + '×';
     });
 
     colorSelect.addEventListener('change', () => {
