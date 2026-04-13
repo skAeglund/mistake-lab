@@ -1398,7 +1398,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire deviation check during filter practice (ply &lt; 20)</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix opponent move failure in continuation (castling/edge case fallback)</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -11330,7 +11330,23 @@ async function advanceContinuation(contUci) {
   const toSq = opponentUci.substring(2, 4);
   const promo = opponentUci.length > 4 ? opponentUci[4] : undefined;
 
-  const result = gameEngine.move({ from: fromSq, to: toSq, promotion: promo });
+  let result = gameEngine.move({ from: fromSq, to: toSq, promotion: promo });
+  // Fallback: search legal moves for matching from/to (handles castling edge cases in chess.js)
+  if (!result) {
+    const legalMoves = gameEngine.moves({ verbose: true });
+    const match = legalMoves.find(lm =>
+      lm.from === fromSq && lm.to === toSq &&
+      (!promo || lm.promotion === promo)
+    );
+    if (match) {
+      result = gameEngine.move(match.san);
+    } else {
+      // Last resort: try SAN string with sloppy parsing
+      result = gameEngine.move(opponentUci, { sloppy: true });
+    }
+    if (result) console.log(`[advanceContinuation] Fallback succeeded for ${opponentUci}: ${result.san}`);
+    else console.warn(`[advanceContinuation] Move failed: ${opponentUci} in FEN: ${gameEngine.fen()}`);
+  }
   if (!result) {
     continuationMode = false;
     silentContinuation = false;
