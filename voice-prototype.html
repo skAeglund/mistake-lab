@@ -380,7 +380,7 @@
     'bravo': 'b', 'beta': 'b', 'baker': 'b', 'boy': 'b', 'bee': 'b', 'be': 'b',
     'charlie': 'c', 'cat': 'c', 'chris': 'c', 'sea': 'c', 'see': 'c',
     'delta': 'd', 'david': 'd', 'dog': 'd', 'dee': 'd', 'day': 'd',
-    'echo': 'e', 'edward': 'e', 'easy': 'e', 'eagle': 'e', 'he': 'e',
+    'echo': 'e', 'edward': 'e', 'easy': 'e', 'eagle': 'e', 'he': 'e', '9': 'e', 'nine': 'e',
     'foxtrot': 'f', 'fox': 'f', 'frank': 'f', 'fred': 'f', 'of': 'f',
     'golf': 'g', 'george': 'g', 'gee': 'g',
     'hotel': 'h', 'henry': 'h', 'harry': 'h', 'age': 'h', 'each': 'h',
@@ -430,7 +430,7 @@
       const chars = [];
       let allChess = true;
       for (const ch of w) {
-        if (/[a-h1-8]/.test(ch)) chars.push(ch);
+        if (/[a-h1-9]/.test(ch)) chars.push(ch);
         else { allChess = false; break; }
       }
       if (allChess && chars.length >= 2) {
@@ -694,7 +694,7 @@
 
     // Still ambiguous
     logEntry('error', `Ambiguous (${tied.map(r => `${r.san}:${r.cost.toFixed(2)}`).join(', ')})`);
-    return null;
+    return { type: 'ambiguous', moves: tied.map(r => r.san) };
   }
 
   // ═══════════════════════════════════════════
@@ -797,7 +797,7 @@
     }
 
     logEntry('error', `V1 Ambiguous: ${candidates.map(c => `${c.san}:${c.score}`).join(', ')}`);
-    return null;
+    return { type: 'ambiguous', moves: candidates.map(c => c.san) };
   }
 
   // ═══════════════════════════════════════════
@@ -956,6 +956,13 @@
         micStatus.textContent = 'Move cancelled. Listening…';
         await speak('Cancelled');
       }
+      return;
+    }
+
+    if (result.type === 'ambiguous') {
+      const moveNames = result.moves.slice(0, 3).map(s => moveToSpeech(s));
+      micStatus.innerHTML = `<span class="heard">Ambiguous:</span> ${result.moves.join(' or ')}`;
+      await speak(`Ambiguous. ${moveNames.join(', or ')}.`);
       return;
     }
 
