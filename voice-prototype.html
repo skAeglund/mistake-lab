@@ -346,6 +346,7 @@
   let pendingMove = null;  // { san, from, to, promotion } waiting for confirmation
   let settings = { confirm: true, announce: true };
   let selectedVoice = null;
+  let speaking = false;  // true while TTS is active — suppresses recognition
 
   // ── DOM refs ──
   const btnMic = document.getElementById('btnMic');
@@ -834,12 +835,13 @@
 
   function speak(text) {
     return new Promise(resolve => {
+      speaking = true;
       const u = new SpeechSynthesisUtterance(text);
       u.voice = selectedVoice;
       u.rate = parseFloat(document.getElementById('speedSlider').value);
       u.pitch = 1.0;
-      u.onend = resolve;
-      u.onerror = resolve;
+      u.onend = () => { speaking = false; resolve(); };
+      u.onerror = () => { speaking = false; resolve(); };
       speechSynthesis.speak(u);
     });
   }
@@ -957,6 +959,7 @@
   // ═══════════════════════════════════════════
 
   async function handleVoiceInput(rawText) {
+    if (speaking) return; // ignore mic input while TTS is active (prevents echo)
     logSystem(`Heard: "${rawText}"`);
     const values = heardToValues(rawText);
     logSystem(`Tokens: [${values.join(', ')}]`);
