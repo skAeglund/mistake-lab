@@ -1,0 +1,983 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Voice Chess — MistakeLab Prototype</title>
+<link rel="stylesheet" href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=DM+Sans:wght@400;500;600&display=swap');
+
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #232736;
+    --border: #2d3244;
+    --text: #e2e4ea;
+    --text-dim: #7a7f94;
+    --accent: #5b8af5;
+    --accent-glow: rgba(91, 138, 245, 0.15);
+    --green: #4ade80;
+    --green-glow: rgba(74, 222, 128, 0.15);
+    --red: #f87171;
+    --red-glow: rgba(248, 113, 113, 0.15);
+    --orange: #fb923c;
+    --radius: 10px;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px;
+  }
+
+  h1 {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.1rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    color: var(--text-dim);
+    margin-bottom: 20px;
+    text-transform: uppercase;
+  }
+  h1 span { color: var(--accent); }
+
+  .layout {
+    display: flex;
+    gap: 24px;
+    align-items: flex-start;
+    max-width: 900px;
+    width: 100%;
+  }
+
+  .board-col { flex: 0 0 auto; }
+
+  #board { width: 400px; }
+  .board-b72b1 { border-radius: var(--radius); overflow: hidden; border: 2px solid var(--border); }
+
+  .panel {
+    flex: 1;
+    min-width: 280px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+  }
+
+  .card-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 10px;
+  }
+
+  /* Mic button */
+  .mic-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  #btnMic {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    border: 2px solid var(--border);
+    background: var(--surface2);
+    color: var(--text-dim);
+    font-size: 24px;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  #btnMic:hover { border-color: var(--accent); color: var(--accent); }
+  #btnMic.listening {
+    border-color: var(--green);
+    color: var(--green);
+    background: var(--green-glow);
+    animation: pulse-mic 1.5s infinite;
+  }
+  #btnMic.listening::after {
+    content: '';
+    position: absolute;
+    width: 56px; height: 56px;
+    border-radius: 50%;
+    border: 2px solid var(--green);
+    animation: ripple 1.5s infinite;
+  }
+
+  @keyframes pulse-mic {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(74, 222, 128, 0.3); }
+    50% { box-shadow: 0 0 0 10px rgba(74, 222, 128, 0); }
+  }
+  @keyframes ripple {
+    0% { transform: scale(1); opacity: 0.5; }
+    100% { transform: scale(1.6); opacity: 0; }
+  }
+
+  .mic-status {
+    font-size: 0.9rem;
+    color: var(--text-dim);
+    line-height: 1.4;
+  }
+  .mic-status .heard {
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  /* Confirm buttons */
+  .confirm-row {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .confirm-row button {
+    flex: 1;
+    padding: 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface2);
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  #btnConfirmYes { border-color: var(--green); color: var(--green); }
+  #btnConfirmYes:hover { background: var(--green-glow); }
+  #btnConfirmNo { border-color: var(--red); color: var(--red); }
+  #btnConfirmNo:hover { background: var(--red-glow); }
+  .confirm-row.hidden { display: none; }
+
+  /* Log */
+  #log {
+    max-height: 260px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .log-entry {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem;
+    line-height: 1.5;
+    padding: 4px 8px;
+    border-radius: 6px;
+  }
+  .log-entry.user { color: var(--green); background: var(--green-glow); }
+  .log-entry.opponent { color: var(--accent); background: var(--accent-glow); }
+  .log-entry.system { color: var(--text-dim); }
+  .log-entry.error { color: var(--red); background: var(--red-glow); }
+  .log-entry .move-san { font-weight: 700; }
+
+  /* Settings */
+  .setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 0;
+  }
+  .setting-row label {
+    font-size: 0.85rem;
+    color: var(--text-dim);
+  }
+  .toggle {
+    position: relative;
+    width: 40px; height: 22px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .toggle::after {
+    content: '';
+    position: absolute;
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: var(--text-dim);
+    top: 2px; left: 2px;
+    transition: all 0.2s;
+  }
+  .toggle.on { background: var(--accent); border-color: var(--accent); }
+  .toggle.on::after { left: 20px; background: #fff; }
+
+  select {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 4px 8px;
+    font-size: 0.8rem;
+    font-family: 'DM Sans', sans-serif;
+  }
+
+  /* Browser warning */
+  .warning {
+    background: var(--red-glow);
+    border: 1px solid var(--red);
+    border-radius: var(--radius);
+    padding: 12px 16px;
+    font-size: 0.85rem;
+    color: var(--red);
+    max-width: 900px;
+    width: 100%;
+    margin-bottom: 16px;
+    display: none;
+  }
+
+  /* Mobile */
+  @media (max-width: 740px) {
+    .layout { flex-direction: column; align-items: center; }
+    #board { width: min(90vw, 400px); }
+    .panel { min-width: unset; width: min(90vw, 400px); }
+  }
+</style>
+</head>
+<body>
+
+<h1><span>Voice Chess</span> — MistakeLab Prototype</h1>
+
+<div class="warning" id="browserWarning">
+  Web Speech API not supported in this browser. Please use Chrome or Edge.
+</div>
+
+<div class="layout">
+  <div class="board-col">
+    <div id="board"></div>
+  </div>
+
+  <div class="panel">
+    <!-- Voice control -->
+    <div class="card">
+      <div class="card-title">Voice Control</div>
+      <div class="mic-row">
+        <button id="btnMic" title="Toggle microphone">🎙</button>
+        <div class="mic-status" id="micStatus">Tap to start listening</div>
+      </div>
+      <div class="confirm-row hidden" id="confirmRow">
+        <button id="btnConfirmYes">✓ Yes</button>
+        <button id="btnConfirmNo">✗ No</button>
+      </div>
+      <div class="confirm-row" style="margin-top:6px">
+        <button id="btnTestTts" style="border-color:var(--accent);color:var(--accent)">🔊 Test TTS</button>
+        <button id="btnTestParse" style="border-color:var(--orange);color:var(--orange)">⌨ Type a move</button>
+      </div>
+    </div>
+
+    <!-- Settings -->
+    <div class="card">
+      <div class="card-title">Settings</div>
+      <div class="setting-row">
+        <label>Confirm moves</label>
+        <div class="toggle on" id="toggleConfirm" data-key="confirm"></div>
+      </div>
+      <div class="setting-row">
+        <label>Announce opponent</label>
+        <div class="toggle on" id="toggleAnnounce" data-key="announce"></div>
+      </div>
+      <div class="setting-row">
+        <label>TTS Voice</label>
+        <select id="voiceSelect"></select>
+      </div>
+      <div class="setting-row">
+        <label>Play as</label>
+        <select id="colorSelect">
+          <option value="white">White</option>
+          <option value="black">Black</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Move log -->
+    <div class="card">
+      <div class="card-title">Move Log</div>
+      <div id="log"></div>
+    </div>
+  </div>
+</div>
+
+<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+<script>
+(function() {
+  'use strict';
+
+  // ── State ──
+  let game = new Chess();
+  let board = null;
+  let playerColor = 'white'; // 'white' or 'black'
+  let listening = false;
+  let recognition = null;
+  let pendingMove = null;  // { san, from, to, promotion } waiting for confirmation
+  let settings = { confirm: true, announce: true };
+  let selectedVoice = null;
+
+  // ── DOM refs ──
+  const btnMic = document.getElementById('btnMic');
+  const micStatus = document.getElementById('micStatus');
+  const confirmRow = document.getElementById('confirmRow');
+  const btnYes = document.getElementById('btnConfirmYes');
+  const btnNo = document.getElementById('btnConfirmNo');
+  const logEl = document.getElementById('log');
+  const voiceSelect = document.getElementById('voiceSelect');
+  const colorSelect = document.getElementById('colorSelect');
+  const browserWarning = document.getElementById('browserWarning');
+
+  // ═══════════════════════════════════════════
+  //  WORD → CHESS TOKEN MAPPING
+  // ═══════════════════════════════════════════
+
+  const PIECE_WORDS = {
+    'knight': 'N', 'night': 'N', 'horse': 'N', 'nite': 'N', 'ninth': 'N',
+    'bishop': 'B', 'bitch': 'B', 'tissue': 'B',
+    'rook': 'R', 'brooke': 'R', 'brook': 'R', 'rock': 'R', 'rookie': 'R', 'truck': 'R', 'took': 'R',
+    'queen': 'Q', 'cream': 'Q', 'green': 'Q', 'clean': 'Q',
+    'king': 'K', 'keen': 'K', 'thing': 'K',
+    'pawn': 'P', 'pond': 'P', 'palm': 'P', 'on': 'P',
+  };
+
+  // NATO alphabet + common phonetic aliases for files
+  const FILE_WORDS = {
+    // a-file
+    'alpha': 'a', 'anna': 'a', 'apple': 'a', 'able': 'a', 'ace': 'a', 'ay': 'a', 'a': 'a', 'eh': 'a',
+    // b-file
+    'bravo': 'b', 'beta': 'b', 'baker': 'b', 'boy': 'b', 'bee': 'b', 'b': 'b', 'be': 'b',
+    // c-file
+    'charlie': 'c', 'cat': 'c', 'chris': 'c', 'center': 'c', 'sea': 'c', 'see': 'c', 'c': 'c',
+    // d-file
+    'delta': 'd', 'david': 'd', 'dog': 'd', 'dee': 'd', 'd': 'd',
+    // e-file
+    'echo': 'e', 'edward': 'e', 'easy': 'e', 'eagle': 'e', 'e': 'e',
+    // f-file
+    'foxtrot': 'f', 'fox': 'f', 'frank': 'f', 'fred': 'f', 'f': 'f',
+    // g-file
+    'golf': 'g', 'george': 'g', 'go': 'g', 'gee': 'g', 'g': 'g', 'genie': 'g',
+    // h-file
+    'hotel': 'h', 'henry': 'h', 'harry': 'h', 'h': 'h', 'age': 'h', 'each': 'h',
+  };
+
+  const RANK_WORDS = {
+    '1': '1', 'one': '1', 'won': '1', 'want': '1',
+    '2': '2', 'two': '2', 'to': '2', 'too': '2', 'tu': '2',
+    '3': '3', 'three': '3', 'tree': '3', 'free': '3',
+    '4': '4', 'four': '4', 'for': '4', 'fore': '4',
+    '5': '5', 'five': '5', 'fife': '5', 'hive': '5',
+    '6': '6', 'six': '6', 'sex': '6', 'sicks': '6',
+    '7': '7', 'seven': '7',
+    '8': '8', 'eight': '8', 'ate': '8', 'ait': '8',
+  };
+
+  const CAPTURE_WORDS = new Set(['takes', 'take', 'capture', 'captures', 'x']);
+  const CASTLE_SHORT = new Set(['short', 'castle', 'castles', 'kingside']);
+  const CASTLE_LONG = new Set(['long', 'queenside']);
+  const PROMOTE_WORDS = new Set(['promote', 'promotes', 'promotion', 'equals']);
+
+  const YES_WORDS = new Set(['yes', 'yeah', 'yep', 'yup', 'correct', 'confirm', 'ok', 'okay', 'do it', 'play', 'sure', 'go']);
+  const NO_WORDS = new Set(['no', 'nah', 'nope', 'cancel', 'wrong', 'undo', 'nevermind', 'never mind']);
+
+  // ═══════════════════════════════════════════
+  //  VOICE → MOVE PARSER
+  // ═══════════════════════════════════════════
+
+  function parseVoiceText(rawText) {
+    const words = rawText.toLowerCase().trim().split(/\s+/);
+    logSystem(`Heard: "${rawText}"`);
+
+    // Check for yes/no confirmation first
+    const fullPhrase = words.join(' ');
+    if (pendingMove) {
+      for (const w of YES_WORDS) {
+        if (fullPhrase.includes(w)) return { type: 'confirm', value: true };
+      }
+      for (const w of NO_WORDS) {
+        if (fullPhrase.includes(w)) return { type: 'confirm', value: false };
+      }
+    }
+
+    // Check for castle
+    let isCastle = false, castleSide = null;
+    for (const w of words) {
+      if (CASTLE_SHORT.has(w)) { isCastle = true; castleSide = castleSide || 'short'; }
+      if (CASTLE_LONG.has(w)) { isCastle = true; castleSide = 'long'; }
+    }
+    if (isCastle) {
+      return { type: 'move', castle: castleSide };
+    }
+
+    // Extract tokens
+    let piece = null;
+    let files = [];
+    let ranks = [];
+    let hasCapture = false;
+    let promotion = null;
+    let promoteNext = false;
+
+    for (const w of words) {
+      if (promoteNext && PIECE_WORDS[w]) {
+        promotion = PIECE_WORDS[w];
+        promoteNext = false;
+        continue;
+      }
+      if (PROMOTE_WORDS.has(w)) { promoteNext = true; continue; }
+      if (CAPTURE_WORDS.has(w)) { hasCapture = true; continue; }
+
+      if (PIECE_WORDS[w] && piece === null && files.length === 0 && ranks.length === 0) {
+        piece = PIECE_WORDS[w];
+        if (piece === 'P') piece = null; // pawns have no letter
+        continue;
+      }
+
+      if (FILE_WORDS[w]) { files.push(FILE_WORDS[w]); continue; }
+      if (RANK_WORDS[w]) { ranks.push(RANK_WORDS[w]); continue; }
+    }
+
+    // Build interpretation
+    let toFile = null, toRank = null, fromFile = null, fromRank = null;
+
+    if (files.length >= 2 && ranks.length >= 2) {
+      // Full UCI-style: e.g. "echo 2 echo 4" → e2e4
+      fromFile = files[0]; fromRank = ranks[0];
+      toFile = files[1]; toRank = ranks[1];
+    } else if (files.length === 2 && ranks.length === 1) {
+      // Disambiguation by file: "knight alpha charlie 3" → Nac3
+      fromFile = files[0]; toFile = files[1]; toRank = ranks[0];
+    } else if (files.length === 1 && ranks.length === 2) {
+      // Disambiguation by rank: "rook 1 charlie 6" → R1c6
+      fromRank = ranks[0]; toFile = files[0]; toRank = ranks[1];
+    } else if (files.length === 1 && ranks.length === 1) {
+      // Simple: "knight charlie 3" → Nc3
+      toFile = files[0]; toRank = ranks[0];
+    } else if (files.length === 1 && ranks.length === 0) {
+      // Just a file (probably incomplete, but try)
+      toFile = files[0];
+    }
+
+    return {
+      type: 'move',
+      piece, toFile, toRank, fromFile, fromRank, hasCapture, promotion
+    };
+  }
+
+  // ═══════════════════════════════════════════
+  //  LEGAL MOVE DISAMBIGUATION
+  // ═══════════════════════════════════════════
+
+  function parseSan(san) {
+    // Parse a SAN string into components
+    const orig = san;
+    let piece = null, fromFile = null, fromRank = null;
+    let toFile = null, toRank = null, capture = false, promotion = null;
+    let castle = null;
+
+    if (san === 'O-O') return { castle: 'short', san: orig };
+    if (san === 'O-O-O') return { castle: 'long', san: orig };
+
+    // Strip check/mate
+    san = san.replace(/[+#]$/, '');
+
+    // Promotion
+    const promoMatch = san.match(/=([NBRQ])$/);
+    if (promoMatch) {
+      promotion = promoMatch[1];
+      san = san.slice(0, -2);
+    }
+
+    // Piece
+    if (/^[NBRQK]/.test(san)) {
+      piece = san[0];
+      san = san.slice(1);
+    }
+
+    // Capture
+    if (san.includes('x')) {
+      capture = true;
+      san = san.replace('x', '');
+    }
+
+    // Remaining should be [fromDisambig]toSquare
+    // toSquare is always last 2 chars: file + rank
+    if (san.length >= 2) {
+      toRank = san[san.length - 1];
+      toFile = san[san.length - 2];
+      const disambig = san.slice(0, -2);
+      if (disambig.length === 1) {
+        if (/[a-h]/.test(disambig)) fromFile = disambig;
+        else if (/[1-8]/.test(disambig)) fromRank = disambig;
+      } else if (disambig.length === 2) {
+        fromFile = disambig[0];
+        fromRank = disambig[1];
+      }
+    }
+
+    return { piece, fromFile, fromRank, toFile, toRank, capture, promotion, castle, san: orig };
+  }
+
+  function matchVoiceToMove(parsed) {
+    const legalMoves = game.moves({ verbose: true });
+    const legalSans = game.moves();
+
+    // Castle handling
+    if (parsed.castle) {
+      const target = parsed.castle === 'short' ? 'O-O' : 'O-O-O';
+      // O-O also matches at start of O-O-O, so check exact
+      if (legalSans.includes(target)) return target;
+      // Maybe they said "castle" without specifying — if only one castle is legal, use it
+      const castleMoves = legalSans.filter(m => m.startsWith('O-O'));
+      if (castleMoves.length === 1) return castleMoves[0];
+      return null;
+    }
+
+    if (!parsed.toFile || !parsed.toRank) return null;
+
+    // Score each legal move against the parsed tokens
+    let candidates = [];
+
+    for (const m of legalMoves) {
+      const p = parseSan(m.san);
+      let score = 0;
+      let match = true;
+
+      // Target square must match
+      if (p.toFile !== parsed.toFile || p.toRank !== parsed.toRank) continue;
+
+      score += 10; // target square match
+
+      // Piece match
+      if (parsed.piece) {
+        if (p.piece === parsed.piece) score += 5;
+        else { match = false; continue; }
+      }
+
+      // Disambiguation
+      if (parsed.fromFile) {
+        if (p.fromFile === parsed.fromFile || m.from[0] === parsed.fromFile) score += 3;
+        else score -= 2;
+      }
+      if (parsed.fromRank) {
+        if (p.fromRank === parsed.fromRank || m.from[1] === parsed.fromRank) score += 3;
+        else score -= 2;
+      }
+
+      // Capture hint
+      if (parsed.hasCapture && p.capture) score += 1;
+
+      // Promotion
+      if (parsed.promotion) {
+        if (p.promotion === parsed.promotion) score += 4;
+        else if (p.promotion) score -= 1; // wrong promotion piece
+        else continue; // said promote but move isn't a promotion
+      }
+
+      candidates.push({ san: m.san, score, move: m });
+    }
+
+    if (candidates.length === 0) return null;
+
+    // Sort by score descending
+    candidates.sort((a, b) => b.score - a.score);
+
+    // If top candidate is clearly best, use it
+    if (candidates.length === 1) return candidates[0].san;
+    if (candidates[0].score > candidates[1].score) return candidates[0].san;
+
+    // Ambiguous — return null
+    logEntry('error', `Ambiguous: ${candidates.map(c => c.san).join(', ')}`);
+    return null;
+  }
+
+  // ═══════════════════════════════════════════
+  //  TEXT-TO-SPEECH
+  // ═══════════════════════════════════════════
+
+  function speak(text) {
+    return new Promise(resolve => {
+      const u = new SpeechSynthesisUtterance(text);
+      u.voice = selectedVoice;
+      u.rate = 1.0;
+      u.pitch = 1.0;
+      u.onend = resolve;
+      u.onerror = resolve;
+      speechSynthesis.speak(u);
+    });
+  }
+
+  function moveToSpeech(san) {
+    // Convert SAN like "Nf3" to "Knight f3", "exd5" to "e takes d5", "O-O" to "castles short"
+    if (san === 'O-O') return 'castles short';
+    if (san === 'O-O-O') return 'castles long';
+
+    let s = san.replace(/[+#]/, '');
+    let promo = '';
+    const promoMatch = s.match(/=([NBRQK])/);
+    if (promoMatch) {
+      promo = ' promotes to ' + pieceFullName(promoMatch[1]);
+      s = s.replace(/=[NBRQK]/, '');
+    }
+
+    const pieces = { N: 'Knight', B: 'Bishop', R: 'Rook', Q: 'Queen', K: 'King' };
+    let result = '';
+
+    if (/^[NBRQK]/.test(s)) {
+      result += pieces[s[0]] + ' ';
+      s = s.slice(1);
+    }
+
+    // Capture
+    s = s.replace('x', ' takes ');
+
+    // Space out the square for readability
+    result += s.split('').map(ch => {
+      if (/[a-h]/.test(ch)) return ch;
+      return ch;
+    }).join('');
+
+    return (result + promo).replace(/\s+/g, ' ').trim();
+  }
+
+  function pieceFullName(p) {
+    return { N: 'Knight', B: 'Bishop', R: 'Rook', Q: 'Queen', K: 'King' }[p] || p;
+  }
+
+  // ═══════════════════════════════════════════
+  //  SPEECH RECOGNITION
+  // ═══════════════════════════════════════════
+
+  function initRecognition() {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      browserWarning.style.display = 'block';
+      btnMic.disabled = true;
+      return;
+    }
+
+    recognition = new SR();
+    recognition.continuous = true;
+    recognition.interimResults = false;
+    recognition.lang = 'en-US';
+
+    recognition.onresult = (event) => {
+      // Get the latest final result
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        if (event.results[i].isFinal) {
+          const text = event.results[i][0].transcript.trim();
+          handleVoiceInput(text);
+        }
+      }
+    };
+
+    recognition.onerror = (event) => {
+      if (event.error === 'no-speech' || event.error === 'aborted') return;
+      logEntry('error', `Recognition error: ${event.error}`);
+      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+        listening = false;
+        btnMic.classList.remove('listening');
+        micStatus.textContent = 'Microphone access denied. Check browser permissions.';
+        logEntry('error', 'Mic permission denied — enable in browser settings and reload.');
+      } else if (event.error === 'network') {
+        logEntry('error', 'Network error — Web Speech API requires internet (audio is sent to Google for processing).');
+      }
+    };
+
+    recognition.onend = () => {
+      // Auto-restart if we're supposed to be listening
+      if (listening) {
+        try { recognition.start(); } catch(e) {}
+      }
+    };
+  }
+
+  function toggleListening() {
+    if (!recognition) return;
+    if (listening) {
+      listening = false;
+      recognition.stop();
+      btnMic.classList.remove('listening');
+      micStatus.textContent = 'Tap to start listening';
+    } else {
+      listening = true;
+      try {
+        recognition.start();
+        btnMic.classList.add('listening');
+        micStatus.textContent = 'Listening…';
+      } catch(e) {
+        listening = false;
+        logEntry('error', `Could not start recognition: ${e.message}`);
+        micStatus.textContent = 'Failed to start — check mic permissions';
+      }
+    }
+  }
+
+  // ═══════════════════════════════════════════
+  //  MOVE FLOW
+  // ═══════════════════════════════════════════
+
+  async function handleVoiceInput(rawText) {
+    const parsed = parseVoiceText(rawText);
+
+    if (parsed.type === 'confirm' && pendingMove) {
+      if (parsed.value) {
+        confirmRow.classList.add('hidden');
+        await executePendingMove();
+      } else {
+        pendingMove = null;
+        confirmRow.classList.add('hidden');
+        micStatus.textContent = 'Move cancelled. Listening…';
+        await speak('Cancelled');
+      }
+      return;
+    }
+
+    if (parsed.type !== 'move') return;
+
+    // Not our turn?
+    const turn = game.turn() === 'w' ? 'white' : 'black';
+    if (turn !== playerColor) {
+      await speak("It's not your turn");
+      return;
+    }
+
+    const san = matchVoiceToMove(parsed);
+    if (!san) {
+      micStatus.innerHTML = `<span class="heard">"${rawText}"</span> — no legal move found`;
+      await speak("No matching move found. Try again.");
+      return;
+    }
+
+    const spokenMove = moveToSpeech(san);
+
+    if (settings.confirm) {
+      pendingMove = san;
+      micStatus.innerHTML = `<span class="heard">${spokenMove}</span> — confirm?`;
+      confirmRow.classList.remove('hidden');
+      await speak(spokenMove + '?');
+    } else {
+      pendingMove = san;
+      await executePendingMove();
+    }
+  }
+
+  async function executePendingMove() {
+    if (!pendingMove) return;
+
+    const san = pendingMove;
+    pendingMove = null;
+
+    const result = game.move(san);
+    if (!result) {
+      logEntry('error', `Failed to play ${san}`);
+      return;
+    }
+
+    board.position(game.fen());
+    logEntry('user', `${moveNumber()}${san}`);
+    micStatus.innerHTML = `Played <span class="heard">${moveToSpeech(san)}</span>`;
+
+    // Check game over
+    if (checkGameOver()) return;
+
+    // Opponent responds (random legal move for prototype)
+    await delay(600);
+    await opponentMove();
+  }
+
+  async function opponentMove() {
+    const moves = game.moves();
+    if (moves.length === 0) { checkGameOver(); return; }
+
+    // Random move (in MistakeLab this would be Explorer/Maia/Stockfish)
+    const san = moves[Math.floor(Math.random() * moves.length)];
+    game.move(san);
+    board.position(game.fen());
+    logEntry('opponent', `${moveNumber(true)}${san}`);
+
+    const spokenMove = moveToSpeech(san);
+    micStatus.innerHTML = `Opponent: <span class="heard">${spokenMove}</span>`;
+
+    if (settings.announce) {
+      await speak(spokenMove);
+    }
+
+    checkGameOver();
+  }
+
+  function moveNumber(afterOpponent = false) {
+    const fullMoves = game.history().length;
+    const n = Math.ceil(fullMoves / 2);
+    if (afterOpponent) {
+      // Just played opponent move, show number with dots
+      return game.turn() === 'w' ? `${n}… ` : `${n}. `;
+    }
+    return game.turn() === 'b' ? `${n}. ` : `${n}… `;
+  }
+
+  function checkGameOver() {
+    if (game.in_checkmate()) {
+      const winner = game.turn() === 'w' ? 'Black' : 'White';
+      logEntry('system', `Checkmate! ${winner} wins.`);
+      speak(`Checkmate. ${winner} wins.`);
+      return true;
+    }
+    if (game.in_draw()) {
+      logEntry('system', 'Draw.');
+      speak('Draw.');
+      return true;
+    }
+    if (game.in_stalemate()) {
+      logEntry('system', 'Stalemate.');
+      speak('Stalemate.');
+      return true;
+    }
+    return false;
+  }
+
+  // ═══════════════════════════════════════════
+  //  UI HELPERS
+  // ═══════════════════════════════════════════
+
+  function logEntry(type, text) {
+    const div = document.createElement('div');
+    div.className = `log-entry ${type}`;
+    div.textContent = text;
+    logEl.appendChild(div);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function logSystem(text) {
+    logEntry('system', text);
+  }
+
+  function delay(ms) {
+    return new Promise(r => setTimeout(r, ms));
+  }
+
+  // ═══════════════════════════════════════════
+  //  INIT
+  // ═══════════════════════════════════════════
+
+  function initBoard() {
+    board = Chessboard('board', {
+      position: 'start',
+      orientation: playerColor,
+      pieceTheme: 'https://lichess1.org/assets/_Qn4tz2/piece/cburnett/{piece}.svg',
+      draggable: false,
+      moveSpeed: 200,
+      appearSpeed: 200,
+    });
+  }
+
+  function initVoices() {
+    const populate = () => {
+      const voices = speechSynthesis.getVoices();
+      voiceSelect.innerHTML = '';
+      let defaultIdx = 0;
+      voices.forEach((v, i) => {
+        if (!v.lang.startsWith('en')) return;
+        const opt = document.createElement('option');
+        opt.value = i;
+        opt.textContent = `${v.name} (${v.lang})`;
+        voiceSelect.appendChild(opt);
+        // Prefer a natural-sounding voice
+        if (v.name.includes('Google') && v.lang === 'en-US') defaultIdx = i;
+        if (v.default && !selectedVoice) defaultIdx = i;
+      });
+      if (voices.length > 0) {
+        voiceSelect.value = defaultIdx;
+        selectedVoice = voices[defaultIdx];
+      }
+    };
+    speechSynthesis.onvoiceschanged = populate;
+    populate();
+  }
+
+  function initToggles() {
+    document.querySelectorAll('.toggle').forEach(el => {
+      el.addEventListener('click', () => {
+        el.classList.toggle('on');
+        settings[el.dataset.key] = el.classList.contains('on');
+      });
+    });
+  }
+
+  function init() {
+    initBoard();
+    initRecognition();
+    initVoices();
+    initToggles();
+
+    btnMic.addEventListener('click', toggleListening);
+
+    document.getElementById('btnTestTts').addEventListener('click', () => {
+      speak('Knight takes f7. Your move.');
+    });
+
+    document.getElementById('btnTestParse').addEventListener('click', () => {
+      const text = prompt('Type what you would say (e.g. "knight charlie 3"):');
+      if (text) handleVoiceInput(text);
+    });
+
+    btnYes.addEventListener('click', async () => {
+      confirmRow.classList.add('hidden');
+      await executePendingMove();
+    });
+
+    btnNo.addEventListener('click', async () => {
+      pendingMove = null;
+      confirmRow.classList.add('hidden');
+      micStatus.textContent = 'Move cancelled. Listening…';
+    });
+
+    voiceSelect.addEventListener('change', () => {
+      const voices = speechSynthesis.getVoices();
+      selectedVoice = voices[parseInt(voiceSelect.value)];
+    });
+
+    colorSelect.addEventListener('change', () => {
+      playerColor = colorSelect.value;
+      game = new Chess();
+      board.orientation(playerColor);
+      board.position('start');
+      logEl.innerHTML = '';
+      logSystem(`Playing as ${playerColor}`);
+      if (playerColor === 'black') {
+        opponentMove();
+      }
+    });
+
+    logSystem('Ready. Tap 🎙 to begin.');
+    logSystem('Say moves like "Knight f3" or "echo 4"');
+  }
+
+  // Wait for DOM + libraries
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+
+})();
+</script>
+</body>
+</html>
