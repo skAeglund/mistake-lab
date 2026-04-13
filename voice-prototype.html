@@ -435,6 +435,15 @@
     let promotion = null;
     let promoteNext = false;
 
+    // Pre-process: split combined square tokens like "e4" → ["e", "4"]
+    for (let i = 0; i < words.length; i++) {
+      const sq = words[i].match(/^([a-h])([1-8])$/);
+      if (sq) {
+        words.splice(i, 1, sq[1], sq[2]);
+        i++; // skip the rank we just inserted
+      }
+    }
+
     for (const w of words) {
       if (promoteNext && PIECE_WORDS[w]) {
         promotion = PIECE_WORDS[w];
