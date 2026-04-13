@@ -368,7 +368,7 @@
     // c-file
     'charlie': 'c', 'cat': 'c', 'chris': 'c', 'center': 'c', 'sea': 'c', 'see': 'c', 'c': 'c',
     // d-file
-    'delta': 'd', 'david': 'd', 'dog': 'd', 'dee': 'd', 'd': 'd',
+    'delta': 'd', 'david': 'd', 'dog': 'd', 'dee': 'd', 'd': 'd', 'day': 'd',
     // e-file
     'echo': 'e', 'edward': 'e', 'easy': 'e', 'eagle': 'e', 'e': 'e',
     // f-file
@@ -567,17 +567,24 @@
     for (const m of legalMoves) {
       const p = parseSan(m.san);
       let score = 0;
-      let match = true;
 
       // Target square must match
       if (p.toFile !== parsed.toFile || p.toRank !== parsed.toRank) continue;
 
       score += 10; // target square match
 
-      // Piece match
+      const isPawn = (m.piece === 'p');
+
+      // Piece matching
       if (parsed.piece) {
-        if (p.piece === parsed.piece) score += 5;
-        else { match = false; continue; }
+        // User said a piece name — must match
+        const movePiece = isPawn ? null : m.piece.toUpperCase();
+        if (movePiece === parsed.piece) score += 5;
+        else continue; // wrong piece, skip entirely
+      } else {
+        // No piece word spoken — strongly prefer pawn moves
+        if (isPawn) score += 6;
+        else score -= 3;
       }
 
       // Disambiguation
