@@ -368,6 +368,7 @@
     // Pieces (including plurals — speech recognizers often return these)
     'knight': 'N', 'knights': 'N', 'night': 'N', 'nights': 'N', 'horse': 'N', 'nite': 'N',
     'ninth': 'N', 'nice': 'N', 'knife': 'N', 'knit': 'N', 'height': 'N', 'light': 'N',
+    'might': 'N', 'lights': 'N', 'right': 'N', 'white': 'N',
     'bishop': 'B', 'bishops': 'B', 'bitch': 'B', 'tissue': 'B', 'chip': 'B',
     'rook': 'R', 'rooks': 'R', 'brooke': 'R', 'brook': 'R', 'rock': 'R', 'rookie': 'R',
     'truck': 'R', 'took': 'R', 'luke': 'R', 'crooked': 'R', 'crook': 'R', 'ruck': 'R',
@@ -381,7 +382,7 @@
     'bravo': 'b', 'beta': 'b', 'baker': 'b', 'boy': 'b', 'bee': 'b', 'be': 'b',
     'charlie': 'c', 'cat': 'c', 'chris': 'c', 'sea': 'c', 'see': 'c',
     'delta': 'd', 'david': 'd', 'dog': 'd', 'dee': 'd', 'day': 'd',
-    'echo': 'e', 'edward': 'e', 'easy': 'e', 'eagle': 'e', 'he': 'e',
+    'echo': 'e', 'edward': 'e', 'easy': 'e', 'eagle': 'e', 'he': 'e', 'eat': 'e', 'eve': 'e',
     'foxtrot': 'f', 'fox': 'f', 'frank': 'f', 'fred': 'f', 'of': 'f',
     'golf': 'g', 'george': 'g', 'gee': 'g',
     'hotel': 'h', 'henry': 'h', 'harry': 'h', 'age': 'h', 'each': 'h',
@@ -847,36 +848,47 @@
   }
 
   function moveToSpeech(san) {
-    // Convert SAN like "Nf3" to "Knight f3", "exd5" to "e takes d5", "O-O" to "castles short"
     if (san === 'O-O') return 'castles short';
     if (san === 'O-O-O') return 'castles long';
 
-    let s = san.replace(/[+#]/, '');
+    let s = san.replace(/[+#]/g, '');
+    const pieces = { N: 'Knight', B: 'Bishop', R: 'Rook', Q: 'Queen', K: 'King' };
+    const parts = [];
+
+    // Promotion
     let promo = '';
-    const promoMatch = s.match(/=([NBRQK])/);
+    const promoMatch = s.match(/=([NBRQ])/);
     if (promoMatch) {
-      promo = ' promotes to ' + pieceFullName(promoMatch[1]);
-      s = s.replace(/=[NBRQK]/, '');
+      promo = pieceFullName(promoMatch[1]);
+      s = s.replace(/=[NBRQ]/, '');
     }
 
-    const pieces = { N: 'Knight', B: 'Bishop', R: 'Rook', Q: 'Queen', K: 'King' };
-    let result = '';
-
+    // Piece
     if (/^[NBRQK]/.test(s)) {
-      result += pieces[s[0]] + ' ';
+      parts.push(pieces[s[0]]);
       s = s.slice(1);
     }
 
-    // Capture
-    s = s.replace('x', ' takes ');
+    // Remaining chars: disambig + capture + destination
+    // Space every character for clear TTS: "ce2" → "c . e . 2"
+    for (const ch of s) {
+      if (ch === 'x') { parts.push('takes'); }
+      else { parts.push(ch); }
+    }
 
-    // Space out the square for readability
-    result += s.split('').map(ch => {
-      if (/[a-h]/.test(ch)) return ch;
-      return ch;
-    }).join('');
+    if (promo) parts.push('promotes to', promo);
 
-    return (result + promo).replace(/\s+/g, ' ').trim();
+    // Join with commas for slight TTS pauses between letters
+    // "Knight", "c", "e", "2" → "Knight, c, e, 2"
+    let speech = parts[0] || '';
+    for (let i = 1; i < parts.length; i++) {
+      // Add comma pause between single-char tokens for clarity
+      const prev = parts[i - 1], cur = parts[i];
+      if (prev.length === 1 && cur.length === 1) speech += ', ' + cur;
+      else speech += ' ' + cur;
+    }
+
+    return speech;
   }
 
   function pieceFullName(p) {
