@@ -1398,7 +1398,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix DB toggle styling + filter practice moves blocked by exitOpeningFilter wipe</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix empty opening filter: fallback rebuild positionMoveIndex when cache lost moveStats</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -5521,6 +5521,48 @@ function extractAllMistakes() {
     }
   }
   console.log(`[OpeningExplorer] Built positionMoveIndex with ${positionMoveIndex.size} positions`);
+
+  // Fallback: if positionMoveIndex is empty (e.g. cache saved without moveStatsIndex due to quota),
+  // rebuild it from raw game moves by replaying through chess.js
+  if (positionMoveIndex.size === 0 && allGames.length > 0) {
+    console.log('[OpeningExplorer] positionMoveIndex empty — rebuilding from raw game moves');
+    for (const game of allGames) {
+      const moves = game.moves ? game.moves.split(' ') : [];
+      if (moves.length === 0) continue;
+      const playerColor = detectPlayerColor(game);
+      const { winner, whiteRating, blackRating } = getGameResultInfo(game);
+      const opponentColor = playerColor === 'white' ? 'black' : 'white';
+      const opponentName = game.players?.[opponentColor]?.user?.name || 'Unknown';
+      const opponentRating = (opponentColor === 'white' ? whiteRating : blackRating) || null;
+      const userRating = (playerColor === 'white' ? whiteRating : blackRating) || null;
+      const result = winner === playerColor ? 'win' : winner === opponentColor ? 'loss' : 'draw';
+      const chess = new Chess(game.initialFen || undefined);
+      const rebuiltStats = [];
+      for (const san of moves) {
+        const posKey = fenPositionKey(chess.fen());
+        const m = chess.move(san, { sloppy: true });
+        if (!m) break;
+        rebuiltStats.push({ posKey, moveSan: m.san, moveUci: m.from + m.to + (m.promotion || '') });
+      }
+      moveStatsData[game.id] = rebuiltStats;
+      for (const ms of rebuiltStats) {
+        if (!positionMoveIndex.has(ms.posKey)) positionMoveIndex.set(ms.posKey, new Map());
+        const posMap = positionMoveIndex.get(ms.posKey);
+        if (!posMap.has(ms.moveSan)) {
+          posMap.set(ms.moveSan, { san: ms.moveSan, uci: ms.moveUci, count: 0, whiteWins: 0, blackWins: 0, draws: 0, games: [] });
+        }
+        const entry = posMap.get(ms.moveSan);
+        entry.count++;
+        if (winner === 'white') entry.whiteWins++;
+        else if (winner === 'black') entry.blackWins++;
+        else entry.draws++;
+        entry.games.push({ gameId: game.id, userColor: playerColor, opponentName, opponentRating, userRating, result, source: game._source || 'lichess' });
+      }
+    }
+    console.log(`[OpeningExplorer] Rebuilt positionMoveIndex with ${positionMoveIndex.size} positions from ${allGames.length} games`);
+    // Re-save cache with the rebuilt moveStats so this doesn't happen again
+    saveMistakesCache(rawMistakes, currentFingerprints, fenData, moveStatsData, advantageCandidates);
+  }
 
   // ── Advantage capitalization: filter candidates and push valid items ──
   const advantageItemCount = { checked: 0, added: 0, skippedWin: 0, skippedTimeLoss: 0, skippedTimeTrouble: 0 };
