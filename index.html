@@ -1398,7 +1398,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix Show Line to anchor on stored best move, consistent with Show Best arrow</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add voice mode for hands-free continuation practice</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1958,6 +1958,31 @@ let explorerMinFreq = 0.05;
 let explorerNotifyMaia = true;
 let practiceContItem = null; // synthetic item for filter continuation practice
 let practiceRepIgnored = false; // true after user clicks "Ignore Repertoire"
+
+// ─── Voice mode state ───
+let voiceMode = false;          // master toggle — active during continuation/advantage
+let voiceRecognition = null;    // SpeechRecognition instance
+let voiceListening = false;     // mic currently active
+let voiceSpeaking = false;      // TTS active (suppress mic echo)
+let voicePendingMove = null;    // SAN string awaiting voice confirmation
+let voiceLastOpponentSan = null; // last opponent move SAN for replay
+let voiceSelectedVoice = null;  // SpeechSynthesisVoice
+let voiceBtKeepAliveCtx = null; // AudioContext for Bluetooth anti-sleep
+const voiceSettings = {
+  enabled: false,
+  confirm: true,
+  speed: 1.3,
+  voiceName: null,
+};
+function loadVoiceSettings() {
+  try {
+    const s = JSON.parse(localStorage.getItem('mistakelab_voice_settings'));
+    if (s) Object.assign(voiceSettings, s);
+  } catch(e) {}
+}
+function saveVoiceSettings() {
+  localStorage.setItem('mistakelab_voice_settings', JSON.stringify(voiceSettings));
+}
 
 // ─── Debug logging toggle ───
 const DEBUG_SF = true;
@@ -5057,6 +5082,512 @@ async function maiaPredict(fen) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  VOICE MODE — speech recognition + TTS for hands-free continuation practice
+// ═══════════════════════════════════════════════════════════════════════════
+
+const VOICE_LEX = {
+  // ── Knight ──
+  'knight': 'N', 'knights': 'N', 'night': 'N', 'nights': 'N', 'horse': 'N', 'nite': 'N',
+  'ninth': 'N', 'nice': 'N', 'knife': 'N', 'knit': 'N',
+  'right': 'N', 'rights': 'N', 'white': 'N', 'light': 'N', 'lights': 'N',
+  'site': 'N', 'sites': 'N', 'sight': 'N', 'sights': 'N',
+  'fight': 'N', 'fights': 'N', 'height': 'N', 'heights': 'N',
+  'might': 'N', 'wight': 'N',
+  // ── Rook ──
+  'rook': 'R', 'rooks': 'R', 'book': 'R', 'booked': 'R', 'took': 'R', 'look': 'R',
+  'shook': 'R', 'hook': 'R', 'hooks': 'R', 'hooked': 'R',
+  'crook': 'R', 'cook': 'R', 'cooks': 'R', 'brook': 'R', 'brooks': 'R', 'brooke': 'R',
+  'cooke': 'R', 'nook': 'R', 'mistook': 'R', 'hooke': 'R', 'tooke': 'R',
+  'snook': 'R', 'crooke': 'R', 'retook': 'R', 'looked': 'R', 'stood': 'R', 'wood': 'R',
+  'rock': 'R', 'rookie': 'R', 'truck': 'R', 'luke': 'R', 'crooked': 'R', 'ruck': 'R',
+  // ── Queen ──
+  'queen': 'Q', 'queens': 'Q', 'bean': 'Q', 'beane': 'Q', 'been': 'Q', 'beene': 'Q',
+  'clean': 'Q', 'gene': 'Q', 'green': 'Q', 'greene': 'Q', 'keen': 'Q', 'keene': 'Q',
+  'mean': 'Q', 'quean': 'Q', 'queene': 'Q', 'scene': 'Q', 'sheen': 'Q', 'tween': 'Q',
+  'kean': 'Q', 'teen': 'Q', 'cream': 'Q',
+  // ── King ──
+  'king': 'K', 'kings': 'K', 'thing': 'K', 'things': 'K', 'bring': 'K', 'spring': 'K',
+  'ring': 'K', 'string': 'K', 'wing': 'K', 'sing': 'K', 'ming': 'K', 'cling': 'K',
+  'sting': 'K', 'ling': 'K', 'ping': 'K', 'sling': 'K', 'ting': 'K', 'fling': 'K',
+  'ding': 'K', 'bing': 'K', 'wring': 'K', 'ging': 'K', 'jing': 'K', 'qing': 'K',
+  'kling': 'K', 'hing': 'K',
+  // ── Bishop ──
+  'bishop': 'B', 'bishops': 'B', 'bitch': 'B', 'tissue': 'B', 'chip': 'B',
+  'dish up': 'B', 'fish up': 'B', 'switch up': 'B', 'this up': 'B', 'which up': 'B',
+  'hyssop': 'B', 'hitch up': 'B', 'pick up': 'B',
+  // ── Pawn ──
+  'pawn': 'P', 'pawns': 'P', 'pond': 'P', 'palm': 'P',
+  // ── Files — primary recommended words ──
+  'ace': 'a', 'boy': 'b', 'cat': 'c', 'dog': 'd', 'egg': 'e', 'fox': 'f', 'golf': 'g', 'hot': 'h',
+  // ── Files — bare letters ──
+  'a': 'a', 'b': 'b', 'c': 'c', 'd': 'd', 'e': 'e', 'f': 'f', 'g': 'g', 'h': 'h',
+  // ── Files — phonetic / NATO + other aliases ──
+  'alpha': 'a', 'alfa': 'a', 'anna': 'a', 'apple': 'a', 'able': 'a', 'ay': 'a', 'eh': 'a',
+  'bravo': 'b', 'beta': 'b', 'baker': 'b', 'bee': 'b', 'be': 'b',
+  'charlie': 'c', 'chris': 'c', 'sea': 'c', 'see': 'c',
+  'delta': 'd', 'david': 'd', 'dee': 'd', 'day': 'd',
+  'echo': 'e', 'edward': 'e', 'easy': 'e', 'eagle': 'e', 'he': 'e', 'eat': 'e', 'eve': 'e',
+  'foxtrot': 'f', 'frank': 'f', 'fred': 'f', 'of': 'f',
+  'george': 'g', 'gee': 'g',
+  'hotel': 'h', 'henry': 'h', 'harry': 'h', 'age': 'h', 'each': 'h',
+  // ── Ranks ──
+  '1': '1', 'one': '1', 'won': '1',
+  '2': '2', 'two': '2', 'too': '2', 'tu': '2',
+  '3': '3', 'three': '3', 'tree': '3', 'free': '3',
+  '4': '4', 'four': '4', 'fore': '4',
+  '5': '5', 'five': '5', 'fife': '5', 'hive': '5',
+  '6': '6', 'six': '6',
+  '7': '7', 'seven': '7',
+  '8': '8', 'eight': '8', 'ate': '8',
+  // ── Capture / special ──
+  'takes': 'x', 'take': 'x', 'capture': 'x', 'captures': 'x',
+  'promote': '=', 'promotes': '=', 'promotion': '=', 'equals': '=',
+  'castle': 'O', 'castles': 'O',
+  'hassle': 'O', 'hassel': 'O', 'tassel': 'O', 'dazzle': 'O', 'battle': 'O',
+  'short': 'O-O', 'kingside': 'O-O', 'king side': 'O-O',
+  'long': 'O-O-O', 'queenside': 'O-O-O', 'queen side': 'O-O-O',
+  // ── Confirmation ──
+  'yes': 'YES', 'yeah': 'YES', 'yep': 'YES', 'yup': 'YES', 'correct': 'YES',
+  'confirm': 'YES', 'ok': 'YES', 'okay': 'YES', 'sure': 'YES', 'go': 'YES', 'play': 'YES',
+  'no': 'NO', 'nah': 'NO', 'nope': 'NO', 'cancel': 'NO', 'wrong': 'NO', 'undo': 'NO',
+  // ── Noise / filler ──
+  'to': '_IGNORE', 'the': '_IGNORE', 'on': '_IGNORE',
+  'uh': '_IGNORE', 'um': '_IGNORE', 'and': '_IGNORE', 'hmm': '_IGNORE',
+  'check': '_IGNORE', 'mate': '_IGNORE',
+};
+
+const VOICE_FILES = new Set('abcdefgh');
+const VOICE_RANKS = new Set('12345678');
+const VOICE_PIECES = new Set('PNBRQK');
+
+// ── Input normalization ──
+function voiceHeardToValues(rawText) {
+  const words = rawText.toLowerCase().trim().split(/\s+/);
+  // Expand "ninety" → "knight e" compounds
+  const EXPAND = {
+    'ninety': ['knight', 'e'], 'ninety-five': ['knight', 'e', 'five'],
+    'ninety-four': ['knight', 'e', 'four'], 'ninety-three': ['knight', 'e', 'three'],
+    'ninety-two': ['knight', 'e', 'two'], 'ninety-one': ['knight', 'e', 'one'],
+    'ninety-six': ['knight', 'e', 'six'], 'ninety-seven': ['knight', 'e', 'seven'],
+    'ninety-eight': ['knight', 'e', 'eight'],
+  };
+  for (let i = 0; i < words.length; i++) {
+    const exp = EXPAND[words[i]];
+    if (exp) { words.splice(i, 1, ...exp); i += exp.length - 1; }
+  }
+  // "95" → digit 9 at start = "knight e" + rank
+  for (let i = 0; i < words.length; i++) {
+    if (/^9[1-8]$/.test(words[i])) { words.splice(i, 1, 'knight', 'e', words[i][1]); i += 2; }
+  }
+  // Split merged chess chars: "ad1"→["a","d","1"], "e4"→["e","4"]
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    if (VOICE_LEX[w]) continue;
+    if (w.length < 2) continue;
+    const chars = [];
+    let allChess = true;
+    for (const ch of w) { if (/[a-h1-8]/.test(ch)) chars.push(ch); else { allChess = false; break; } }
+    if (allChess && chars.length >= 2) { words.splice(i, 1, ...chars); i += chars.length - 1; }
+  }
+  const values = [];
+  for (const w of words) {
+    const v = VOICE_LEX[w];
+    if (v && v !== '_IGNORE') values.push(v);
+  }
+  return values;
+}
+
+// ── Build all legal phrasings for each move ──
+function voiceBuildMovePhrasings() {
+  const legalMoves = gameEngine.moves({ verbose: true });
+  const moveMap = new Map();
+  const piecesToSquare = {};
+  for (const m of legalMoves) {
+    if (m.piece === 'p') continue;
+    const key = `${m.piece.toUpperCase()}_${m.to}`;
+    if (!piecesToSquare[key]) piecesToSquare[key] = [];
+    piecesToSquare[key].push(m);
+  }
+  for (const m of legalMoves) {
+    const san = m.san, piece = m.piece.toUpperCase();
+    const fromF = m.from[0], fromR = m.from[1], toF = m.to[0], toR = m.to[1];
+    const isCapture = m.captured !== undefined;
+    const phrasings = [];
+    if (m.flags.includes('k')) { phrasings.push(['O-O']); phrasings.push(['O']); moveMap.set(san, { phrasings }); continue; }
+    if (m.flags.includes('q')) { phrasings.push(['O-O-O']); phrasings.push(['O']); moveMap.set(san, { phrasings }); continue; }
+    const promoMatch = san.match(/=([NBRQ])/);
+    const promoSuffix = promoMatch ? [promoMatch[1]] : [];
+    if (piece === 'P') {
+      phrasings.push([toF, toR, ...promoSuffix]);
+      phrasings.push(['P', toF, toR, ...promoSuffix]);
+      if (isCapture) {
+        phrasings.push([fromF, 'x', toF, toR, ...promoSuffix]);
+        phrasings.push([fromF, toF, toR, ...promoSuffix]);
+        phrasings.push(['P', 'x', toF, toR, ...promoSuffix]);
+      }
+      phrasings.push([fromF, fromR, toF, toR, ...promoSuffix]);
+    } else {
+      const ambigKey = `${piece}_${m.to}`;
+      const siblings = piecesToSquare[ambigKey] || [];
+      const needsDisambig = siblings.length > 1;
+      phrasings.push([piece, toF, toR]);
+      if (isCapture) phrasings.push([piece, 'x', toF, toR]);
+      if (needsDisambig) {
+        const sameFile = siblings.some(s => s.from[0] === fromF && s.from !== m.from);
+        const sameRank = siblings.some(s => s.from[1] === fromR && s.from !== m.from);
+        if (!sameFile) { phrasings.push([piece, fromF, toF, toR]); if (isCapture) phrasings.push([piece, fromF, 'x', toF, toR]); }
+        if (!sameRank) { phrasings.push([piece, fromR, toF, toR]); if (isCapture) phrasings.push([piece, fromR, 'x', toF, toR]); }
+        phrasings.push([piece, fromF, fromR, toF, toR]);
+      }
+      phrasings.push([fromF, fromR, toF, toR]);
+    }
+    moveMap.set(san, { phrasings });
+  }
+  return moveMap;
+}
+
+// ── Fuzzy token edit distance ──
+function voiceTokenDistance(heard, target) {
+  const n = heard.length, m = target.length;
+  const dp = Array.from({ length: n + 1 }, () => new Float32Array(m + 1));
+  for (let i = 0; i <= n; i++) dp[i][0] = i * 0.6;
+  for (let j = 0; j <= m; j++) dp[0][j] = j * 0.6;
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= m; j++) {
+      const h = heard[i - 1], t = target[j - 1];
+      let subCost;
+      if (h === t) subCost = 0;
+      else if (VOICE_FILES.has(h) && VOICE_FILES.has(t)) subCost = 0.8;
+      else if (VOICE_RANKS.has(h) && VOICE_RANKS.has(t)) subCost = 0.8;
+      else if (VOICE_PIECES.has(h) && VOICE_PIECES.has(t)) subCost = 0.9;
+      else subCost = 1.2;
+      dp[i][j] = Math.min(dp[i - 1][j] + 0.6, dp[i][j - 1] + 0.8, dp[i - 1][j - 1] + subCost);
+    }
+  }
+  return dp[n][m];
+}
+
+// ── Main move matcher ──
+function voiceMatchMove(heardValues) {
+  if (heardValues.length === 0) return null;
+  if (voicePendingMove) {
+    if (heardValues.includes('YES')) return { type: 'confirm', value: true };
+    if (heardValues.includes('NO')) return { type: 'confirm', value: false };
+  }
+  // Castle
+  if (heardValues.includes('O-O') || heardValues.includes('O-O-O') || heardValues.includes('O')) {
+    const castleVals = heardValues.filter(v => v === 'O' || v === 'O-O' || v === 'O-O-O');
+    const wantsLong = castleVals.includes('O-O-O');
+    const legalSans = gameEngine.moves();
+    if (wantsLong && legalSans.includes('O-O-O')) return { type: 'move', san: 'O-O-O' };
+    if (!wantsLong && legalSans.includes('O-O')) return { type: 'move', san: 'O-O' };
+    const castles = legalSans.filter(s => s.startsWith('O-O'));
+    if (castles.length === 1) return { type: 'move', san: castles[0] };
+    return null;
+  }
+  const moveValues = heardValues.filter(v => v !== 'YES' && v !== 'NO');
+  if (moveValues.length === 0) return null;
+  const moveMap = voiceBuildMovePhrasings();
+  const results = [];
+  for (const [san, { phrasings }] of moveMap) {
+    let moveBestCost = Infinity;
+    for (const phrasing of phrasings) {
+      const cost = voiceTokenDistance(moveValues, phrasing);
+      const normCost = cost / Math.max(phrasing.length, 1);
+      if (normCost < moveBestCost) moveBestCost = normCost;
+    }
+    results.push({ san, cost: moveBestCost });
+  }
+  results.sort((a, b) => a.cost - b.cost);
+  if (results.length === 0) return null;
+  const bestCost = results[0].cost;
+  if (bestCost > 0.75) return null;
+  const secondCost = results.length > 1 ? results[1].cost : Infinity;
+  if (secondCost - bestCost > 0.1) return { type: 'move', san: results[0].san };
+  const tied = results.filter(r => r.cost - bestCost <= 0.1);
+  const heardPiece = moveValues.some(v => VOICE_PIECES.has(v));
+  if (!heardPiece) {
+    const pawnTied = tied.filter(r => {
+      const mv = gameEngine.moves({ verbose: true }).find(m => m.san === r.san);
+      return mv && mv.piece === 'p';
+    });
+    if (pawnTied.length === 1) return { type: 'move', san: pawnTied[0].san };
+  }
+  if (tied.length > 1) return { type: 'ambiguous', moves: tied.map(r => r.san) };
+  return { type: 'move', san: tied[0].san };
+}
+
+// ── SAN → spoken text ──
+function voiceMoveToSpeech(san) {
+  if (san === 'O-O') return 'castles short';
+  if (san === 'O-O-O') return 'castles long';
+  let s = san.replace(/[+#]/g, '');
+  const pieces = { N: 'Knight', B: 'Bishop', R: 'Rook', Q: 'Queen', K: 'King' };
+  const parts = [];
+  let promo = '';
+  const promoMatch = s.match(/=([NBRQ])/);
+  if (promoMatch) { promo = { N: 'Knight', B: 'Bishop', R: 'Rook', Q: 'Queen' }[promoMatch[1]] || promoMatch[1]; s = s.replace(/=[NBRQ]/, ''); }
+  if (/^[NBRQK]/.test(s)) { parts.push(pieces[s[0]]); s = s.slice(1); }
+  for (const ch of s) { if (ch === 'x') parts.push('takes'); else parts.push(ch); }
+  if (promo) { parts.push('promotes to'); parts.push(promo); }
+  let speech = parts[0] || '';
+  for (let i = 1; i < parts.length; i++) {
+    const prev = parts[i - 1], cur = parts[i];
+    if (prev.length === 1 && cur.length === 1) speech += ', ' + cur;
+    else speech += ' ' + cur;
+  }
+  return speech;
+}
+
+// ── TTS ──
+function voiceSpeak(text) {
+  return new Promise(resolve => {
+    if (!text || typeof speechSynthesis === 'undefined') { resolve(); return; }
+    voiceSpeaking = true;
+    const u = new SpeechSynthesisUtterance(text);
+    u.voice = voiceSelectedVoice;
+    u.rate = voiceSettings.speed || 1.3;
+    u.pitch = 1.0;
+    u.onend = () => { voiceSpeaking = false; resolve(); };
+    u.onerror = () => { voiceSpeaking = false; resolve(); };
+    speechSynthesis.speak(u);
+  });
+}
+
+// ── Bluetooth keepalive ──
+function voiceStartBtKeepAlive() {
+  if (voiceBtKeepAliveCtx) return;
+  try {
+    voiceBtKeepAliveCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = voiceBtKeepAliveCtx.createOscillator();
+    const gain = voiceBtKeepAliveCtx.createGain();
+    gain.gain.value = 0.001;
+    osc.connect(gain);
+    gain.connect(voiceBtKeepAliveCtx.destination);
+    osc.start();
+  } catch(e) {}
+}
+function voiceStopBtKeepAlive() {
+  if (voiceBtKeepAliveCtx) { voiceBtKeepAliveCtx.close().catch(() => {}); voiceBtKeepAliveCtx = null; }
+}
+
+// ── Recognition init ──
+function voiceInitRecognition() {
+  if (voiceRecognition) return;
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { console.warn('Voice: SpeechRecognition not supported'); return; }
+  voiceRecognition = new SR();
+  voiceRecognition.continuous = true;
+  voiceRecognition.interimResults = false;
+  voiceRecognition.lang = 'en-US';
+  voiceRecognition.maxAlternatives = 5;
+  // Contextual biasing
+  const SRP = window.SpeechRecognitionPhrase;
+  if (SRP && 'phrases' in voiceRecognition) {
+    try {
+      voiceRecognition.phrases = [
+        { phrase: 'knight', boost: 8 }, { phrase: 'bishop', boost: 8 },
+        { phrase: 'rook', boost: 8 }, { phrase: 'queen', boost: 8 },
+        { phrase: 'king', boost: 8 }, { phrase: 'pawn', boost: 6 },
+        { phrase: 'castle', boost: 7 }, { phrase: 'takes', boost: 6 },
+        { phrase: 'ace', boost: 6 }, { phrase: 'boy', boost: 6 },
+        { phrase: 'cat', boost: 6 }, { phrase: 'dog', boost: 6 },
+        { phrase: 'egg', boost: 6 }, { phrase: 'fox', boost: 6 },
+        { phrase: 'golf', boost: 6 }, { phrase: 'hot', boost: 6 },
+        { phrase: 'yes', boost: 4 }, { phrase: 'no', boost: 4 },
+      ].map(p => new SRP(p.phrase, p.boost));
+      console.log('Voice: phrase biasing active');
+    } catch(e) { console.log('Voice: phrase biasing failed:', e.message); }
+  }
+  voiceRecognition.onresult = (event) => {
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      if (!event.results[i].isFinal) continue;
+      const alts = [];
+      for (let j = 0; j < event.results[i].length; j++) {
+        const alt = event.results[i][j];
+        if (alt.transcript.trim()) alts.push({ text: alt.transcript.trim(), confidence: alt.confidence });
+      }
+      if (alts.length > 0) voiceHandleAlternatives(alts);
+    }
+  };
+  voiceRecognition.onerror = (event) => {
+    if (event.error === 'no-speech' || event.error === 'aborted') return;
+    console.warn('Voice recognition error:', event.error);
+    if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+      voiceStop();
+      showFeedback('info', 'Mic denied', 'Microphone access denied. Enable in browser settings and reload.');
+    }
+  };
+  voiceRecognition.onend = () => { if (voiceListening) { try { voiceRecognition.start(); } catch(e) {} } };
+  // Init voice selection
+  voiceInitVoice();
+}
+
+function voiceInitVoice() {
+  const pick = () => {
+    const voices = speechSynthesis.getVoices().filter(v => v.lang.startsWith('en'));
+    if (voices.length === 0) return;
+    // Try to restore saved voice
+    if (voiceSettings.voiceName) {
+      const saved = voices.find(v => v.name === voiceSettings.voiceName);
+      if (saved) { voiceSelectedVoice = saved; return; }
+    }
+    // Auto-pick best: prefer network, neural, Google
+    voices.sort((a, b) => {
+      const score = v => {
+        let s = 0; const n = v.name.toLowerCase();
+        if (!v.localService) s += 10;
+        if (n.includes('neural') || n.includes('natural')) s += 8;
+        if (n.includes('enhanced') || n.includes('premium')) s += 6;
+        if (n.includes('google')) s += 4;
+        if (v.lang === 'en-US') s += 1;
+        return s;
+      };
+      return score(b) - score(a);
+    });
+    voiceSelectedVoice = voices[0];
+  };
+  speechSynthesis.onvoiceschanged = pick;
+  pick();
+}
+
+// ── Handle recognition results (try all alternatives) ──
+async function voiceHandleAlternatives(alts) {
+  if (voiceSpeaking) return;
+  if (!voiceMode) return;
+  // Auto-stop if continuation has ended (but not during wrong-move refutation browsing)
+  if (!continuationMode && !advantageMode && !contWrongMovePending) { voiceStop(); return; }
+  console.log('Voice heard:', alts.map(a => `"${a.text}" (${(a.confidence * 100).toFixed(0)}%)`).join(' | '));
+  let bestResult = null;
+  let hadMeaningfulTokens = false;
+  for (const alt of alts) {
+    const values = voiceHeardToValues(alt.text);
+    if (values.length === 0) continue;
+    hadMeaningfulTokens = true;
+    const result = voiceMatchMove(values);
+    if (!result) continue;
+    bestResult = result;
+    if (alt.text !== alts[0].text) console.log('Voice: matched on alt:', alt.text);
+    break;
+  }
+  if (!bestResult) {
+    // Only announce failure if the input had chess-relevant tokens (not just noise)
+    if (hadMeaningfulTokens) await voiceSpeak("No match. Try again.");
+    return;
+  }
+  await voiceProcessResult(bestResult);
+}
+
+// ── Process a matched result ──
+async function voiceProcessResult(result) {
+  if (result.type === 'confirm' && voicePendingMove) {
+    if (result.value) {
+      const san = voicePendingMove;
+      voicePendingMove = null;
+      voiceExecuteMove(san);
+    } else {
+      voicePendingMove = null;
+      await voiceSpeak('Cancelled');
+    }
+    return;
+  }
+  // Any non-confirm result clears a stale pending move
+  if (voicePendingMove) voicePendingMove = null;
+  if (result.type === 'ambiguous') {
+    const moveNames = result.moves.slice(0, 3).map(s => voiceMoveToSpeech(s));
+    await voiceSpeak('Ambiguous. ' + moveNames.join(', or ') + '.');
+    return;
+  }
+  if (result.type !== 'move') return;
+  // Check it's the user's turn
+  const m = filteredMistakes[currentMistakeIdx];
+  if (m) {
+    const isUserTurn = (m.playerColor === 'white' && gameEngine.turn() === 'w') ||
+                       (m.playerColor === 'black' && gameEngine.turn() === 'b');
+    if (!isUserTurn) return; // opponent's turn — ignore voice input
+  }
+  const san = result.san;
+  const spokenMove = voiceMoveToSpeech(san);
+  if (voiceSettings.confirm) {
+    voicePendingMove = san;
+    await voiceSpeak(spokenMove + '?');
+  } else {
+    voiceExecuteMove(san);
+  }
+}
+
+// ── Execute a confirmed voice move through the existing evaluation pipeline ──
+function voiceExecuteMove(san) {
+  if (!gameEngine) return;
+  // Don't accept voice moves when browsing engine line refutation
+  if (contWrongMovePending || browsingLine) { voiceSpeak('Navigate back to try again'); return; }
+  if (!continuationMode && !advantageMode) return;
+  const move = gameEngine.move(san);
+  if (!move) { voiceSpeak('Invalid move'); return; }
+  boardObj.position(gameEngine.fen(), false);
+  showLastMoveHighlight(move.from, move.to);
+  clearArrows();
+  // Route through the same path as onDrop
+  currentAttempts++;
+  if (repContRetrying) {
+    evaluateRepContRetryMove(move.from, move.to, move);
+  } else if (repContActive) {
+    evaluateRepertoireContinuationMove(move.from, move.to, move);
+  } else {
+    evaluateMove(move.from, move.to, move);
+  }
+}
+
+// ── Start / stop voice mode ──
+function voiceStart() {
+  if (voiceMode) return;
+  voiceInitRecognition();
+  if (!voiceRecognition) return;
+  voiceMode = true;
+  voiceListening = true;
+  voicePendingMove = null;
+  try {
+    voiceRecognition.start();
+    voiceStartBtKeepAlive();
+    console.log('Voice mode started');
+  } catch(e) {
+    voiceMode = false;
+    voiceListening = false;
+    console.warn('Voice start failed:', e.message);
+  }
+}
+
+function voiceStop() {
+  if (!voiceMode) return;
+  voiceMode = false;
+  voiceListening = false;
+  voicePendingMove = null;
+  voiceLastOpponentSan = null;
+  voiceSpeaking = false;
+  if (typeof speechSynthesis !== 'undefined') speechSynthesis.cancel();
+  if (voiceRecognition) { try { voiceRecognition.stop(); } catch(e) {} }
+  voiceStopBtKeepAlive();
+  console.log('Voice mode stopped');
+}
+
+// ── Voice help reference text ──
+function voiceHelpHtml() {
+  return `
+    <div style="font-size:11px;line-height:1.7;color:var(--text-secondary);">
+      <div style="font-weight:600;color:var(--text-primary);margin-bottom:4px;">🎙 Voice Commands</div>
+      <div><b>Files:</b> ace · boy · cat · dog · egg · fox · golf · hot</div>
+      <div><b>Pieces:</b> knight · bishop · rook · queen · king · pawn</div>
+      <div><b>Actions:</b> takes · castle short/long · promote [piece]</div>
+      <div><b>Confirm:</b> yes / no</div>
+      <div style="margin-top:6px;font-weight:600;color:var(--text-primary);">⌨ Keyboard</div>
+      <div><b>Space</b> or <b>1</b> — replay last opponent move</div>
+      <div><b>Enter</b> or <b>2</b> — confirm · <b>Backspace</b> or <b>3</b> — cancel</div>
+      <div style="margin-top:4px;color:var(--text-muted);font-size:10px;">Example: "Knight fox three" = Nf3</div>
+    </div>
+  `;
+}
+
 // ─── Login UX ───
 function updateLoginUX() {
   const desc = document.getElementById('loginDesc');
@@ -6649,6 +7180,7 @@ function showMainApp() {
   appShown = true;
 
   loadContSettings();
+  loadVoiceSettings();
 
   // Sync filter chip UI with saved filter state
   document.querySelectorAll('.filter-chip[data-filter]').forEach(el => {
@@ -7374,6 +7906,7 @@ function renderQueue() {
 
 // ─── Load a position ───
 function loadPosition(globalIdx) {
+  if (voiceMode) voiceStop();
   // Clean up any synthetic practice item from filter continuation
   if (practiceContItem) {
     const pIdx = filteredMistakes.indexOf(practiceContItem);
@@ -10184,6 +10717,40 @@ function buildContSettingsHtml() {
         </label>
       </div>
 
+      <hr class="cont-settings-divider">
+
+      <div class="cont-settings-section">
+        <div class="cont-settings-header">
+          <h4>🎙 Voice mode</h4>
+          <label class="cont-settings-toggle">
+            <input type="checkbox" id="csVoiceToggle" ${voiceSettings.enabled ? 'checked' : ''}
+              onchange="document.getElementById('csVoiceBody').classList.toggle('cont-settings-disabled', !this.checked)">
+            <div class="toggle-track"></div>
+            <div class="toggle-thumb"></div>
+          </label>
+        </div>
+        <div id="csVoiceBody" class="${voiceSettings.enabled ? '' : 'cont-settings-disabled'}">
+          <div class="cont-settings-row">
+            <label style="font-size:11px;color:var(--text-secondary);display:flex;align-items:center;gap:6px;cursor:pointer;">
+              <input type="checkbox" id="csVoiceConfirm" ${voiceSettings.confirm ? 'checked' : ''}
+                style="accent-color:var(--accent);">
+              Confirm moves
+            </label>
+          </div>
+          <div class="maia-slider-row">
+            <span class="maia-slider-label">TTS Speed</span>
+            <input type="range" class="maia-slider" id="csVoiceSpeed"
+                   min="0.5" max="2.0" step="0.1" value="${voiceSettings.speed}"
+                   oninput="document.getElementById('csVoiceSpeedVal').textContent=parseFloat(this.value).toFixed(1)+'×'">
+            <span class="maia-slider-value" id="csVoiceSpeedVal">${voiceSettings.speed.toFixed(1)}×</span>
+          </div>
+          <div class="cont-settings-note" style="margin-top:4px;">
+            <button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 8px;" onclick="this.nextElementSibling.classList.toggle('hidden')">? Commands</button>
+            <div class="hidden" style="margin-top:6px;">${voiceHelpHtml()}</div>
+          </div>
+        </div>
+      </div>
+
       <div class="cont-settings-footer">
         <button class="btn btn-primary btn-sm" style="flex:1;font-size:12px;" onclick="applyContSettingsAndStart()">▶ Start</button>
         <button class="btn btn-ghost btn-sm" style="font-size:12px;" onclick="cancelContSettings()">Cancel</button>
@@ -10234,6 +10801,12 @@ function readContSettingsFromPanel() {
     if (mainPrecVal) mainPrecVal.textContent = maiaPrecision.toFixed(2);
   }
   saveContSettings();
+  // Voice settings
+  voiceSettings.enabled = document.getElementById('csVoiceToggle')?.checked ?? false;
+  voiceSettings.confirm = document.getElementById('csVoiceConfirm')?.checked ?? true;
+  const speedSlider = document.getElementById('csVoiceSpeed');
+  if (speedSlider) voiceSettings.speed = parseFloat(speedSlider.value);
+  saveVoiceSettings();
 }
 
 function applyContSettingsAndStart() {
@@ -10645,6 +11218,7 @@ function claimAdvantageVictory() {
 function finishAdvantage(outcome) {
   // outcome: 'victory' (claim or checkmate), 'collapse' (eval ≤ 100cp), 'draw'
   if (!advantageMode) return;
+  if (voiceMode) voiceStop();
   advantageMode = false;
   silentContinuation = false;
   lastContUserAfterCp = null;
@@ -11548,6 +12122,9 @@ async function showTacticEngineLine() {
 function startContinuationMode() {
   continuationMode = true;
 
+  // Start voice mode if enabled
+  if (voiceSettings.enabled) voiceStart();
+
   // Enter silent mode if instant feedback is disabled (not advantage cap — that's handled separately)
   if (!instantFeedback && !advantageMode) {
     silentContinuation = true;
@@ -11730,6 +12307,12 @@ async function advanceContinuation(contUci) {
   lastOpponentSource = moveSource;
   const oppEvalData = silentContinuation && lastContUserAfterCp != null ? { _prevUserAfterCp: lastContUserAfterCp } : undefined;
   addContLineMove(result.san, opponentUci, gameEngine.fen(), false, oppEvalData);
+
+  // Voice mode: announce opponent's move via TTS
+  if (voiceMode) {
+    voiceLastOpponentSan = result.san;
+    await voiceSpeak(voiceMoveToSpeech(result.san));
+  }
 
   // Check if game is over after opponent's move
   if (gameEngine.game_over()) {
@@ -15228,6 +15811,7 @@ function checkForNote(fen) {
 // ─── Keyboard shortcuts ───
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    if (voiceMode && voicePendingMove) { voiceProcessResult({ type: 'confirm', value: false }); return; }
     if (analysisMode) { exitAnalysisMode(); return; }
     if (openingFilterMode) { exitOpeningFilter(false); return; }
     if (!document.getElementById('mobileFeedbackOverlay').classList.contains('hidden')) { closeMobileFeedback(); return; }
@@ -15239,6 +15823,24 @@ document.addEventListener('keydown', (e) => {
     closeSettings();
   }
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  // Voice mode keybinds — Space/1: replay, Enter/2: confirm, Backspace/3: deny
+  if (voiceMode) {
+    if (e.key === ' ' || e.key === '1') {
+      e.preventDefault();
+      if (voiceLastOpponentSan) voiceSpeak(voiceMoveToSpeech(voiceLastOpponentSan));
+      return;
+    }
+    if ((e.key === 'Enter' || e.key === '2') && voicePendingMove) {
+      e.preventDefault();
+      voiceProcessResult({ type: 'confirm', value: true });
+      return;
+    }
+    if ((e.key === 'Backspace' || e.key === '3') && voicePendingMove) {
+      e.preventDefault();
+      voiceProcessResult({ type: 'confirm', value: false });
+      return;
+    }
+  }
   // Analysis mode — arrow keys navigate the tree
   if (analysisMode) {
     if (e.key === 'ArrowLeft') { analysisLineStep(-1); e.preventDefault(); }
