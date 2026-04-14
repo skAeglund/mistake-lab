@@ -1398,7 +1398,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Review retry eval stability check; fix note arrows auto-showing without opening note panel</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Game review retry: hints, Show Best/Line/Refutation, Save button, fast eval for known moves; fix Show Line title mismatch</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -8597,6 +8597,37 @@ async function evaluateMove(from, to, move) {
   try {
     let bestCp, bestMoveUci, bestMoveSan;
 
+    // Fast path for review retry: skip analysis if user played the stored best move
+    if (contLineReviewRetryIdx >= 0 && contLine) {
+      const originalMv = contLine.moves[contLineReviewRetryIdx];
+      const userUci = from + to + (move.promotion || '');
+      if (originalMv?.bestMoveUci && userUci === originalMv.bestMoveUci) {
+        sfLog('evaluateMove', `REVIEW RETRY FAST: user played stored best move ${userUci} — skipping analysis`);
+        const loadEl = document.getElementById(loadingId);
+        if (loadEl) loadEl.remove();
+        handleReviewRetryResult(0, move, originalMv.bestMoveSan || uciToSan(currentSolveFen, originalMv.bestMoveUci), true);
+        return;
+      }
+      // Also check already-available PVs for a fast match
+      const pre = preAnalysis;
+      if (pre && pre.bestMove && preAnalysisFen === currentSolveFen && pre.pvs) {
+        const matchedPv = pre.pvs.find(pv => pv.move === userUci);
+        if (matchedPv) {
+          sfLog('evaluateMove', `REVIEW RETRY FAST: PV match ${userUci} cpLoss=${pre.bestCp - matchedPv.cp} — skipping depth gates`);
+          const loadEl = document.getElementById(loadingId);
+          if (loadEl) loadEl.remove();
+          const cpLoss = (pre.bestCp || 0) - matchedPv.cp;
+          const wpBefore = cpToWinPct(pre.bestCp || 0);
+          const wpAfter = cpToWinPct(matchedPv.cp);
+          const wpDrop = Math.max(0, wpBefore - wpAfter);
+          const isLiteralBest = userUci === pre.bestMove || move.san === uciToSan(currentSolveFen, pre.bestMove);
+          const isExactBest = isLiteralBest || wpDrop < 0.5;
+          handleReviewRetryResult(wpDrop, move, uciToSan(currentSolveFen, pre.bestMove), isExactBest);
+          return;
+        }
+      }
+    }
+
     // Wait for pre-analysis — review retry uses eval stability check across depth intervals
     if (contLineReviewRetryIdx >= 0) {
       // Step through depth gates: 16 → 18 → 20 → 22, stop when eval (wp%) is stable
@@ -11090,11 +11121,13 @@ async function showReviewBestLine(moveIdx) {
     return;
   }
 
-  // Play the best move on the board
+  // Play the actual PV first move on the board (not the stored bestMoveUci, which may differ)
+  const actualBestUci = pvMoves[0];
+  const actualBestSan = lineMoves[0].san;
   gameEngine.load(preFen);
-  const bestFrom = mv.bestMoveUci.substring(0, 2);
-  const bestTo = mv.bestMoveUci.substring(2, 4);
-  const bestPromo = mv.bestMoveUci.length > 4 ? mv.bestMoveUci[4] : undefined;
+  const bestFrom = actualBestUci.substring(0, 2);
+  const bestTo = actualBestUci.substring(2, 4);
+  const bestPromo = actualBestUci.length > 4 ? actualBestUci[4] : undefined;
   gameEngine.move({ from: bestFrom, to: bestTo, promotion: bestPromo });
   boardObj.position(gameEngine.fen(), true);
   showLastMoveHighlightDeferred(bestFrom, bestTo);
@@ -11127,7 +11160,7 @@ async function showReviewBestLine(moveIdx) {
 
   container.innerHTML = `
     <div class="feedback-box" style="background:rgba(62,207,142,0.06);border-left:3px solid #62cf8e;">
-      <div class="feedback-title" style="color:#62cf8e">Best line from <code>${escHtml(mv.bestMoveSan || mv.bestMoveUci)}</code></div>
+      <div class="feedback-title" style="color:#62cf8e">Best line from <code>${escHtml(actualBestSan)}</code></div>
       <div class="feedback-text">
         <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">You played <code>${escHtml(mv.san)}</code> ${sym ? `<span style="color:${cls.color}">${sym}</span>` : ''} (−${mv.wpDrop}%)</div>
         <div class="engine-line-moves" style="margin:6px 0;">${movesHtml}</div>
@@ -11322,6 +11355,18 @@ function startReviewRetry(moveIdx) {
   // Start pre-analysis for the retry position
   startPreAnalysis(preFen);
 
+  // Enable hints during retry
+  hintLevel = 0;
+  hintUsed = false;
+  hintMove = null;
+  clearHintHighlights();
+  const hintBtn = document.getElementById('btnHint');
+  hintBtn.classList.remove('hidden');
+  hintBtn.disabled = false;
+  hintBtn.textContent = '💡 Hint';
+  hintBtn.style.borderColor = '';
+  hintBtn.style.color = '';
+
   const container = document.getElementById('feedbackContainer');
   container.innerHTML = `
     <div class="feedback-box" style="background:var(--bg-card);border-left:3px solid var(--accent);">
@@ -11340,6 +11385,8 @@ function startReviewRetry(moveIdx) {
 function cancelReviewRetry(moveIdx) {
   contLineReviewRetryIdx = -1;
   stopPreAnalysis();
+  document.getElementById('btnHint').classList.add('hidden');
+  clearHintHighlights();
   goToContLineMove(moveIdx);
   showReviewKeyMoveInfo(moveIdx);
 }
@@ -11349,6 +11396,10 @@ function handleReviewRetryResult(wpDrop, move, bestMoveSan, isExactBest) {
   contLineReviewRetryIdx = -1;
   contLineBrowsing = false; // prevent accidental contLine truncation from board clicks
   stopPreAnalysis();
+
+  // Hide hint button after retry completes
+  document.getElementById('btnHint').classList.add('hidden');
+  clearHintHighlights();
 
   if (!contLine || !contLine.moves[moveIdx]) return;
   const originalMv = contLine.moves[moveIdx];
@@ -11385,15 +11436,28 @@ function handleReviewRetryResult(wpDrop, move, bestMoveSan, isExactBest) {
     body += `<div style="margin-top:4px;font-size:12px;color:var(--text-muted);">Better than your original <code>${escHtml(originalMv.san)}</code> (−${originalMv.wpDrop}%)</div>`;
   }
 
-  // Show exploration buttons for bad moves (same as key move view)
-  const showExplore = wpDrop > 5 && originalMv.bestMoveUci;
-  const exploreBtns = showExplore ? `
+  // Show exploration buttons based on move quality (mirroring showReviewKeyMoveInfo flow)
+  const showBest = !isExactBest && originalMv.bestMoveUci;
+  const showLine = !!originalMv.bestMoveUci;
+  const showRefutation = wpDrop > 5;
+  const exploreBtns = (showBest || showLine || showRefutation) ? `
     <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">
-      ${originalMv.bestMoveUci ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewBestArrow(${moveIdx})">Show best</button>` : ''}
-      ${originalMv.bestMoveUci ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewBestLine(${moveIdx})">Show line</button>` : ''}
-      <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewRefutation(${moveIdx})">Show refutation</button>
+      ${showBest ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewBestArrow(${moveIdx})">Show best</button>` : ''}
+      ${showLine ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewBestLine(${moveIdx})">Show line</button>` : ''}
+      ${showRefutation ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewRefutation(${moveIdx})">Show refutation</button>` : ''}
     </div>
   ` : '';
+
+  // Save button for the original mistake (same as showReviewKeyMoveInfo)
+  const saveFenBefore = moveIdx > 0 ? contLine.moves[moveIdx - 1].fen : contLine.baseFen;
+  const alreadySaved = gistData?.practiceMistakes?.some(pm =>
+    pm.fenBefore === saveFenBefore && pm.sanPlayed === originalMv.san
+  );
+  const saveBtn = (originalMv.isUser && originalMv.wpDrop > 2)
+    ? (alreadySaved
+      ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" disabled>✓ Saved</button>`
+      : `<button class="btn btn-ghost btn-sm" style="font-size:11px;" id="btnSaveMistake${moveIdx}" onclick="savePracticeMistake(${moveIdx})">💾 Save</button>`)
+    : '';
 
   const navHtml = `
     <div style="display:flex;gap:8px;margin-top:10px;">
@@ -11406,7 +11470,7 @@ function handleReviewRetryResult(wpDrop, move, bestMoveSan, isExactBest) {
   container.innerHTML = `
     <div class="feedback-box" style="background:${wpDropToColorDim(wpDrop)};border-left:3px solid ${color};">
       <div class="feedback-title" style="color:${color}">${title}</div>
-      <div class="feedback-text">${body}${exploreBtns}${navHtml}</div>
+      <div class="feedback-text">${body}${exploreBtns}${saveBtn ? `<div style="margin-top:6px;">${saveBtn}</div>` : ''}${navHtml}</div>
     </div>
   `;
 }
