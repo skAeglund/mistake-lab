@@ -1398,7 +1398,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix voice not starting in filter practice and advantage mode</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Voice: toggleable mic (Space/tap), keybind 4 for deny</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -5547,7 +5547,7 @@ function voiceExecuteMove(san) {
   }
 }
 
-// ── Start / stop voice mode ──
+// ── Start / stop / toggle voice mode ──
 function voiceStart() {
   if (voiceMode) return;
   voiceInitRecognition();
@@ -5559,7 +5559,7 @@ function voiceStart() {
     voiceRecognition.start();
     voiceStartBtKeepAlive();
     console.log('Voice mode started');
-    voiceShowIndicator(true);
+    voiceShowIndicator('listening');
   } catch(e) {
     voiceMode = false;
     voiceListening = false;
@@ -5578,37 +5578,66 @@ function voiceStop() {
   if (typeof speechSynthesis !== 'undefined') speechSynthesis.cancel();
   if (voiceRecognition) { try { voiceRecognition.stop(); } catch(e) {} }
   voiceStopBtKeepAlive();
-  voiceShowIndicator(false);
+  voiceShowIndicator('off');
   console.log('Voice mode stopped');
 }
 
-function voiceShowIndicator(show) {
-  let el = document.getElementById('voiceMicIndicator');
-  if (show) {
-    if (!el) {
-      el = document.createElement('div');
-      el.id = 'voiceMicIndicator';
-      el.style.cssText = 'position:fixed;bottom:70px;right:12px;z-index:9999;' +
-        'width:44px;height:44px;border-radius:50%;' +
-        'background:rgba(74,222,128,0.15);border:2px solid rgba(74,222,128,0.6);' +
-        'display:flex;align-items:center;justify-content:center;' +
-        'font-size:20px;cursor:pointer;animation:voicePulse 2s infinite;' +
-        'box-shadow:0 2px 12px rgba(0,0,0,0.3);backdrop-filter:blur(8px);';
-      el.textContent = '🎙';
-      el.title = 'Voice mode active — tap to stop';
-      el.onclick = () => { voiceStop(); showFeedback('info', '🎙 Voice stopped', 'Voice mode deactivated.'); };
-      document.body.appendChild(el);
-      // Add pulse animation if not already present
-      if (!document.getElementById('voicePulseStyle')) {
-        const style = document.createElement('style');
-        style.id = 'voicePulseStyle';
-        style.textContent = '@keyframes voicePulse{0%,100%{box-shadow:0 0 0 0 rgba(74,222,128,0.3)}50%{box-shadow:0 0 0 8px rgba(74,222,128,0)}}';
-        document.head.appendChild(style);
-      }
-    }
-    el.style.display = 'flex';
+function voiceToggleMic() {
+  if (!voiceMode) return;
+  if (voiceListening) {
+    // Mute — stop recognition but keep voice mode active (TTS still works)
+    voiceListening = false;
+    voicePendingMove = null;
+    if (voiceRecognition) { try { voiceRecognition.stop(); } catch(e) {} }
+    voiceShowIndicator('muted');
+    console.log('Voice mic muted');
   } else {
+    // Unmute — resume recognition
+    voiceListening = true;
+    if (voiceRecognition) { try { voiceRecognition.start(); } catch(e) {} }
+    voiceShowIndicator('listening');
+    console.log('Voice mic unmuted');
+  }
+}
+
+function voiceShowIndicator(state) {
+  // state: 'listening' | 'muted' | 'off'
+  let el = document.getElementById('voiceMicIndicator');
+  if (state === 'off') {
     if (el) el.style.display = 'none';
+    return;
+  }
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'voiceMicIndicator';
+    el.style.cssText = 'position:fixed;bottom:70px;right:12px;z-index:9999;' +
+      'width:44px;height:44px;border-radius:50%;' +
+      'display:flex;align-items:center;justify-content:center;' +
+      'font-size:20px;cursor:pointer;' +
+      'box-shadow:0 2px 12px rgba(0,0,0,0.3);backdrop-filter:blur(8px);' +
+      'transition:background 0.2s,border-color 0.2s;';
+    el.onclick = voiceToggleMic;
+    document.body.appendChild(el);
+    if (!document.getElementById('voicePulseStyle')) {
+      const style = document.createElement('style');
+      style.id = 'voicePulseStyle';
+      style.textContent = '@keyframes voicePulse{0%,100%{box-shadow:0 0 0 0 rgba(74,222,128,0.3)}50%{box-shadow:0 0 0 8px rgba(74,222,128,0)}}';
+      document.head.appendChild(style);
+    }
+  }
+  el.style.display = 'flex';
+  if (state === 'listening') {
+    el.textContent = '🎙';
+    el.title = 'Listening — tap to mute';
+    el.style.background = 'rgba(74,222,128,0.15)';
+    el.style.border = '2px solid rgba(74,222,128,0.6)';
+    el.style.animation = 'voicePulse 2s infinite';
+  } else {
+    el.textContent = '🔇';
+    el.title = 'Muted — tap to listen';
+    el.style.background = 'rgba(200,200,200,0.1)';
+    el.style.border = '2px solid rgba(200,200,200,0.3)';
+    el.style.animation = 'none';
   }
 }
 
@@ -5622,8 +5651,9 @@ function voiceHelpHtml() {
       <div><b>Actions:</b> takes · castle short/long · promote [piece]</div>
       <div><b>Confirm:</b> yes / no</div>
       <div style="margin-top:6px;font-weight:600;color:var(--text-primary);">⌨ Keyboard</div>
-      <div><b>Space</b> or <b>1</b> — replay last opponent move</div>
-      <div><b>Enter</b> or <b>2</b> — confirm · <b>Backspace</b> or <b>3</b> — cancel</div>
+      <div><b>Space</b> — toggle mic on/off</div>
+      <div><b>1</b> — replay last opponent move</div>
+      <div><b>Enter</b> or <b>2</b> — confirm · <b>Backspace</b> or <b>4</b> — cancel</div>
       <div style="margin-top:4px;color:var(--text-muted);font-size:10px;">Example: "Knight fox three" = Nf3</div>
     </div>
   `;
@@ -15866,9 +15896,14 @@ document.addEventListener('keydown', (e) => {
     closeSettings();
   }
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-  // Voice mode keybinds — Space/1: replay, Enter/2: confirm, Backspace/3: deny
+  // Voice mode keybinds — Space: toggle mic, 1: replay, 2/Enter: confirm, 4/Backspace: deny
   if (voiceMode) {
-    if (e.key === ' ' || e.key === '1') {
+    if (e.key === ' ') {
+      e.preventDefault();
+      voiceToggleMic();
+      return;
+    }
+    if (e.key === '1') {
       e.preventDefault();
       if (voiceLastOpponentSan) voiceSpeak(voiceMoveToSpeech(voiceLastOpponentSan));
       return;
@@ -15878,7 +15913,7 @@ document.addEventListener('keydown', (e) => {
       voiceProcessResult({ type: 'confirm', value: true });
       return;
     }
-    if ((e.key === 'Backspace' || e.key === '3') && voicePendingMove) {
+    if ((e.key === 'Backspace' || e.key === '4') && voicePendingMove) {
       e.preventDefault();
       voiceProcessResult({ type: 'confirm', value: false });
       return;
