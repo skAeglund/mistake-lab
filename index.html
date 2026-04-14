@@ -5376,7 +5376,11 @@ function voiceStopBtKeepAlive() {
 function voiceInitRecognition() {
   if (voiceRecognition) return;
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) { console.warn('Voice: SpeechRecognition not supported'); return; }
+  if (!SR) {
+    console.warn('Voice: SpeechRecognition not supported');
+    showFeedback('info', '🎙 Voice unavailable', 'Speech recognition is not supported in this browser. Use Chrome or Edge.');
+    return;
+  }
   voiceRecognition = new SR();
   voiceRecognition.continuous = true;
   voiceRecognition.interimResults = false;
@@ -5416,7 +5420,11 @@ function voiceInitRecognition() {
     console.warn('Voice recognition error:', event.error);
     if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
       voiceStop();
-      showFeedback('info', 'Mic denied', 'Microphone access denied. Enable in browser settings and reload.');
+      showFeedback('info', '🎙 Mic blocked', 'Microphone access denied. Tap the lock icon in the URL bar → Permissions → Microphone → Allow, then reload.');
+    } else if (event.error === 'network') {
+      showFeedback('info', '🎙 Network error', 'Voice recognition requires internet (audio is sent to Google). Check your connection.');
+    } else {
+      showFeedback('info', '🎙 Voice error', `Recognition error: ${event.error}`);
     }
   };
   voiceRecognition.onend = () => { if (voiceListening) { try { voiceRecognition.start(); } catch(e) {} } };
@@ -5551,10 +5559,12 @@ function voiceStart() {
     voiceRecognition.start();
     voiceStartBtKeepAlive();
     console.log('Voice mode started');
+    showFeedback('correct', '🎙 Voice active', 'Listening for moves. Say "Knight fox three" for Nf3.');
   } catch(e) {
     voiceMode = false;
     voiceListening = false;
     console.warn('Voice start failed:', e.message);
+    showFeedback('info', '🎙 Voice failed', `Could not start: ${e.message}`);
   }
 }
 
