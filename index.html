@@ -1398,7 +1398,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Voice: floating mic indicator, fix feedback being overwritten by continuation UI</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix voice not starting in filter practice and advantage mode</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -11002,6 +11002,7 @@ function launchFilterPractice() {
   contLineBrowsing = false;
   continuationMode = true;
   silentContinuation = true;
+  if (voiceSettings.enabled) voiceStart();
   updateEvalBar();
 
   // Determine whose turn it is
@@ -11204,6 +11205,7 @@ function startAdvantageContinuation(m) {
   };
   contLineBrowsing = false;
   continuationMode = true;
+  if (voiceSettings.enabled) voiceStart();
   if (!silentContinuation) showMaiaControls();
   updateEvalBar();
   // peakFen is the position before the user's move — it's the user's turn.
