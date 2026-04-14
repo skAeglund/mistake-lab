@@ -1398,7 +1398,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Game review retry: hints, Show Best/Line/Refutation, Save button, fast eval for known moves; fix Show Line title mismatch</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix Show Line to anchor on stored best move, consistent with Show Best arrow</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -11081,53 +11081,46 @@ async function showReviewBestLine(moveIdx) {
     </div>
   `;
 
-  // Navigate to pre-move position and play the best move
+  // Navigate to pre-move position
   goToContLineMove(moveIdx - 1);
 
-  // Analyze the pre-move position to get the full continuation line
-  const result = await sfAnalyze(preFen, 20, 1);
-  if (!result || !result.pvs || !result.pvs[0]) {
-    showReviewKeyMoveInfo(moveIdx);
-    return;
-  }
-
-  const pv = result.pvs[0];
-  const pvMoves = (pv.moves || '').trim().split(/\s+/).filter(Boolean);
-  if (pvMoves.length === 0) {
-    showReviewKeyMoveInfo(moveIdx);
-    return;
-  }
-
-  // Build the line: play through the PV on a temp chess instance
+  // Play the stored best move on a temp chess instance to get its SAN and the post-move FEN
   const chess = new Chess(preFen);
-  const lineMoves = [];
-  const fenParts = preFen.split(' ');
-  let lineNum = parseInt(fenParts[5]) || 1;
-  let isWhite = fenParts[1] === 'w';
-
-  for (const uci of pvMoves.slice(0, 10)) { // cap at 10 half-moves
-    const from = uci.substring(0, 2);
-    const to = uci.substring(2, 4);
-    const promo = uci.length > 4 ? uci[4] : undefined;
-    const m = chess.move({ from, to, promotion: promo });
-    if (!m) break;
-    lineMoves.push({ san: m.san, uci, fen: chess.fen(), isWhite });
-    if (!isWhite) lineNum++;
-    isWhite = !isWhite;
-  }
-
-  if (lineMoves.length === 0) {
+  const bestFrom = mv.bestMoveUci.substring(0, 2);
+  const bestTo = mv.bestMoveUci.substring(2, 4);
+  const bestPromo = mv.bestMoveUci.length > 4 ? mv.bestMoveUci[4] : undefined;
+  const bestMoveResult = chess.move({ from: bestFrom, to: bestTo, promotion: bestPromo });
+  if (!bestMoveResult) {
     showReviewKeyMoveInfo(moveIdx);
     return;
   }
 
-  // Play the actual PV first move on the board (not the stored bestMoveUci, which may differ)
-  const actualBestUci = pvMoves[0];
-  const actualBestSan = lineMoves[0].san;
+  const fenParts = preFen.split(' ');
+  let isWhite = fenParts[1] === 'w';
+  const lineMoves = [{ san: bestMoveResult.san, uci: mv.bestMoveUci, fen: chess.fen(), isWhite }];
+  let lineNum = parseInt(fenParts[5]) || 1;
+  if (!isWhite) lineNum++;
+  isWhite = !isWhite;
+
+  // Analyze the position AFTER the best move to get the continuation
+  const postBestFen = chess.fen();
+  const result = await sfAnalyze(postBestFen, 20, 1);
+  if (result && result.pvs && result.pvs[0]) {
+    const pvMoves = (result.pvs[0].moves || '').trim().split(/\s+/).filter(Boolean);
+    for (const uci of pvMoves.slice(0, 9)) { // cap continuation at 9 (total line: 10)
+      const from = uci.substring(0, 2);
+      const to = uci.substring(2, 4);
+      const promo = uci.length > 4 ? uci[4] : undefined;
+      const m = chess.move({ from, to, promotion: promo });
+      if (!m) break;
+      lineMoves.push({ san: m.san, uci, fen: chess.fen(), isWhite });
+      if (!isWhite) lineNum++;
+      isWhite = !isWhite;
+    }
+  }
+
+  // Play the best move on the board
   gameEngine.load(preFen);
-  const bestFrom = actualBestUci.substring(0, 2);
-  const bestTo = actualBestUci.substring(2, 4);
-  const bestPromo = actualBestUci.length > 4 ? actualBestUci[4] : undefined;
   gameEngine.move({ from: bestFrom, to: bestTo, promotion: bestPromo });
   boardObj.position(gameEngine.fen(), true);
   showLastMoveHighlightDeferred(bestFrom, bestTo);
@@ -11160,7 +11153,7 @@ async function showReviewBestLine(moveIdx) {
 
   container.innerHTML = `
     <div class="feedback-box" style="background:rgba(62,207,142,0.06);border-left:3px solid #62cf8e;">
-      <div class="feedback-title" style="color:#62cf8e">Best line from <code>${escHtml(actualBestSan)}</code></div>
+      <div class="feedback-title" style="color:#62cf8e">Best line from <code>${escHtml(bestMoveResult.san)}</code></div>
       <div class="feedback-text">
         <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">You played <code>${escHtml(mv.san)}</code> ${sym ? `<span style="color:${cls.color}">${sym}</span>` : ''} (−${mv.wpDrop}%)</div>
         <div class="engine-line-moves" style="margin:6px 0;">${movesHtml}</div>
