@@ -1398,7 +1398,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Voice: toggleable mic (Space/tap), keybind 4 for deny</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Voice: lower BT oscillator, TTS repertoire deviation alert with study move</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -5362,7 +5362,7 @@ function voiceStartBtKeepAlive() {
     voiceBtKeepAliveCtx = new (window.AudioContext || window.webkitAudioContext)();
     const osc = voiceBtKeepAliveCtx.createOscillator();
     const gain = voiceBtKeepAliveCtx.createGain();
-    gain.gain.value = 0.001;
+    gain.gain.value = 0.0001; // near-inaudible — just keeps BT A2DP awake
     osc.connect(gain);
     gain.connect(voiceBtKeepAliveCtx.destination);
     osc.start();
@@ -9151,10 +9151,21 @@ async function evaluateMove(from, to, move) {
         // Show hint button so user can get the repertoire move
         const hintBtn = document.getElementById('btnHint');
         if (hintBtn) { hintBtn.classList.remove('hidden'); hintBtn.disabled = false; hintBtn.textContent = '💡 Hint'; hintBtn.style.borderColor = ''; hintBtn.style.color = ''; }
+        // Get the correct repertoire move for feedback
+        const repMoves = repertoireTrie.get(posKey);
+        const repMoveSan = repMoves && repMoves.length > 0 ? repMoves[0].san : null;
         showColorFeedback('var(--yellow)', 'rgba(230,161,23,0.08)',
           '📖 Deviated from repertoire!',
           `<code class="mono">${escHtml(move.san)}</code> is not in your repertoire.` +
+          (repMoveSan ? ` Study move is <code class="mono">${escHtml(repMoveSan)}</code>.` : '') +
           `<div style="margin-top:6px;"><button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="ignorePracticeRepertoire()">Ignore Repertoire</button></div>`);
+        // Voice TTS: announce the deviation
+        if (voiceMode) {
+          const spoken = repMoveSan
+            ? `Repertoire deviation. Study move is ${voiceMoveToSpeech(repMoveSan)}.`
+            : `Repertoire deviation.`;
+          voiceSpeak(spoken);
+        }
         return;
       }
     }
