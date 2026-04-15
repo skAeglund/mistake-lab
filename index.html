@@ -1401,7 +1401,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix opening filter 0-results (empty gameFenIndex self-heal); lazy-load Maia ONNX (non-blocking)</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cache-first startup: render from localStorage, background-sync Gist; optimize advantage loop</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2393,7 +2393,9 @@ async function gistCreate() {
 }
 
 // ─── Sync logic ───
+let _gistProgressDirtyLocal = false; // Set when gistData modified locally (guards background sync overwrite)
 function debounceSyncToGist() {
+  _gistProgressDirtyLocal = true;
   if (airplaneMode) {
     // Still cache locally so changes survive page reload
     if (gistData) {
@@ -2635,6 +2637,18 @@ function saveGamesCache(username, cacheObj) {
   } catch (e) {
     console.warn('Failed to save games cache to localStorage:', e.message);
   }
+}
+
+// Compact digest for detecting whether the game set has changed
+function gamesDigest(games) {
+  if (!games || games.length === 0) return '';
+  // count + newest timestamp + sum of tactic counts (catches analyzer re-runs)
+  let newest = 0, tacticSum = 0;
+  for (const g of games) {
+    if (g.createdAt > newest) newest = g.createdAt;
+    tacticSum += Array.isArray(g.tactics) ? g.tactics.length : 0;
+  }
+  return `${games.length}:${newest}:${tacticSum}`;
 }
 
 function buildGameCacheObj(username, games, existingUsernames) {
@@ -5801,56 +5815,140 @@ async function fetchGames(autoUsername) {
 
   try {
     if (isGistConfigured()) {
-      // ══ Gist-authoritative path ══
-      // Game data flows: Analyzer → Gist → Browser → localStorage (offline cache)
-      // Browser never fetches from Lichess, never writes games back to Gist.
-      let games = [];
-      let gistOk = false;
+      // ══ Gist-authoritative path (cache-first) ══
+      // Game data flows: Analyzer → Gist → Browser → localStorage (offline cache).
+      // On repeat launches we render instantly from localStorage, then background-sync
+      // from Gist and only re-extract if the game set actually changed.
 
+      // ── Phase 1: try localStorage for instant render ──
+      const localCache = loadGamesCache(username);
+      let localGames = localCache && Array.isArray(localCache.games)
+        ? localCache.games.filter(g => g.analysis && g.analysis.length > 0) : [];
+      if (localGames.length > 0) {
+        for (const u of cacheUsernames(localCache)) knownUsernames.add(u.toLowerCase());
+      }
+
+      // Also load progress from localStorage cache (same store airplane mode uses)
+      let localProgressOk = false;
       try {
-        const gistCache = await gistReadGames();
-        if (gistCache && Array.isArray(gistCache.games)) {
-          games = gistCache.games.filter(g => g.analysis && g.analysis.length > 0);
-          gistOk = true;
-          // Collect all known usernames from gist
-          if (Array.isArray(gistCache.usernames)) {
-            for (const u of gistCache.usernames) knownUsernames.add(u.toLowerCase());
-          }
+        const cachedProgress = localStorage.getItem(GIST_PROGRESS_CACHE_KEY);
+        if (cachedProgress) {
+          gistData = JSON.parse(cachedProgress);
+          migrateInvalidationsToGist();
+          localProgressOk = true;
         }
-      } catch (e) {
-        console.warn('[GameCache] Gist read failed, falling back to localStorage:', e.message);
-        setSyncStatus('error', 'Cloud read failed');
-      }
+      } catch (_) {}
 
-      // Fall back to localStorage only if Gist read failed (not if Gist is just empty)
-      if (!gistOk) {
-        const cache = loadGamesCache(username);
-        if (cache && Array.isArray(cache.games)) {
-          const localGames = cache.games.filter(g => g.analysis && g.analysis.length > 0);
-          if (localGames.length > 0) {
-            games = localGames;
-            console.log('[GameCache] Using localStorage fallback');
+      if (localGames.length > 0 && localProgressOk) {
+        // ── Fast path: render from cache, background-sync ──
+        allGames = localGames;
+        localStorage.setItem('mistakelab_username', username);
+        const localDigest = gamesDigest(localGames);
+        console.log(`[CacheFirst] Rendering ${allGames.length} games from localStorage`);
+
+        btn.textContent = `Loading ${allGames.length} games…`;
+        setSyncStatus('syncing', 'Syncing…');
+        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+        loadEvalCacheFromLocalStorage();
+        extractAllMistakes();
+        applyFilters();
+        showMainApp();
+
+        // ── Phase 2: background-sync from Gist ──
+        (async () => {
+          try {
+            setSyncStatus('syncing', 'Syncing…');
+
+            // Fetch fresh progress from Gist (may have changed on another device)
+            // Only replace gistData if user hasn't modified it locally since the fast-path load
+            const freshProgress = await gistRead();
+            if (freshProgress && freshProgress.positions && !_gistProgressDirtyLocal) {
+              gistData = freshProgress;
+              migrateInvalidationsToGist();
+              try { localStorage.setItem(GIST_PROGRESS_CACHE_KEY, JSON.stringify(gistData)); } catch (_) {}
+            } else if (freshProgress && freshProgress.positions) {
+              // User already modified gistData — just update localStorage cache for next launch
+              console.log('[CacheFirst] Skipping gistData replace (local modifications pending)');
+              try { localStorage.setItem(GIST_PROGRESS_CACHE_KEY, JSON.stringify(gistData)); } catch (_) {}
+            }
+
+            // Check if games changed
+            const gistCache = await gistReadGames();
+            let gistGames = gistCache && Array.isArray(gistCache.games)
+              ? gistCache.games.filter(g => g.analysis && g.analysis.length > 0) : [];
+
+            if (Array.isArray(gistCache?.usernames)) {
+              for (const u of gistCache.usernames) knownUsernames.add(u.toLowerCase());
+            }
+
+            const gistDigest = gamesDigest(gistGames);
+
+            if (gistDigest !== localDigest && gistGames.length > 0) {
+              // Games changed — re-extract only if user isn't mid-drill
+              console.log(`[CacheFirst] Games changed (${localDigest} → ${gistDigest})`);
+              allGames = gistGames;
+              saveGamesCache(username, buildGameCacheObj(username, allGames));
+              if (currentMistakeIdx < 0) {
+                // Safe to re-extract: user hasn't loaded a position yet
+                setSyncStatus('syncing', 'Updating…');
+                extractAllMistakes();
+                applyFilters();
+                updateSessionProgress();
+              } else {
+                // User is mid-drill — defer re-extraction to next launch
+                console.log('[CacheFirst] Deferring re-extraction (user is mid-drill)');
+              }
+            } else if (gistGames.length > 0) {
+              console.log('[CacheFirst] Games unchanged, skipping re-extraction');
+            }
+
+            // Non-blocking eval cache merge from Gist
+            loadEvalCacheFromGist();
+            setSyncStatus('ok', 'Synced');
+          } catch (e) {
+            console.warn('[CacheFirst] Background sync failed:', e.message);
+            setSyncStatus('error', 'Sync failed');
           }
-          // Collect usernames from local cache
-          for (const u of cacheUsernames(cache)) knownUsernames.add(u.toLowerCase());
+        })();
+      } else {
+        // ── Cold start: no local cache, must fetch from Gist first ──
+        let games = [];
+        let gistOk = false;
+
+        try {
+          const gistCache = await gistReadGames();
+          if (gistCache && Array.isArray(gistCache.games)) {
+            games = gistCache.games.filter(g => g.analysis && g.analysis.length > 0);
+            gistOk = true;
+            if (Array.isArray(gistCache.usernames)) {
+              for (const u of gistCache.usernames) knownUsernames.add(u.toLowerCase());
+            }
+          }
+        } catch (e) {
+          console.warn('[GameCache] Gist read failed, falling back to localStorage:', e.message);
+          setSyncStatus('error', 'Cloud read failed');
         }
+
+        if (!gistOk && localGames.length > 0) {
+          games = localGames;
+          console.log('[GameCache] Using localStorage fallback');
+        }
+
+        if (games.length === 0) {
+          throw new Error('No analyzed games found in cloud storage.\nRun the batch analyzer to add games:\n  node analyzer/analyze.js --username ' + username);
+        }
+
+        allGames = games;
+        localStorage.setItem('mistakelab_username', username);
+        saveGamesCache(username, buildGameCacheObj(username, allGames));
+
+        btn.textContent = `Analyzing ${allGames.length} games…`;
+        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+        await loadFromGist();
+        extractAllMistakes();
+        applyFilters();
+        showMainApp();
       }
-
-      if (games.length === 0) {
-        throw new Error('No analyzed games found in cloud storage.\nRun the batch analyzer to add games:\n  node analyzer/analyze.js --username ' + username);
-      }
-
-      // Save Gist data to localStorage as offline cache
-      allGames = games;
-      localStorage.setItem('mistakelab_username', username);
-      saveGamesCache(username, buildGameCacheObj(username, allGames));
-
-      btn.textContent = `Analyzing ${allGames.length} games…`;
-      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-      await loadFromGist(); // Load SRS progress + invalidations before extraction
-      extractAllMistakes();
-      applyFilters();
-      showMainApp();
     } else {
       // ══ Standalone path (no Gist) — fetch from Lichess ══
       let cache = loadGamesCache(username);
@@ -6324,6 +6422,14 @@ function extractAllMistakes() {
   // ── Advantage capitalization: filter candidates and push valid items ──
   const advantageItemCount = { checked: 0, added: 0, skippedWin: 0, skippedTimeLoss: 0, skippedTimeTrouble: 0 };
   const invalidatedAdvantage = getInvalidatedMistakes(); // reuse same invalidation store
+  // Pre-index mistakes by gameId to avoid O(games × mistakes) scanning
+  const mistakesByGameId = new Map();
+  for (const m of rawMistakes) {
+    if (m.type !== 'mistake') continue;
+    let arr = mistakesByGameId.get(m.gameId);
+    if (!arr) { arr = []; mistakesByGameId.set(m.gameId, arr); }
+    arr.push(m);
+  }
   for (const game of allGames) {
     const cand = advantageCandidates[game.id];
     if (!cand) continue;
@@ -6353,7 +6459,7 @@ function extractAllMistakes() {
     // Time trouble blunder check: if any mistake at/after peak was made in time trouble
     // AND the eval after that mistake dropped below +100cp → bad time management, not
     // a conversion problem. Exclude the game.
-    const gameMistakes = rawMistakes.filter(m => m.gameId === game.id && m.type === 'mistake');
+    const gameMistakes = mistakesByGameId.get(game.id) || [];
     let timeTroubleCollapse = false;
     for (const m of gameMistakes) {
       if (m.movePly < cand.peakPly) continue;
