@@ -1401,7 +1401,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cache-first startup: render from localStorage, background-sync Gist; optimize advantage loop</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Lazy PMI/fenIndex: defer heavy index builds to first explorer access; slim mistakes cache</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1905,6 +1905,8 @@ let gameFenIndex = null;         // Map<gameId, Set<positionKey>>
 let fenIndexGameCount = 0;       // allGames.length when index was built
 let savedBoardState = null;      // { fen, orientation, mistakeIdx } to restore after filter mode
 let positionMoveIndex = null;    // Map<positionKey, Map<moveSAN, MoveStats>> for opening explorer
+let pmiBuilding = false;         // true while async PMI build is in progress
+let pmiGameCount = 0;            // allGames.length when PMI was built
 let filterArrows = [];           // [{from, to, opacity}] frequency arrows in filter mode
 let hoverFilterArrow = null;     // {from, to} arrow to highlight on stats row hover
 let savedFilterOrientation = null; // board orientation to restore when re-entering filter mode
@@ -2152,7 +2154,7 @@ const EVAL_CACHE_LS_KEY = 'mistakelab_eval_cache';
 let evalCache = new Map();       // fenKey → { depth, bestMove, bestCp, pvs, multiPv }
 let evalCacheDirty = 0;          // count of unsaved entries since last sync
 let evalCacheSyncTimer = null;
-const MISTAKES_CACHE_VERSION = 6;
+const MISTAKES_CACHE_VERSION = 7;
 const MISTAKES_CACHE_PARAMS = { wpDropThreshold: 10, advantageThreshold: 300, advantageMinMoves: 2 };
 
 // Populate login fields from saved config + auto-load
@@ -2692,7 +2694,7 @@ function loadMistakesCache() {
   } catch { return null; }
 }
 
-function saveMistakesCache(rawMistakes, gameFingerprints, fenData, moveStatsData, advantageCandidates, pmiData) {
+function saveMistakesCache(rawMistakes, gameFingerprints, advantageCandidates) {
   try {
     const serialized = rawMistakes.map(m => {
       const obj = { ...m };
@@ -2704,20 +2706,11 @@ function saveMistakesCache(rawMistakes, gameFingerprints, fenData, moveStatsData
       params: { ...MISTAKES_CACHE_PARAMS },
       games: gameFingerprints,
       mistakes: serialized,
-      fenIndex: fenData || {},
-      moveStatsIndex: moveStatsData || {},
       advantageCandidates: advantageCandidates || {},
-      positionMoveIndexData: pmiData || null,
     };
     localStorage.setItem(getMistakesCacheKey(), JSON.stringify(cache));
   } catch (e) {
-    // If quota exceeded, retry without bulky indices
-    if (e.name === 'QuotaExceededError' && (fenData || moveStatsData || pmiData)) {
-      console.warn('[MistakesCache] Quota exceeded — saving without FEN/moveStats/PMI index');
-      saveMistakesCache(rawMistakes, gameFingerprints, null, null, advantageCandidates, null);
-    } else {
-      console.warn('[MistakesCache] Save failed:', e.message);
-    }
+    console.warn('[MistakesCache] Save failed:', e.message);
   }
 }
 
@@ -5891,6 +5884,9 @@ async function fetchGames(autoUsername) {
               if (currentMistakeIdx < 0) {
                 // Safe to re-extract: user hasn't loaded a position yet
                 setSyncStatus('syncing', 'Updating…');
+                // Invalidate lazy indices — will be rebuilt on next access
+                positionMoveIndex = new Map(); pmiGameCount = 0;
+                gameFenIndex = new Map(); fenIndexGameCount = 0;
                 extractAllMistakes();
                 applyFilters();
                 updateSessionProgress();
@@ -6214,9 +6210,6 @@ function extractAllMistakes() {
   const cache = loadMistakesCache();
   let rawMistakes = [];
   let needsExtraction = new Set();
-  let cacheHit = false;
-  const fenData = {}; // gameId → array of position keys (for FEN index)
-  const moveStatsData = {}; // gameId → array of {posKey, moveUci, moveSan} (for opening explorer)
 
   if (cache) {
     // Find games needing extraction: new games or fingerprint changed
@@ -6231,34 +6224,13 @@ function extractAllMistakes() {
     if (needsExtraction.size === 0) {
       // Full cache hit — use cached mistakes (filter out games no longer present)
       rawMistakes = cache.mistakes.filter(m => currentGameIds.has(m.gameId));
-      cacheHit = true;
-      // Restore cached FEN data
-      if (cache.fenIndex) {
-        for (const gid of currentGameIds) {
-          if (cache.fenIndex[gid]) fenData[gid] = cache.fenIndex[gid];
-        }
-      }
-      // Restore cached moveStats data
-      if (cache.moveStatsIndex) {
-        for (const gid of currentGameIds) {
-          if (cache.moveStatsIndex[gid]) moveStatsData[gid] = cache.moveStatsIndex[gid];
-        }
-      }
+      // fenIndex, moveStatsIndex, and PMI are NOT restored from cache — they're built
+      // lazily on first opening explorer access (buildFenIndex + ensurePMI).
       console.log(`[MistakesCache] Full cache hit — ${rawMistakes.length} mistakes from ${currentGameIds.size} games`);
     } else {
       // Partial cache hit — keep cached mistakes for unchanged games, extract the rest
       rawMistakes = cache.mistakes.filter(m => currentGameIds.has(m.gameId) && !needsExtraction.has(m.gameId));
-      // Restore cached FEN data for unchanged games
-      if (cache.fenIndex) {
-        for (const gid of currentGameIds) {
-          if (!needsExtraction.has(gid) && cache.fenIndex[gid]) fenData[gid] = cache.fenIndex[gid];
-        }
-      }
-      if (cache.moveStatsIndex) {
-        for (const gid of currentGameIds) {
-          if (!needsExtraction.has(gid) && cache.moveStatsIndex[gid]) moveStatsData[gid] = cache.moveStatsIndex[gid];
-        }
-      }
+      // fenIndex/moveStatsIndex NOT restored — gameFenIndex and PMI are built lazily
       console.log(`[MistakesCache] Partial hit — extracting ${needsExtraction.size} of ${currentGameIds.size} games`);
     }
   } else {
@@ -6282,141 +6254,17 @@ function extractAllMistakes() {
     if (!game) continue;
     const result = extractMistakesForGame(game);
     rawMistakes.push(...result.mistakes);
-    fenData[gameId] = result.fens;
-    moveStatsData[gameId] = result.moveStats;
     advantageCandidates[gameId] = result.advantageCandidate;
   }
 
-  // Build gameFenIndex from collected FEN data
-  gameFenIndex = new Map();
-  for (const [gid, fens] of Object.entries(fenData)) {
-    gameFenIndex.set(gid, new Set(fens));
-  }
-  // If cache lost fenIndex (quota-exceeded save), rebuild synchronously to self-heal
-  let fenIndexWasEmpty = false;
-  if (gameFenIndex.size === 0 && allGames.length > 0 && needsExtraction.size === 0) {
-    fenIndexWasEmpty = true;
-    console.log('[MistakesCache] fenIndex empty — rebuilding from game moves');
-    for (const game of allGames) {
-      const moves = game.moves ? game.moves.split(' ') : [];
-      const chess = new Chess(game.initialFen || undefined);
-      const fens = [fenPositionKey(chess.fen())];
-      for (const san of moves) {
-        const m = chess.move(san, { sloppy: true });
-        if (!m) break;
-        fens.push(fenPositionKey(chess.fen()));
-      }
-      fenData[game.id] = fens;
-      gameFenIndex.set(game.id, new Set(fens));
-    }
-  }
+  // gameFenIndex and positionMoveIndex are built LAZILY on first opening explorer access
+  // (buildFenIndex + ensurePMI). This avoids multi-second JSON parse/build on startup.
+  // fenIndexGameCount is intentionally NOT set here so buildFenIndex() knows to run.
   fenIndexBuilding = false;
 
-  // Restore or build positionMoveIndex for opening explorer
-  let pmiRestored = false;
-  if (cacheHit && needsExtraction.size === 0 && cache.positionMoveIndexData) {
-    try {
-      positionMoveIndex = deserializePositionMoveIndex(cache.positionMoveIndexData);
-      pmiRestored = positionMoveIndex.size > 0;
-      if (pmiRestored) console.log(`[OpeningExplorer] Restored positionMoveIndex from cache — ${positionMoveIndex.size} positions`);
-    } catch (e) {
-      console.warn('[OpeningExplorer] Failed to restore PMI from cache:', e.message);
-      positionMoveIndex = new Map();
-    }
-  }
-
-  if (!pmiRestored) {
-    positionMoveIndex = new Map();
-    for (const game of allGames) {
-      const stats = moveStatsData[game.id];
-      if (!stats) continue;
-      const playerColor = detectPlayerColor(game);
-      const { winner, whiteRating, blackRating } = getGameResultInfo(game);
-      const opponentColor = playerColor === 'white' ? 'black' : 'white';
-      const opponentName = game.players?.[opponentColor]?.user?.name || 'Unknown';
-      const opponentRating = (opponentColor === 'white' ? whiteRating : blackRating) || null;
-      const userRating = (playerColor === 'white' ? whiteRating : blackRating) || null;
-      const result = winner === playerColor ? 'win' : winner === opponentColor ? 'loss' : 'draw';
-
-      for (const ms of stats) {
-        if (!positionMoveIndex.has(ms.posKey)) {
-          positionMoveIndex.set(ms.posKey, new Map());
-        }
-        const posMap = positionMoveIndex.get(ms.posKey);
-        if (!posMap.has(ms.moveSan)) {
-          posMap.set(ms.moveSan, { san: ms.moveSan, uci: ms.moveUci, count: 0, whiteWins: 0, blackWins: 0, draws: 0, games: [] });
-        }
-        const entry = posMap.get(ms.moveSan);
-        entry.count++;
-        if (winner === 'white') entry.whiteWins++;
-        else if (winner === 'black') entry.blackWins++;
-        else entry.draws++;
-        entry.games.push({
-          gameId: game.id,
-          userColor: playerColor,
-          opponentName,
-          opponentRating,
-          userRating,
-          result,
-          source: game._source || 'lichess',
-        });
-      }
-    }
-    console.log(`[OpeningExplorer] Built positionMoveIndex with ${positionMoveIndex.size} positions`);
-
-    // Fallback: if positionMoveIndex is empty (e.g. cache saved without moveStatsIndex due to quota),
-    // rebuild it from raw game moves by replaying through chess.js
-    if (positionMoveIndex.size === 0 && allGames.length > 0) {
-      console.log('[OpeningExplorer] positionMoveIndex empty — rebuilding from raw game moves');
-      for (const game of allGames) {
-        const moves = game.moves ? game.moves.split(' ') : [];
-        if (moves.length === 0) continue;
-        const playerColor = detectPlayerColor(game);
-        const { winner, whiteRating, blackRating } = getGameResultInfo(game);
-        const opponentColor = playerColor === 'white' ? 'black' : 'white';
-        const opponentName = game.players?.[opponentColor]?.user?.name || 'Unknown';
-        const opponentRating = (opponentColor === 'white' ? whiteRating : blackRating) || null;
-        const userRating = (playerColor === 'white' ? whiteRating : blackRating) || null;
-        const result = winner === playerColor ? 'win' : winner === opponentColor ? 'loss' : 'draw';
-        const chess = new Chess(game.initialFen || undefined);
-        const rebuiltStats = [];
-        const rebuiltFens = [fenPositionKey(chess.fen())];
-        for (const san of moves) {
-          const posKey = fenPositionKey(chess.fen());
-          const m = chess.move(san, { sloppy: true });
-          if (!m) break;
-          rebuiltFens.push(fenPositionKey(chess.fen()));
-          rebuiltStats.push({ posKey, moveSan: m.san, moveUci: m.from + m.to + (m.promotion || '') });
-        }
-        moveStatsData[game.id] = rebuiltStats;
-        fenData[game.id] = rebuiltFens;
-        for (const ms of rebuiltStats) {
-          if (!positionMoveIndex.has(ms.posKey)) positionMoveIndex.set(ms.posKey, new Map());
-          const posMap = positionMoveIndex.get(ms.posKey);
-          if (!posMap.has(ms.moveSan)) {
-            posMap.set(ms.moveSan, { san: ms.moveSan, uci: ms.moveUci, count: 0, whiteWins: 0, blackWins: 0, draws: 0, games: [] });
-          }
-          const entry = posMap.get(ms.moveSan);
-          entry.count++;
-          if (winner === 'white') entry.whiteWins++;
-          else if (winner === 'black') entry.blackWins++;
-          else entry.draws++;
-          entry.games.push({ gameId: game.id, userColor: playerColor, opponentName, opponentRating, userRating, result, source: game._source || 'lichess' });
-        }
-      }
-      console.log(`[OpeningExplorer] Rebuilt positionMoveIndex with ${positionMoveIndex.size} positions from ${allGames.length} games`);
-      // Also rebuild gameFenIndex from the freshly-collected fenData
-      gameFenIndex = new Map();
-      for (const [gid, fens] of Object.entries(fenData)) {
-        gameFenIndex.set(gid, new Set(fens));
-      }
-    }
-  }
-
-  // Save cache (after PMI build so it's included)
-  if (!pmiRestored || needsExtraction.size > 0 || fenIndexWasEmpty) {
-    const pmiData = positionMoveIndex.size > 0 ? serializePositionMoveIndex(positionMoveIndex) : null;
-    saveMistakesCache(rawMistakes, currentFingerprints, fenData, moveStatsData, advantageCandidates, pmiData);
+  // Save cache — lightweight: only mistakes + fingerprints + advantageCandidates
+  if (needsExtraction.size > 0 || !cache) {
+    saveMistakesCache(rawMistakes, currentFingerprints, advantageCandidates);
   }
 
   // ── Advantage capitalization: filter candidates and push valid items ──
@@ -6781,6 +6629,67 @@ function gameMatchesOpeningFen(gameId) {
   return fens ? fens.has(openingFilterFen) : false;
 }
 
+// ── Lazy PMI builder (deferred from startup to first opening explorer access) ──
+function ensurePMI() {
+  // Already built or in progress
+  if (pmiBuilding) return;
+  if (positionMoveIndex && positionMoveIndex.size > 0 && pmiGameCount === allGames.length) return;
+
+  pmiBuilding = true;
+  const t0 = performance.now();
+  const pmi = new Map();
+  const games = allGames.slice();
+  const BATCH = 30;
+  let i = 0;
+
+  function processBatch() {
+    const end = Math.min(i + BATCH, games.length);
+    for (; i < end; i++) {
+      const game = games[i];
+      const moves = game.moves ? game.moves.split(' ') : [];
+      if (moves.length === 0) continue;
+      const playerColor = detectPlayerColor(game);
+      const { winner, whiteRating, blackRating } = getGameResultInfo(game);
+      const opponentColor = playerColor === 'white' ? 'black' : 'white';
+      const opponentName = game.players?.[opponentColor]?.user?.name || 'Unknown';
+      const opponentRating = (opponentColor === 'white' ? whiteRating : blackRating) || null;
+      const userRating = (playerColor === 'white' ? whiteRating : blackRating) || null;
+      const result = winner === playerColor ? 'win' : winner === opponentColor ? 'loss' : 'draw';
+      const chess = new Chess(game.initialFen || undefined);
+      for (const san of moves) {
+        const posKey = fenPositionKey(chess.fen());
+        const m = chess.move(san, { sloppy: true });
+        if (!m) break;
+        if (!pmi.has(posKey)) pmi.set(posKey, new Map());
+        const posMap = pmi.get(posKey);
+        if (!posMap.has(m.san)) {
+          posMap.set(m.san, { san: m.san, uci: m.from + m.to + (m.promotion || ''), count: 0, whiteWins: 0, blackWins: 0, draws: 0, games: [] });
+        }
+        const entry = posMap.get(m.san);
+        entry.count++;
+        if (winner === 'white') entry.whiteWins++;
+        else if (winner === 'black') entry.blackWins++;
+        else entry.draws++;
+        entry.games.push({ gameId: game.id, userColor: playerColor, opponentName, opponentRating, userRating, result, source: game._source || 'lichess' });
+      }
+    }
+    if (i < games.length) {
+      setTimeout(processBatch, 0);
+    } else {
+      positionMoveIndex = pmi;
+      pmiGameCount = games.length;
+      pmiBuilding = false;
+      console.log(`[OpeningExplorer] Lazy PMI built: ${pmi.size} positions from ${games.length} games in ${(performance.now()-t0).toFixed(0)}ms`);
+      // Re-render if opening explorer is visible
+      if (openingFilterMode) {
+        renderExplorerStats();
+        updateFilterArrows();
+      }
+    }
+  }
+  processBatch();
+}
+
 function toggleOpeningFilter() {
   if (openingFilterMode) {
     exitOpeningFilter(false);
@@ -6799,6 +6708,7 @@ function enterOpeningFilter() {
   contLineBrowsing = false;
   contLineSubtitle = '';
   buildFenIndex();
+  ensurePMI();
   openingFilterMode = true;
 
   // Save current board state for restoration
@@ -7275,6 +7185,15 @@ function buildGameLink(gameId, source) {
 function renderExplorerStats() {
   const container = document.getElementById('explorerStatsContainer');
   if (!container) return;
+
+  // Trigger lazy PMI build if needed
+  if (!positionMoveIndex || positionMoveIndex.size === 0 || pmiGameCount !== allGames.length) {
+    ensurePMI();
+    if (pmiBuilding) {
+      container.innerHTML = '<div class="explorer-no-data" style="opacity:0.6">Building game index…</div>';
+      return;
+    }
+  }
 
   const key = filterChess ? fenPositionKey(filterChess.fen()) : null;
   const colorFilter = filters.color.size < 2 ? [...filters.color][0] : null;
