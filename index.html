@@ -872,7 +872,7 @@
   @media (min-width: 769px) { .line-nav-bar { display: none !important; } }
 
   /* Continuation line subtitle: hidden by default, shown on mobile via media query */
-  .cont-mobile-extra, .cont-mobile-subtitle { display: none; }
+  .cont-mobile-extra, .cont-mobile-subtitle, .cont-stop-mobile { display: none; }
 
   /* ─── Mobile toolbar ─── */
   .mobile-toolbar {
@@ -1030,6 +1030,9 @@
 
     /* Hide posInfoCard on mobile when continuation info is merged into line header */
     body.cont-info-merged #posInfoCard { display: none !important; }
+
+    /* Show inline Stop & Review button when posInfoCard is hidden */
+    body.cont-info-merged .cont-stop-mobile { display: inline-block; }
 
     /* Engine line: nav buttons above the move list on mobile */
     .engine-line {
@@ -1398,7 +1401,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Voice: lower BT oscillator, TTS repertoire deviation alert with study move</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Startup perf: single Gist fetch + PMI cache; mobile Stop & Review; practice rep deviations auto-save; continuation session persistence</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2308,6 +2311,27 @@ function posId(m) {
 }
 
 // ─── Gist API ───
+let _gistCachedResponse = null;
+let _gistCacheTimestamp = 0;
+const GIST_FETCH_CACHE_TTL = 5000; // 5s — prevents redundant fetches during startup
+
+async function gistFetchAll() {
+  const now = Date.now();
+  if (_gistCachedResponse && now - _gistCacheTimestamp < GIST_FETCH_CACHE_TTL) {
+    return _gistCachedResponse;
+  }
+  if (!gistToken || !gistId) return null;
+  const resp = await fetch(`https://api.github.com/gists/${gistId}`, {
+    headers: { 'Authorization': `token ${gistToken}` }
+  });
+  if (!resp.ok) throw new Error(`Gist read failed: ${resp.status}`);
+  _gistCachedResponse = await resp.json();
+  _gistCacheTimestamp = now;
+  return _gistCachedResponse;
+}
+
+function gistInvalidateCache() { _gistCachedResponse = null; _gistCacheTimestamp = 0; }
+
 async function gistReadFileContent(file) {
   if (!file) return null;
   // GitHub API truncates large files — fall back to raw_url
@@ -2323,11 +2347,8 @@ async function gistReadFileContent(file) {
 
 async function gistRead() {
   if (!gistToken || !gistId) return null;
-  const resp = await fetch(`https://api.github.com/gists/${gistId}`, {
-    headers: { 'Authorization': `token ${gistToken}` }
-  });
-  if (!resp.ok) throw new Error(`Gist read failed: ${resp.status}`);
-  const gist = await resp.json();
+  const gist = await gistFetchAll();
+  if (!gist) return { positions: {}, version: 1 };
   const file = gist.files?.[GIST_FILENAME];
   if (!file) return { positions: {}, version: 1 };
   const content = await gistReadFileContent(file);
@@ -2349,6 +2370,7 @@ async function gistWrite(data) {
     })
   });
   if (!resp.ok) throw new Error(`Gist write failed: ${resp.status}`);
+  gistInvalidateCache();
 }
 
 async function gistCreate() {
@@ -2528,16 +2550,15 @@ function loadEvalCacheFromLocalStorage() {
 
 async function gistReadEvals() {
   if (airplaneMode || !gistToken || !gistId) return null;
-  const resp = await fetch(`https://api.github.com/gists/${gistId}`, {
-    headers: { 'Authorization': `token ${gistToken}` }
-  });
-  if (!resp.ok) return null;
-  const gist = await resp.json();
-  const file = gist.files?.[GIST_EVALS_FILENAME];
-  if (!file) return null;
-  const content = await gistReadFileContent(file);
-  if (!content) return null;
-  try { return JSON.parse(content); } catch { return null; }
+  try {
+    const gist = await gistFetchAll();
+    if (!gist) return null;
+    const file = gist.files?.[GIST_EVALS_FILENAME];
+    if (!file) return null;
+    const content = await gistReadFileContent(file);
+    if (!content) return null;
+    return JSON.parse(content);
+  } catch { return null; }
 }
 
 async function syncEvalCacheToGist() {
@@ -2557,6 +2578,7 @@ async function syncEvalCacheToGist() {
     });
     evalCacheDirty = 0;
     saveEvalCacheToLocalStorage();
+    gistInvalidateCache();
     console.log(`[EvalCache] Synced ${evalCache.size} entries to Gist`);
   } catch (e) {
     console.warn('[EvalCache] Gist sync failed:', e.message);
@@ -2656,7 +2678,7 @@ function loadMistakesCache() {
   } catch { return null; }
 }
 
-function saveMistakesCache(rawMistakes, gameFingerprints, fenData, moveStatsData, advantageCandidates) {
+function saveMistakesCache(rawMistakes, gameFingerprints, fenData, moveStatsData, advantageCandidates, pmiData) {
   try {
     const serialized = rawMistakes.map(m => {
       const obj = { ...m };
@@ -2671,17 +2693,39 @@ function saveMistakesCache(rawMistakes, gameFingerprints, fenData, moveStatsData
       fenIndex: fenData || {},
       moveStatsIndex: moveStatsData || {},
       advantageCandidates: advantageCandidates || {},
+      positionMoveIndexData: pmiData || null,
     };
     localStorage.setItem(getMistakesCacheKey(), JSON.stringify(cache));
   } catch (e) {
-    // If quota exceeded, retry without FEN index and moveStats
-    if (e.name === 'QuotaExceededError' && (fenData || moveStatsData)) {
-      console.warn('[MistakesCache] Quota exceeded — saving without FEN/moveStats index');
-      saveMistakesCache(rawMistakes, gameFingerprints, null, null, advantageCandidates);
+    // If quota exceeded, retry without bulky indices
+    if (e.name === 'QuotaExceededError' && (fenData || moveStatsData || pmiData)) {
+      console.warn('[MistakesCache] Quota exceeded — saving without FEN/moveStats/PMI index');
+      saveMistakesCache(rawMistakes, gameFingerprints, null, null, advantageCandidates, null);
     } else {
       console.warn('[MistakesCache] Save failed:', e.message);
     }
   }
+}
+
+function serializePositionMoveIndex(pmi) {
+  const obj = {};
+  for (const [posKey, moveMap] of pmi) {
+    const moves = {};
+    for (const [san, entry] of moveMap) moves[san] = entry;
+    obj[posKey] = moves;
+  }
+  return obj;
+}
+
+function deserializePositionMoveIndex(data) {
+  const pmi = new Map();
+  for (const posKey in data) {
+    const moveMap = new Map();
+    const moves = data[posKey];
+    for (const san in moves) moveMap.set(san, moves[san]);
+    pmi.set(posKey, moveMap);
+  }
+  return pmi;
 }
 
 function buildGameFingerprint(game) {
@@ -2720,11 +2764,8 @@ function mergeGames(cached, fetched) {
 async function gistReadGames() {
   if (airplaneMode) return null;
   if (!gistToken || !gistId) return null;
-  const resp = await fetch(`https://api.github.com/gists/${gistId}`, {
-    headers: { 'Authorization': `token ${gistToken}` }
-  });
-  if (!resp.ok) throw new Error(`Gist read games failed: ${resp.status}`);
-  const gist = await resp.json();
+  const gist = await gistFetchAll();
+  if (!gist) throw new Error('Gist read games failed');
   const file = gist.files?.[GIST_GAMES_FILENAME];
   if (!file) return null;
   const content = await gistReadFileContent(file);
@@ -4282,6 +4323,7 @@ function enterAnalysisMode() {
   if (continuationMode) {
     continuationMode = false;
     contLine = null;
+    clearContSession();
     contLineBrowsing = false;
     hideMaiaControls();
   }
@@ -6101,11 +6143,6 @@ function extractAllMistakes() {
     advantageCandidates[gameId] = result.advantageCandidate;
   }
 
-  // Save cache (raw mistakes before tactic suppression/sorting)
-  if (!cacheHit || needsExtraction.size > 0) {
-    saveMistakesCache(rawMistakes, currentFingerprints, fenData, moveStatsData, advantageCandidates);
-  }
-
   // Build gameFenIndex from collected FEN data
   gameFenIndex = new Map();
   for (const [gid, fens] of Object.entries(fenData)) {
@@ -6113,52 +6150,24 @@ function extractAllMistakes() {
   }
   fenIndexBuilding = false;
 
-  // Build positionMoveIndex for opening explorer
-  positionMoveIndex = new Map();
-  for (const game of allGames) {
-    const stats = moveStatsData[game.id];
-    if (!stats) continue;
-    const playerColor = detectPlayerColor(game);
-    const { winner, whiteRating, blackRating } = getGameResultInfo(game);
-    const opponentColor = playerColor === 'white' ? 'black' : 'white';
-    const opponentName = game.players?.[opponentColor]?.user?.name || 'Unknown';
-    const opponentRating = (opponentColor === 'white' ? whiteRating : blackRating) || null;
-    const userRating = (playerColor === 'white' ? whiteRating : blackRating) || null;
-    const result = winner === playerColor ? 'win' : winner === opponentColor ? 'loss' : 'draw';
-
-    for (const ms of stats) {
-      if (!positionMoveIndex.has(ms.posKey)) {
-        positionMoveIndex.set(ms.posKey, new Map());
-      }
-      const posMap = positionMoveIndex.get(ms.posKey);
-      if (!posMap.has(ms.moveSan)) {
-        posMap.set(ms.moveSan, { san: ms.moveSan, uci: ms.moveUci, count: 0, whiteWins: 0, blackWins: 0, draws: 0, games: [] });
-      }
-      const entry = posMap.get(ms.moveSan);
-      entry.count++;
-      if (winner === 'white') entry.whiteWins++;
-      else if (winner === 'black') entry.blackWins++;
-      else entry.draws++;
-      entry.games.push({
-        gameId: game.id,
-        userColor: playerColor,
-        opponentName,
-        opponentRating,
-        userRating,
-        result,
-        source: game._source || 'lichess',
-      });
+  // Restore or build positionMoveIndex for opening explorer
+  let pmiRestored = false;
+  if (cacheHit && needsExtraction.size === 0 && cache.positionMoveIndexData) {
+    try {
+      positionMoveIndex = deserializePositionMoveIndex(cache.positionMoveIndexData);
+      pmiRestored = positionMoveIndex.size > 0;
+      if (pmiRestored) console.log(`[OpeningExplorer] Restored positionMoveIndex from cache — ${positionMoveIndex.size} positions`);
+    } catch (e) {
+      console.warn('[OpeningExplorer] Failed to restore PMI from cache:', e.message);
+      positionMoveIndex = new Map();
     }
   }
-  console.log(`[OpeningExplorer] Built positionMoveIndex with ${positionMoveIndex.size} positions`);
 
-  // Fallback: if positionMoveIndex is empty (e.g. cache saved without moveStatsIndex due to quota),
-  // rebuild it from raw game moves by replaying through chess.js
-  if (positionMoveIndex.size === 0 && allGames.length > 0) {
-    console.log('[OpeningExplorer] positionMoveIndex empty — rebuilding from raw game moves');
+  if (!pmiRestored) {
+    positionMoveIndex = new Map();
     for (const game of allGames) {
-      const moves = game.moves ? game.moves.split(' ') : [];
-      if (moves.length === 0) continue;
+      const stats = moveStatsData[game.id];
+      if (!stats) continue;
       const playerColor = detectPlayerColor(game);
       const { winner, whiteRating, blackRating } = getGameResultInfo(game);
       const opponentColor = playerColor === 'white' ? 'black' : 'white';
@@ -6166,17 +6175,11 @@ function extractAllMistakes() {
       const opponentRating = (opponentColor === 'white' ? whiteRating : blackRating) || null;
       const userRating = (playerColor === 'white' ? whiteRating : blackRating) || null;
       const result = winner === playerColor ? 'win' : winner === opponentColor ? 'loss' : 'draw';
-      const chess = new Chess(game.initialFen || undefined);
-      const rebuiltStats = [];
-      for (const san of moves) {
-        const posKey = fenPositionKey(chess.fen());
-        const m = chess.move(san, { sloppy: true });
-        if (!m) break;
-        rebuiltStats.push({ posKey, moveSan: m.san, moveUci: m.from + m.to + (m.promotion || '') });
-      }
-      moveStatsData[game.id] = rebuiltStats;
-      for (const ms of rebuiltStats) {
-        if (!positionMoveIndex.has(ms.posKey)) positionMoveIndex.set(ms.posKey, new Map());
+
+      for (const ms of stats) {
+        if (!positionMoveIndex.has(ms.posKey)) {
+          positionMoveIndex.set(ms.posKey, new Map());
+        }
         const posMap = positionMoveIndex.get(ms.posKey);
         if (!posMap.has(ms.moveSan)) {
           posMap.set(ms.moveSan, { san: ms.moveSan, uci: ms.moveUci, count: 0, whiteWins: 0, blackWins: 0, draws: 0, games: [] });
@@ -6186,12 +6189,64 @@ function extractAllMistakes() {
         if (winner === 'white') entry.whiteWins++;
         else if (winner === 'black') entry.blackWins++;
         else entry.draws++;
-        entry.games.push({ gameId: game.id, userColor: playerColor, opponentName, opponentRating, userRating, result, source: game._source || 'lichess' });
+        entry.games.push({
+          gameId: game.id,
+          userColor: playerColor,
+          opponentName,
+          opponentRating,
+          userRating,
+          result,
+          source: game._source || 'lichess',
+        });
       }
     }
-    console.log(`[OpeningExplorer] Rebuilt positionMoveIndex with ${positionMoveIndex.size} positions from ${allGames.length} games`);
-    // Re-save cache with the rebuilt moveStats so this doesn't happen again
-    saveMistakesCache(rawMistakes, currentFingerprints, fenData, moveStatsData, advantageCandidates);
+    console.log(`[OpeningExplorer] Built positionMoveIndex with ${positionMoveIndex.size} positions`);
+
+    // Fallback: if positionMoveIndex is empty (e.g. cache saved without moveStatsIndex due to quota),
+    // rebuild it from raw game moves by replaying through chess.js
+    if (positionMoveIndex.size === 0 && allGames.length > 0) {
+      console.log('[OpeningExplorer] positionMoveIndex empty — rebuilding from raw game moves');
+      for (const game of allGames) {
+        const moves = game.moves ? game.moves.split(' ') : [];
+        if (moves.length === 0) continue;
+        const playerColor = detectPlayerColor(game);
+        const { winner, whiteRating, blackRating } = getGameResultInfo(game);
+        const opponentColor = playerColor === 'white' ? 'black' : 'white';
+        const opponentName = game.players?.[opponentColor]?.user?.name || 'Unknown';
+        const opponentRating = (opponentColor === 'white' ? whiteRating : blackRating) || null;
+        const userRating = (playerColor === 'white' ? whiteRating : blackRating) || null;
+        const result = winner === playerColor ? 'win' : winner === opponentColor ? 'loss' : 'draw';
+        const chess = new Chess(game.initialFen || undefined);
+        const rebuiltStats = [];
+        for (const san of moves) {
+          const posKey = fenPositionKey(chess.fen());
+          const m = chess.move(san, { sloppy: true });
+          if (!m) break;
+          rebuiltStats.push({ posKey, moveSan: m.san, moveUci: m.from + m.to + (m.promotion || '') });
+        }
+        moveStatsData[game.id] = rebuiltStats;
+        for (const ms of rebuiltStats) {
+          if (!positionMoveIndex.has(ms.posKey)) positionMoveIndex.set(ms.posKey, new Map());
+          const posMap = positionMoveIndex.get(ms.posKey);
+          if (!posMap.has(ms.moveSan)) {
+            posMap.set(ms.moveSan, { san: ms.moveSan, uci: ms.moveUci, count: 0, whiteWins: 0, blackWins: 0, draws: 0, games: [] });
+          }
+          const entry = posMap.get(ms.moveSan);
+          entry.count++;
+          if (winner === 'white') entry.whiteWins++;
+          else if (winner === 'black') entry.blackWins++;
+          else entry.draws++;
+          entry.games.push({ gameId: game.id, userColor: playerColor, opponentName, opponentRating, userRating, result, source: game._source || 'lichess' });
+        }
+      }
+      console.log(`[OpeningExplorer] Rebuilt positionMoveIndex with ${positionMoveIndex.size} positions from ${allGames.length} games`);
+    }
+  }
+
+  // Save cache (after PMI build so it's included)
+  if (!pmiRestored || needsExtraction.size > 0) {
+    const pmiData = positionMoveIndex.size > 0 ? serializePositionMoveIndex(positionMoveIndex) : null;
+    saveMistakesCache(rawMistakes, currentFingerprints, fenData, moveStatsData, advantageCandidates, pmiData);
   }
 
   // ── Advantage capitalization: filter candidates and push valid items ──
@@ -6562,6 +6617,7 @@ function enterOpeningFilter() {
   continuationMode = false;
   silentContinuation = false;
   contLine = null;
+  clearContSession();
   contLineBrowsing = false;
   contLineSubtitle = '';
   buildFenIndex();
@@ -7288,7 +7344,45 @@ function showMainApp() {
     updateRepertoireBadge();
   });
 
+  // Check for an interrupted continuation session (Android tab discard / screen timeout)
+  const savedContSession = loadContSession();
+  if (savedContSession && savedContSession.contLine.moves.length >= 2) {
+    showContResumeBanner(savedContSession);
+    return;
+  }
+
   // Start with the opening explorer open
+  enterOpeningFilter();
+}
+
+function showContResumeBanner(session) {
+  const moveCount = session.contLine.moves.filter(mv => mv.isUser).length;
+  const orientation = session.orientation || 'white';
+
+  // Show the board at the last position
+  if (!boardObj) { document.getElementById('board').offsetHeight; initBoard(); }
+  boardObj.orientation(orientation);
+  boardObj.position(session.currentSolveFen, false);
+
+  // Show resume prompt in posInfoCard
+  const infoCard = document.getElementById('posInfoCard');
+  infoCard.style.display = '';
+  document.getElementById('posInfoContent').innerHTML = `
+    <div style="font-size:13px;line-height:1.8">
+      <div style="font-weight:600;color:var(--accent);">Game in progress</div>
+      <div>${moveCount} move${moveCount !== 1 ? 's' : ''} played</div>
+      <div style="margin-top:8px;display:flex;gap:8px;">
+        <button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="resumeContSession(window._pendingContSession)">▶ Resume</button>
+        <button class="btn btn-ghost btn-sm" style="font-size:12px;" onclick="discardContSession()">✕ Discard</button>
+      </div>
+    </div>`;
+  window._pendingContSession = session;
+}
+
+function discardContSession() {
+  clearContSession();
+  window._pendingContSession = null;
+  document.getElementById('posInfoCard').style.display = 'none';
   enterOpeningFilter();
 }
 
@@ -8080,6 +8174,7 @@ function loadPosition(globalIdx) {
   engineLine = null;
   browsingLine = false;
   contLine = null;
+  clearContSession();
   contLineBrowsing = false;
   contLineSubtitle = '';
   updateLineNavBar();
@@ -9154,10 +9249,35 @@ async function evaluateMove(from, to, move) {
         // Get the correct repertoire move for feedback
         const repMoves = repertoireTrie.get(posKey);
         const repMoveSan = repMoves && repMoves.length > 0 ? repMoves[0].san : null;
+        const repMoveUci = repMoves && repMoves.length > 0 ? repMoves[0].uci : null;
+        // Auto-save deviation to RepertoireCheck (customDeviations) if not already there
+        let savedNote = '';
+        if (gistData && repMoveSan && repMoveUci) {
+          if (!gistData.repertoire) gistData.repertoire = {};
+          if (!gistData.repertoire.customDeviations) gistData.repertoire.customDeviations = [];
+          const alreadyCustom = gistData.repertoire.customDeviations.some(d => d.positionKey === posKey);
+          const alreadyDetected = repertoireDeviations.some(d => d.positionKey === posKey);
+          if (!alreadyCustom && !alreadyDetected) {
+            const turn = currentSolveFen.split(' ')[1];
+            gistData.repertoire.customDeviations.push({
+              positionKey: posKey,
+              fenBefore: currentSolveFen,
+              repertoireMove: { san: repMoveSan, uci: repMoveUci },
+              playerColor: turn === 'w' ? 'white' : 'black',
+              source: 'practice',
+              addedAt: Date.now(),
+            });
+            debounceSyncToGist();
+            detectRepertoireDeviations();
+            updateRepertoireBadge();
+            savedNote = '<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">✓ Saved to Repertoire Check</div>';
+          }
+        }
         showColorFeedback('var(--yellow)', 'rgba(230,161,23,0.08)',
           '📖 Deviated from repertoire!',
           `<code class="mono">${escHtml(move.san)}</code> is not in your repertoire.` +
           (repMoveSan ? ` Study move is <code class="mono">${escHtml(repMoveSan)}</code>.` : '') +
+          savedNote +
           `<div style="margin-top:6px;"><button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="ignorePracticeRepertoire()">Ignore Repertoire</button></div>`);
         // Voice TTS: announce the deviation
         if (voiceMode) {
@@ -10415,6 +10535,160 @@ function tryAgainFromContinuationLine() {
   renderContLine();
 }
 
+// ─── Continuation Session Persistence (survives Android tab discard) ───
+const CONT_SESSION_KEY = 'mistakelab_cont_session';
+const CONT_SESSION_MAX_AGE = 4 * 60 * 60 * 1000; // 4 hours
+
+function saveContSession() {
+  if (!continuationMode || !contLine || !currentSolveFen) return;
+  try {
+    const m = currentMistakeIdx >= 0 ? filteredMistakes[currentMistakeIdx] : null;
+    if (!m) return;
+    localStorage.setItem(CONT_SESSION_KEY, JSON.stringify({
+      contLine: { baseFen: contLine.baseFen, moves: contLine.moves, currentIdx: contLine.currentIdx },
+      currentSolveFen,
+      orientation: boardObj ? boardObj.orientation() : 'white',
+      silentContinuation,
+      advantageMode,
+      playerColor: m.playerColor,
+      itemType: m.type,
+      itemPosId: posId(m),
+      savedAt: Date.now(),
+    }));
+  } catch (e) { /* quota or serialization error — non-critical */ }
+}
+
+function clearContSession() {
+  try { localStorage.removeItem(CONT_SESSION_KEY); } catch (e) {}
+}
+
+function loadContSession() {
+  try {
+    const raw = localStorage.getItem(CONT_SESSION_KEY);
+    if (!raw) return null;
+    const session = JSON.parse(raw);
+    if (!session || !session.contLine || !session.currentSolveFen) return null;
+    if (Date.now() - session.savedAt > CONT_SESSION_MAX_AGE) { clearContSession(); return null; }
+    return session;
+  } catch (e) { return null; }
+}
+
+function resumeContSession(session) {
+  clearContSession();
+  window._pendingContSession = null;
+  if (!session || !session.contLine) return;
+
+  // Derive resume FEN from contLine (more reliable than saved currentSolveFen)
+  const moves = session.contLine.moves || [];
+  const resumeFen = moves.length > 0 ? moves[moves.length - 1].fen : session.contLine.baseFen;
+  if (!resumeFen) return;
+
+  // Create a synthetic item so filteredMistakes[currentMistakeIdx] is valid
+  const resumeItem = {
+    type: session.itemType || 'practice',
+    playerColor: session.playerColor || 'white',
+    fenBefore: session.contLine.baseFen,
+    gameId: '_resumed',
+    movePly: 0,
+    moveNumber: 1,
+    wpDrop: 0,
+    cpLoss: 0,
+    bestMove: null,
+    bestMoveSan: null,
+    bestCp: 0,
+    game: { id: '_resumed', opening: { name: 'Resumed Game' }, speed: 'practice', _source: 'resumed', rated: false, players: {} },
+  };
+  filteredMistakes.push(resumeItem);
+  currentMistakeIdx = filteredMistakes.length - 1;
+  if (session.itemType === 'practice') practiceContItem = resumeItem;
+
+  // Set up board
+  const orientation = session.orientation || 'white';
+  if (!boardObj) { document.getElementById('board').offsetHeight; initBoard(); }
+  boardObj.orientation(orientation);
+  boardObj.position(resumeFen, false);
+  gameEngine = new Chess(resumeFen);
+
+  // Restore contLine
+  contLine = session.contLine;
+  contLineBrowsing = false;
+
+  // Enter continuation mode
+  continuationMode = true;
+  silentContinuation = !!session.silentContinuation;
+  advantageMode = !!session.advantageMode;
+  currentSolveFen = resumeFen;
+  currentAttempts = 0;
+  hintLevel = 0;
+  hintMove = null;
+  srsRecorded = true; // don't re-record SRS for a resumed game
+
+  // Switch to training layout on mobile
+  if (document.body.classList.contains('mobile-browsing')) {
+    document.body.classList.remove('mobile-browsing');
+    document.body.classList.add('mobile-training');
+  }
+
+  // Determine whose turn it is
+  const fenTurn = resumeFen.split(' ')[1];
+  const userTurnChar = orientation === 'white' ? 'w' : 'b';
+  const isUserTurn = fenTurn === userTurnChar;
+
+  // UI: show position info and hint button
+  const infoCard = document.getElementById('posInfoCard');
+  infoCard.style.display = '';
+  document.getElementById('feedbackContainer').innerHTML = '';
+  document.getElementById('contLineContainer').innerHTML = '';
+  renderContLine();
+  updateEvalBar();
+
+  if (isUserTurn) {
+    // User's turn: start pre-analysis and wait for their move
+    const hintBtn = document.getElementById('btnHint');
+    if (silentContinuation) {
+      if (hintBtn) hintBtn.classList.add('hidden');
+      const moveCount = contLine.moves.filter(mv => mv.isUser).length;
+      document.getElementById('posInfoContent').innerHTML = `
+        <div style="font-size:13px;line-height:1.7">
+          <div style="color:var(--blue);font-weight:600;">Resumed Game</div>
+          <div>Move ${moveCount + 1} · Your turn</div>
+          <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
+          <div style="margin-top:6px;">
+            <button class="btn btn-ghost btn-sm" style="font-size:11px;border-color:var(--accent);color:var(--accent);" onclick="stopAndReviewContinuation()">📋 Stop & Review</button>
+          </div>
+        </div>`;
+    } else {
+      if (hintBtn) { hintBtn.classList.remove('hidden'); hintBtn.disabled = false; hintBtn.textContent = '💡 Hint'; }
+      document.getElementById('posInfoContent').innerHTML = `
+        <div style="font-size:13px;line-height:1.7">
+          <div style="color:var(--blue);font-weight:600;">Resumed Game</div>
+          <div>Your turn · Find the best move</div>
+          <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
+        </div>`;
+    }
+    startPreAnalysis(currentSolveFen);
+  } else {
+    // Opponent's turn: trigger opponent response, then user plays
+    document.getElementById('posInfoContent').innerHTML = `
+      <div style="font-size:13px;line-height:1.7">
+        <div style="color:var(--blue);font-weight:600;">Resumed Game</div>
+        <div>Opponent is thinking…</div>
+      </div>`;
+    advanceContinuation('');
+  }
+  console.log(`[ContSession] Resumed — ${moves.length} moves, ${isUserTurn ? 'user' : 'opponent'} turn`);
+}
+
+// Save on page hide (Android tab discard, screen off, app switch)
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden' && continuationMode && contLine) {
+    saveContSession();
+  }
+});
+document.addEventListener('pagehide', () => {
+  if (continuationMode && contLine) saveContSession();
+});
+
 // ─── Continuation Line ───
 function addContLineMove(san, uci, fen, isUser, evalData) {
   if (!contLine) return;
@@ -10424,6 +10698,7 @@ function addContLineMove(san, uci, fen, isUser, evalData) {
   contLine.currentIdx = contLine.moves.length - 1;
   contLineBrowsing = false;
   renderContLine();
+  saveContSession();
 }
 
 function renderContLine() {
@@ -10482,6 +10757,14 @@ function renderContLine() {
     ? `<span class="cont-mobile-extra"> Practice</span><span class="cont-mobile-subtitle">${contLineSubtitle}</span>`
     : '';
 
+  // Mobile-only Stop & Review: visible when posInfoCard is hidden via cont-info-merged
+  const userMoves = contLine.moves.filter(mv => mv.isUser).length;
+  const showContStop = continuationMode && !contLineBrowsing && !contLineReviewMode &&
+    (practiceContItem || (silentContinuation && !advantageMode && userMoves >= SILENT_REVIEW_MIN_MOVES));
+  const contStopHtml = showContStop
+    ? '<button class="btn btn-ghost btn-sm cont-stop-mobile" style="font-size:11px;border-color:var(--accent);color:var(--accent);margin-top:4px;" onclick="stopAndReviewContinuation()">📋 Stop & Review</button>'
+    : '';
+
   div.innerHTML = `
     <h4 class="cont-line-header">Continuation${subtitleHtml}</h4>
     <div class="engine-line-moves">${movesHtml}</div>
@@ -10491,6 +10774,7 @@ function renderContLine() {
       ${contLineBrowsing ? '<button class="btn btn-ghost btn-sm" onclick="contLineGoToEnd()">Back to end</button>' : ''}
       ${browsingHint}
     </div>
+    ${contStopHtml}
   `;
 
   // Insert at end of container (after any feedback boxes)
@@ -12641,6 +12925,7 @@ function retryPosition() {
     continuationMode = false;
     silentContinuation = false;
     contLine = null;
+    clearContSession();
     contLineBrowsing = false;
     contLineSubtitle = '';
     contWrongMovePending = false;
@@ -12710,6 +12995,7 @@ function retryPosition() {
   engineLine = null;
   browsingLine = false;
   contLine = null;
+  clearContSession();
   contLineBrowsing = false;
   contLineSubtitle = '';
   updateLineNavBar();
