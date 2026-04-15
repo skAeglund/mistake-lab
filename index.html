@@ -1401,7 +1401,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Progressive opening explorer: stats render incrementally as game index builds</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Split Maia init: prefetch at startup (I/O), compile on first continuation (CPU); 5s wait</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -4914,63 +4914,87 @@ function loadOrtScript() {
   });
 }
 
+// ── Maia two-stage init: prefetch at startup (I/O), compile on first use (CPU) ──
+let _maiaPrefetchPromise = null;
+let _maiaCompilePromise = null;
+
+function prefetchMaia() {
+  if (_maiaPrefetchPromise) return _maiaPrefetchPromise;
+  _maiaPrefetchPromise = (async () => {
+    try {
+      // Phase 1: load ort runtime
+      console.log('[Maia] Loading onnxruntime-web…');
+      await loadOrtScript();
+      if (typeof ort === 'undefined') {
+        console.warn('[Maia] onnxruntime-web not available, Maia disabled');
+        return null;
+      }
+
+      // Phase 2: fetch move mappings (small JSON files, ~100KB total)
+      console.log('[Maia] Loading move mappings…');
+      const [fwdResp, revResp] = await Promise.all([
+        fetch(MAIA_MOVES_FWD_PATH),
+        fetch(MAIA_MOVES_REV_PATH),
+      ]);
+      if (!fwdResp.ok || !revResp.ok) {
+        console.warn('[Maia] Move mapping files not found, Maia disabled');
+        return null;
+      }
+      maiaMovesForward = await fwdResp.json();
+      maiaMovesReverse = await revResp.json();
+
+      // Phase 3: pre-fetch model as ArrayBuffer (43.5MB — pure async I/O)
+      console.log('[Maia] Downloading ONNX model…');
+      const modelResp = await fetch(MAIA_MODEL_PATH);
+      if (!modelResp.ok) {
+        console.warn('[Maia] Model file not found, Maia disabled');
+        return null;
+      }
+      const buf = await modelResp.arrayBuffer();
+      console.log(`[Maia] Model downloaded (${(buf.byteLength / 1e6).toFixed(1)}MB)`);
+      return buf;
+    } catch (err) {
+      console.warn('[Maia] Prefetch failed:', err.message || err);
+      return null;
+    }
+  })();
+  return _maiaPrefetchPromise;
+}
+
+function compileMaia() {
+  if (_maiaCompilePromise) return _maiaCompilePromise;
+  _maiaCompilePromise = (async () => {
+    try {
+      const modelBuffer = await prefetchMaia();
+      if (!modelBuffer) return;
+
+      // Phase 4: create ONNX session from buffer (WASM compilation — CPU-heavy)
+      console.log('[Maia] Compiling ONNX session…');
+      ort.env.wasm.numThreads = 1;
+      ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/';
+      maiaSession = await ort.InferenceSession.create(modelBuffer, {
+        executionProviders: ['wasm'],
+      });
+
+      maiaInputNames = maiaSession.inputNames;
+      maiaOutputNames = maiaSession.outputNames;
+      console.log('[Maia] Model loaded. Inputs:', maiaInputNames, 'Outputs:', maiaOutputNames);
+      maiaReady = true;
+      // Show Maia controls if user is already in continuation practice
+      if (continuationMode) showMaiaControls();
+    } catch (err) {
+      console.warn('[Maia] Compile failed (non-fatal, will use Stockfish):', err.message || err);
+      maiaReady = false;
+    }
+  })();
+  return _maiaCompilePromise;
+}
+
+// Legacy wrapper — kept for any call sites that use initMaia()
 async function initMaia() {
   if (maiaInitStarted) return;
   maiaInitStarted = true;
-  try {
-    // Phase 1: load ort runtime (script tag removed from HTML — loaded dynamically)
-    console.log('[Maia] Loading onnxruntime-web…');
-    await loadOrtScript();
-    if (typeof ort === 'undefined') {
-      console.warn('[Maia] onnxruntime-web not available, Maia disabled');
-      return;
-    }
-
-    await yieldToIdle();
-
-    // Phase 2: fetch move mappings (small JSON files, ~100KB total)
-    console.log('[Maia] Loading move mappings…');
-    const [fwdResp, revResp] = await Promise.all([
-      fetch(MAIA_MOVES_FWD_PATH),
-      fetch(MAIA_MOVES_REV_PATH),
-    ]);
-    if (!fwdResp.ok || !revResp.ok) {
-      console.warn('[Maia] Move mapping files not found, Maia disabled');
-      return;
-    }
-    maiaMovesForward = await fwdResp.json();
-    maiaMovesReverse = await revResp.json();
-
-    await yieldToIdle();
-
-    // Phase 3: pre-fetch model as ArrayBuffer (43.5MB — pure async I/O, no main-thread work)
-    console.log('[Maia] Downloading ONNX model…');
-    const modelResp = await fetch(MAIA_MODEL_PATH);
-    if (!modelResp.ok) {
-      console.warn('[Maia] Model file not found, Maia disabled');
-      return;
-    }
-    const modelBuffer = await modelResp.arrayBuffer();
-
-    await yieldToIdle(5000);
-
-    // Phase 4: create ONNX session from buffer (WASM compilation — deferred to idle)
-    console.log('[Maia] Compiling ONNX session…');
-    ort.env.wasm.numThreads = 1;
-    // Explicit WASM paths — required when ort.min.js is loaded dynamically
-    ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/';
-    maiaSession = await ort.InferenceSession.create(modelBuffer, {
-      executionProviders: ['wasm'],
-    });
-
-    maiaInputNames = maiaSession.inputNames;
-    maiaOutputNames = maiaSession.outputNames;
-    console.log('[Maia] Model loaded. Inputs:', maiaInputNames, 'Outputs:', maiaOutputNames);
-    maiaReady = true;
-  } catch (err) {
-    console.warn('[Maia] Init failed (non-fatal, will use Stockfish):', err.message || err);
-    maiaReady = false;
-  }
+  await compileMaia();
 }
 
 // ─── Maia FEN mirroring (black → white perspective) ───
@@ -7440,9 +7464,10 @@ function showMainApp() {
   updateSessionProgress();
   initStockfish();
 
-  // Defer Maia load — let board + Stockfish + opening filter settle first
-  if ('requestIdleCallback' in window) requestIdleCallback(() => initMaia(), { timeout: 3000 });
-  else setTimeout(initMaia, 1000);
+  // Start Maia prefetch (phases 1-3: script + mappings + 43.5MB model download).
+  // Pure async I/O — doesn't block main thread. WASM compilation (phase 4) deferred
+  // to first continuation practice use.
+  prefetchMaia();
 
   // Load repertoire studies in background
   loadRepertoireTrie().then(() => {
@@ -12639,6 +12664,9 @@ function startContinuationMode() {
 }
 
 async function advanceContinuation(contUci) {
+  // Trigger Maia WASM compilation on first continuation use (prefetch already running)
+  if (!_maiaCompilePromise) compileMaia();
+
   // Check if game is already over (user's move was checkmate/draw)
   if (gameEngine.game_over()) {
     if (advantageMode) {
@@ -12694,6 +12722,11 @@ async function advanceContinuation(contUci) {
   }
 
   // Fallback: try Maia 3 for human-like opponent moves
+  // If Maia isn't ready yet, wait up to 5s for compilation to finish
+  if (!opponentUci && !maiaReady && _maiaCompilePromise) {
+    if (!silentContinuation) showFeedback('info', 'Loading…', 'Preparing opponent model…');
+    await Promise.race([_maiaCompilePromise, new Promise(r => setTimeout(r, 5000))]);
+  }
   if (!opponentUci && maiaReady) {
     const maiaMove = await maiaPredict(gameEngine.fen());
     if (maiaMove) {
