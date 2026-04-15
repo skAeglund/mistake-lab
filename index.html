@@ -1401,7 +1401,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Lazy PMI/fenIndex: defer heavy index builds to first explorer access; slim mistakes cache</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Progressive opening explorer: stats render incrementally as game index builds</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -6638,6 +6638,8 @@ function ensurePMI() {
   pmiBuilding = true;
   const t0 = performance.now();
   const pmi = new Map();
+  // Assign immediately so partial results are available to renderExplorerStats
+  positionMoveIndex = pmi;
   const games = allGames.slice();
   const BATCH = 30;
   let i = 0;
@@ -6674,13 +6676,17 @@ function ensurePMI() {
       }
     }
     if (i < games.length) {
+      // Progressive render: update explorer with partial data after each batch
+      if (openingFilterMode) {
+        renderExplorerStats();
+        updateFilterArrows();
+      }
       setTimeout(processBatch, 0);
     } else {
-      positionMoveIndex = pmi;
       pmiGameCount = games.length;
       pmiBuilding = false;
       console.log(`[OpeningExplorer] Lazy PMI built: ${pmi.size} positions from ${games.length} games in ${(performance.now()-t0).toFixed(0)}ms`);
-      // Re-render if opening explorer is visible
+      // Final render with complete data
       if (openingFilterMode) {
         renderExplorerStats();
         updateFilterArrows();
@@ -7186,20 +7192,20 @@ function renderExplorerStats() {
   const container = document.getElementById('explorerStatsContainer');
   if (!container) return;
 
-  // Trigger lazy PMI build if needed
-  if (!positionMoveIndex || positionMoveIndex.size === 0 || pmiGameCount !== allGames.length) {
+  // Trigger lazy PMI build if needed (non-blocking — renders partial data below)
+  if (!positionMoveIndex || pmiGameCount !== allGames.length) {
     ensurePMI();
-    if (pmiBuilding) {
-      container.innerHTML = '<div class="explorer-no-data" style="opacity:0.6">Building game index…</div>';
-      return;
-    }
   }
 
   const key = filterChess ? fenPositionKey(filterChess.fen()) : null;
   const colorFilter = filters.color.size < 2 ? [...filters.color][0] : null;
 
   if (!key || !positionMoveIndex || !positionMoveIndex.has(key)) {
-    container.innerHTML = '<div class="explorer-no-data">No games found in this position.</div>';
+    if (pmiBuilding) {
+      container.innerHTML = '<div class="explorer-no-data" style="opacity:0.6">Loading games…</div>';
+    } else {
+      container.innerHTML = '<div class="explorer-no-data">No games found in this position.</div>';
+    }
     return;
   }
 
