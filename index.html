@@ -1401,7 +1401,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Startup perf: single Gist fetch + PMI cache; mobile Stop & Review; practice rep deviations auto-save; continuation session persistence</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix opening filter 0-results (empty gameFenIndex self-heal); lazy-load Maia ONNX (non-blocking)</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1700,7 +1700,6 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/chessboard-1.0.0.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/ort.min.js"></script>
 <script>
 // ─── State ───
 // ─── Arrow drawing ───
@@ -1945,6 +1944,7 @@ let lichessToken = localStorage.getItem('mistakelab_lichess_token') || null;
 // ─── Maia 3 state ───
 let maiaSession = null;       // ONNX InferenceSession
 let maiaReady = false;
+let maiaInitStarted = false;  // prevents double-init
 let maiaMovesForward = null;  // UCI string → index (e.g. "e2e4" → 123)
 let maiaMovesReverse = null;  // index → UCI string (e.g. 123 → "e2e4")
 let maiaInputNames = null;    // discovered from the ONNX model
@@ -4885,13 +4885,43 @@ function analysisLineStep(delta) {
 const MAIA_MODEL_PATH = 'maia/maia3_simplified.onnx';
 const MAIA_MOVES_FWD_PATH = 'maia/all_moves_maia3.json';
 const MAIA_MOVES_REV_PATH = 'maia/all_moves_maia3_reversed.json';
+const ORT_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/ort.min.js';
+
+// Yield to the browser — waits for an idle callback (or timeout fallback)
+function yieldToIdle(timeoutMs = 2000) {
+  return new Promise(resolve => {
+    if ('requestIdleCallback' in window) requestIdleCallback(resolve, { timeout: timeoutMs });
+    else setTimeout(resolve, 50);
+  });
+}
+
+// Dynamically load onnxruntime-web script (avoids blocking page load)
+function loadOrtScript() {
+  return new Promise((resolve, reject) => {
+    if (typeof ort !== 'undefined') { resolve(); return; }
+    const s = document.createElement('script');
+    s.src = ORT_SCRIPT_URL;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error('Failed to load onnxruntime-web'));
+    document.head.appendChild(s);
+  });
+}
 
 async function initMaia() {
-  if (typeof ort === 'undefined') {
-    console.warn('[Maia] onnxruntime-web not loaded, Maia disabled');
-    return;
-  }
+  if (maiaInitStarted) return;
+  maiaInitStarted = true;
   try {
+    // Phase 1: load ort runtime (script tag removed from HTML — loaded dynamically)
+    console.log('[Maia] Loading onnxruntime-web…');
+    await loadOrtScript();
+    if (typeof ort === 'undefined') {
+      console.warn('[Maia] onnxruntime-web not available, Maia disabled');
+      return;
+    }
+
+    await yieldToIdle();
+
+    // Phase 2: fetch move mappings (small JSON files, ~100KB total)
     console.log('[Maia] Loading move mappings…');
     const [fwdResp, revResp] = await Promise.all([
       fetch(MAIA_MOVES_FWD_PATH),
@@ -4904,9 +4934,25 @@ async function initMaia() {
     maiaMovesForward = await fwdResp.json();
     maiaMovesReverse = await revResp.json();
 
-    console.log('[Maia] Loading ONNX model…');
+    await yieldToIdle();
+
+    // Phase 3: pre-fetch model as ArrayBuffer (43.5MB — pure async I/O, no main-thread work)
+    console.log('[Maia] Downloading ONNX model…');
+    const modelResp = await fetch(MAIA_MODEL_PATH);
+    if (!modelResp.ok) {
+      console.warn('[Maia] Model file not found, Maia disabled');
+      return;
+    }
+    const modelBuffer = await modelResp.arrayBuffer();
+
+    await yieldToIdle(5000);
+
+    // Phase 4: create ONNX session from buffer (WASM compilation — deferred to idle)
+    console.log('[Maia] Compiling ONNX session…');
     ort.env.wasm.numThreads = 1;
-    maiaSession = await ort.InferenceSession.create(MAIA_MODEL_PATH, {
+    // Explicit WASM paths — required when ort.min.js is loaded dynamically
+    ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/';
+    maiaSession = await ort.InferenceSession.create(modelBuffer, {
       executionProviders: ['wasm'],
     });
 
@@ -6148,6 +6194,24 @@ function extractAllMistakes() {
   for (const [gid, fens] of Object.entries(fenData)) {
     gameFenIndex.set(gid, new Set(fens));
   }
+  // If cache lost fenIndex (quota-exceeded save), rebuild synchronously to self-heal
+  let fenIndexWasEmpty = false;
+  if (gameFenIndex.size === 0 && allGames.length > 0 && needsExtraction.size === 0) {
+    fenIndexWasEmpty = true;
+    console.log('[MistakesCache] fenIndex empty — rebuilding from game moves');
+    for (const game of allGames) {
+      const moves = game.moves ? game.moves.split(' ') : [];
+      const chess = new Chess(game.initialFen || undefined);
+      const fens = [fenPositionKey(chess.fen())];
+      for (const san of moves) {
+        const m = chess.move(san, { sloppy: true });
+        if (!m) break;
+        fens.push(fenPositionKey(chess.fen()));
+      }
+      fenData[game.id] = fens;
+      gameFenIndex.set(game.id, new Set(fens));
+    }
+  }
   fenIndexBuilding = false;
 
   // Restore or build positionMoveIndex for opening explorer
@@ -6218,13 +6282,16 @@ function extractAllMistakes() {
         const result = winner === playerColor ? 'win' : winner === opponentColor ? 'loss' : 'draw';
         const chess = new Chess(game.initialFen || undefined);
         const rebuiltStats = [];
+        const rebuiltFens = [fenPositionKey(chess.fen())];
         for (const san of moves) {
           const posKey = fenPositionKey(chess.fen());
           const m = chess.move(san, { sloppy: true });
           if (!m) break;
+          rebuiltFens.push(fenPositionKey(chess.fen()));
           rebuiltStats.push({ posKey, moveSan: m.san, moveUci: m.from + m.to + (m.promotion || '') });
         }
         moveStatsData[game.id] = rebuiltStats;
+        fenData[game.id] = rebuiltFens;
         for (const ms of rebuiltStats) {
           if (!positionMoveIndex.has(ms.posKey)) positionMoveIndex.set(ms.posKey, new Map());
           const posMap = positionMoveIndex.get(ms.posKey);
@@ -6240,11 +6307,16 @@ function extractAllMistakes() {
         }
       }
       console.log(`[OpeningExplorer] Rebuilt positionMoveIndex with ${positionMoveIndex.size} positions from ${allGames.length} games`);
+      // Also rebuild gameFenIndex from the freshly-collected fenData
+      gameFenIndex = new Map();
+      for (const [gid, fens] of Object.entries(fenData)) {
+        gameFenIndex.set(gid, new Set(fens));
+      }
     }
   }
 
   // Save cache (after PMI build so it's included)
-  if (!pmiRestored || needsExtraction.size > 0) {
+  if (!pmiRestored || needsExtraction.size > 0 || fenIndexWasEmpty) {
     const pmiData = positionMoveIndex.size > 0 ? serializePositionMoveIndex(positionMoveIndex) : null;
     saveMistakesCache(rawMistakes, currentFingerprints, fenData, moveStatsData, advantageCandidates, pmiData);
   }
@@ -6560,7 +6632,7 @@ let fenIndexBuilding = false;    // true while async build is in progress
 function buildFenIndex() {
   // Index is normally built during extractAllMistakes — this is a fallback
   if (fenIndexBuilding) return;
-  if (gameFenIndex && fenIndexGameCount === allGames.length) return;
+  if (gameFenIndex && gameFenIndex.size > 0 && fenIndexGameCount === allGames.length) return;
 
   fenIndexBuilding = true;
   const t0 = performance.now();
@@ -7336,7 +7408,10 @@ function showMainApp() {
   sessionCompleted = 0;
   updateSessionProgress();
   initStockfish();
-  initMaia(); // loads in background — non-blocking
+
+  // Defer Maia load — let board + Stockfish + opening filter settle first
+  if ('requestIdleCallback' in window) requestIdleCallback(() => initMaia(), { timeout: 3000 });
+  else setTimeout(initMaia, 1000);
 
   // Load repertoire studies in background
   loadRepertoireTrie().then(() => {
