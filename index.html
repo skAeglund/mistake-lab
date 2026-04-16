@@ -1401,7 +1401,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Split Maia init: prefetch at startup (I/O), compile on first continuation (CPU); 5s wait</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Separate fen data cache: persist per-game moveStats, skip chess.js replay on explorer open</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1907,6 +1907,12 @@ let savedBoardState = null;      // { fen, orientation, mistakeIdx } to restore 
 let positionMoveIndex = null;    // Map<positionKey, Map<moveSAN, MoveStats>> for opening explorer
 let pmiBuilding = false;         // true while async PMI build is in progress
 let pmiGameCount = 0;            // allGames.length when PMI was built
+// Fen data cache: per-game { moveStats: [{posKey, moveUci, moveSan}], finalFen } — used to
+// build gameFenIndex/PMI without replaying games through chess.js. Stored in a separate
+// localStorage key from the mistakes cache so it's only parsed when the explorer opens.
+let pendingFenData = {};         // { [gameId]: { moveStats, finalFen } } — freshly extracted, not yet persisted
+let fenDataCache = null;         // merged in-memory view, null until first explorer access
+let fenDataCacheLoaded = false;  // true once localStorage has been checked (even if empty)
 let filterArrows = [];           // [{from, to, opacity}] frequency arrows in filter mode
 let hoverFilterArrow = null;     // {from, to} arrow to highlight on stats row hover
 let savedFilterOrientation = null; // board orientation to restore when re-entering filter mode
@@ -2156,6 +2162,7 @@ let evalCacheDirty = 0;          // count of unsaved entries since last sync
 let evalCacheSyncTimer = null;
 const MISTAKES_CACHE_VERSION = 7;
 const MISTAKES_CACHE_PARAMS = { wpDropThreshold: 10, advantageThreshold: 300, advantageMinMoves: 2 };
+const FEN_DATA_CACHE_VERSION = 1;  // per-game fens + moveStats for opening explorer (stored separately, loaded lazily)
 
 // Populate login fields from saved config + auto-load
 document.addEventListener('DOMContentLoaded', async () => {
@@ -2712,6 +2719,57 @@ function saveMistakesCache(rawMistakes, gameFingerprints, advantageCandidates) {
   } catch (e) {
     console.warn('[MistakesCache] Save failed:', e.message);
   }
+}
+
+// ─── FenData Cache (localStorage, separate from mistakes — loaded lazily) ───
+// Stores per-game moveStats so we can build gameFenIndex and positionMoveIndex without
+// replaying games through chess.js. Only touched when the opening explorer opens.
+function getFenDataCacheKey() { return `mistakelab_fendata_${currentUsername.toLowerCase()}`; }
+
+function loadFenDataCache() {
+  try {
+    const raw = localStorage.getItem(getFenDataCacheKey());
+    if (!raw) return null;
+    const cache = JSON.parse(raw);
+    if (!cache || cache.version !== FEN_DATA_CACHE_VERSION) return null;
+    return cache.games || {};  // { [gameId]: { moveStats, finalFen } }
+  } catch { return null; }
+}
+
+function saveFenDataCache(gamesMap) {
+  try {
+    const cache = { version: FEN_DATA_CACHE_VERSION, games: gamesMap };
+    localStorage.setItem(getFenDataCacheKey(), JSON.stringify(cache));
+  } catch (e) {
+    console.warn('[FenDataCache] Save failed:', e.message);
+  }
+}
+
+// Load fen cache into memory and merge any pending data from this session's extractions.
+// Returns the merged map { [gameId]: { moveStats, finalFen } }. Called lazily from
+// buildFenIndex / ensurePMI on first explorer access.
+function ensureFenDataLoaded() {
+  if (fenDataCacheLoaded) return fenDataCache;
+  fenDataCacheLoaded = true;
+  const t0 = performance.now();
+  fenDataCache = loadFenDataCache() || {};
+  const loadedCount = Object.keys(fenDataCache).length;
+
+  // Merge pending data from this session (freshly extracted games overwrite cache entries)
+  let dirty = false;
+  for (const gid in pendingFenData) {
+    fenDataCache[gid] = pendingFenData[gid];
+    dirty = true;
+  }
+  // Drop games no longer in allGames
+  const currentIds = new Set(allGames.map(g => g.id));
+  for (const gid in fenDataCache) {
+    if (!currentIds.has(gid)) { delete fenDataCache[gid]; dirty = true; }
+  }
+  if (dirty) saveFenDataCache(fenDataCache);
+  pendingFenData = {}; // consumed
+  console.log(`[FenDataCache] Loaded ${loadedCount} games, merged ${Object.keys(fenDataCache).length} total in ${(performance.now()-t0).toFixed(0)}ms`);
+  return fenDataCache;
 }
 
 function serializePositionMoveIndex(pmi) {
@@ -6279,6 +6337,28 @@ function extractAllMistakes() {
     const result = extractMistakesForGame(game);
     rawMistakes.push(...result.mistakes);
     advantageCandidates[gameId] = result.advantageCandidate;
+    // Buffer fen data for lazy persistence when explorer opens (avoids parsing the
+    // potentially large fen cache on the startup critical path).
+    pendingFenData[gameId] = {
+      moveStats: result.moveStats,
+      finalFen: result.fens.length > 0 ? result.fens[result.fens.length - 1] : null,
+    };
+  }
+
+  // If fen data was already loaded this session, merge pending updates into it immediately
+  // so a subsequent explorer access doesn't re-read localStorage.
+  if (fenDataCacheLoaded && fenDataCache) {
+    let dirty = false;
+    for (const gid in pendingFenData) {
+      fenDataCache[gid] = pendingFenData[gid];
+      dirty = true;
+    }
+    const currentIds = new Set(allGames.map(g => g.id));
+    for (const gid in fenDataCache) {
+      if (!currentIds.has(gid)) { delete fenDataCache[gid]; dirty = true; }
+    }
+    if (dirty) saveFenDataCache(fenDataCache);
+    pendingFenData = {};
   }
 
   // gameFenIndex and positionMoveIndex are built LAZILY on first opening explorer access
@@ -6608,29 +6688,41 @@ function getGameResultInfo(game) {
 let fenIndexBuilding = false;    // true while async build is in progress
 
 function buildFenIndex() {
-  // Index is normally built during extractAllMistakes — this is a fallback
   if (fenIndexBuilding) return;
   if (gameFenIndex && gameFenIndex.size > 0 && fenIndexGameCount === allGames.length) return;
 
   fenIndexBuilding = true;
   const t0 = performance.now();
+  const fenData = ensureFenDataLoaded();
   const newIndex = new Map();
   const games = allGames.slice();
   const BATCH = 50;
   let i = 0;
+  let cacheHits = 0;
+  let cacheMisses = 0;
 
   function processBatch() {
     const end = Math.min(i + BATCH, games.length);
     for (; i < end; i++) {
       const game = games[i];
-      const moves = game.moves ? game.moves.split(' ') : [];
-      const chess = new Chess(game.initialFen || undefined);
+      const cached = fenData[game.id];
       const fens = new Set();
-      fens.add(fenPositionKey(chess.fen()));
-      for (const san of moves) {
-        const result = chess.move(san, { sloppy: true });
-        if (!result) break;
+      if (cached && cached.moveStats) {
+        // Fast path: use cached moveStats — no chess.js replay
+        for (const ms of cached.moveStats) fens.add(ms.posKey);
+        if (cached.finalFen) fens.add(cached.finalFen);
+        cacheHits++;
+      } else {
+        // Slow path: fall back to chess.js replay for this game
+        const moves = game.moves ? game.moves.split(' ') : [];
+        const chess = new Chess(game.initialFen || undefined);
         fens.add(fenPositionKey(chess.fen()));
+        for (const san of moves) {
+          const result = chess.move(san, { sloppy: true });
+          if (!result) break;
+          fens.add(fenPositionKey(chess.fen()));
+        }
+        cacheMisses++;
       }
       newIndex.set(game.id, fens);
     }
@@ -6640,7 +6732,7 @@ function buildFenIndex() {
       gameFenIndex = newIndex;
       fenIndexGameCount = games.length;
       fenIndexBuilding = false;
-      console.log(`[OpeningFilter] Fallback FEN index built for ${games.length} games in ${(performance.now()-t0).toFixed(0)}ms`);
+      console.log(`[OpeningFilter] FEN index built for ${games.length} games in ${(performance.now()-t0).toFixed(0)}ms (cache hits: ${cacheHits}, misses: ${cacheMisses})`);
       if (openingFilterMode || openingFilterFen) applyOpeningFilterFromBoard();
     }
   }
@@ -6661,12 +6753,16 @@ function ensurePMI() {
 
   pmiBuilding = true;
   const t0 = performance.now();
+  const fenData = ensureFenDataLoaded();
   const pmi = new Map();
   // Assign immediately so partial results are available to renderExplorerStats
   positionMoveIndex = pmi;
   const games = allGames.slice();
   const BATCH = 30;
   let i = 0;
+  let cacheHits = 0;
+  let cacheMisses = 0;
+  const dirtyGames = {};  // games that needed chess.js replay — add to fen cache after
 
   function processBatch() {
     const end = Math.min(i + BATCH, games.length);
@@ -6681,17 +6777,36 @@ function ensurePMI() {
       const opponentRating = (opponentColor === 'white' ? whiteRating : blackRating) || null;
       const userRating = (playerColor === 'white' ? whiteRating : blackRating) || null;
       const result = winner === playerColor ? 'win' : winner === opponentColor ? 'loss' : 'draw';
-      const chess = new Chess(game.initialFen || undefined);
-      for (const san of moves) {
-        const posKey = fenPositionKey(chess.fen());
-        const m = chess.move(san, { sloppy: true });
-        if (!m) break;
-        if (!pmi.has(posKey)) pmi.set(posKey, new Map());
-        const posMap = pmi.get(posKey);
-        if (!posMap.has(m.san)) {
-          posMap.set(m.san, { san: m.san, uci: m.from + m.to + (m.promotion || ''), count: 0, whiteWins: 0, blackWins: 0, draws: 0, games: [] });
+
+      const cached = fenData[game.id];
+      let moveStats;
+      if (cached && cached.moveStats) {
+        // Fast path: use cached moveStats
+        moveStats = cached.moveStats;
+        cacheHits++;
+      } else {
+        // Slow path: chess.js replay for this game, and write back to cache
+        const chess = new Chess(game.initialFen || undefined);
+        moveStats = [];
+        let finalFen = fenPositionKey(chess.fen());
+        for (const san of moves) {
+          const posKey = fenPositionKey(chess.fen());
+          const m = chess.move(san, { sloppy: true });
+          if (!m) break;
+          moveStats.push({ posKey, moveUci: m.from + m.to + (m.promotion || ''), moveSan: m.san });
+          finalFen = fenPositionKey(chess.fen());
         }
-        const entry = posMap.get(m.san);
+        dirtyGames[game.id] = { moveStats, finalFen };
+        cacheMisses++;
+      }
+
+      for (const ms of moveStats) {
+        if (!pmi.has(ms.posKey)) pmi.set(ms.posKey, new Map());
+        const posMap = pmi.get(ms.posKey);
+        if (!posMap.has(ms.moveSan)) {
+          posMap.set(ms.moveSan, { san: ms.moveSan, uci: ms.moveUci, count: 0, whiteWins: 0, blackWins: 0, draws: 0, games: [] });
+        }
+        const entry = posMap.get(ms.moveSan);
         entry.count++;
         if (winner === 'white') entry.whiteWins++;
         else if (winner === 'black') entry.blackWins++;
@@ -6709,7 +6824,14 @@ function ensurePMI() {
     } else {
       pmiGameCount = games.length;
       pmiBuilding = false;
-      console.log(`[OpeningExplorer] Lazy PMI built: ${pmi.size} positions from ${games.length} games in ${(performance.now()-t0).toFixed(0)}ms`);
+      // Persist any games we had to replay through chess.js
+      const dirtyCount = Object.keys(dirtyGames).length;
+      if (dirtyCount > 0) {
+        for (const gid in dirtyGames) fenData[gid] = dirtyGames[gid];
+        saveFenDataCache(fenData);
+        console.log(`[FenDataCache] Persisted ${dirtyCount} newly-replayed games`);
+      }
+      console.log(`[OpeningExplorer] Lazy PMI built: ${pmi.size} positions from ${games.length} games in ${(performance.now()-t0).toFixed(0)}ms (cache hits: ${cacheHits}, misses: ${cacheMisses})`);
       // Final render with complete data
       if (openingFilterMode) {
         renderExplorerStats();
