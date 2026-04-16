@@ -1401,7 +1401,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Wait for IDB preload instead of racing chess.js; request persistent storage</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add SRS due-review queue to Repertoire tab</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1439,7 +1439,7 @@
             Games
           </button>
           <button class="btn btn-ghost btn-sm panel-tab" id="btnRepertoireMode" onclick="activatePanelTab('repertoire')" style="font-size:11px;padding:4px 8px;">
-            ♟ Repertoire <span id="repertoireBadgeCount" style="font-size:10px;"></span>
+            ♟ Repertoire <span id="repertoireBadgeCount"></span>
           </button>
           <button class="btn btn-ghost btn-sm panel-tab" id="btnReviewMode" onclick="activatePanelTab('review')" style="font-size:11px;padding:4px 8px;">
             ⏰ Review <span id="reviewDueCount"></span>
@@ -7787,7 +7787,7 @@ function updateSessionProgress() {
   if (reviewMode) renderReviewList();
   else renderGameList();
 
-  if (repertoireDrillMode) updateRepertoireBadge();
+  updateRepertoireBadge();
 }
 
 // ─── Game list rendering ───
@@ -14722,11 +14722,17 @@ async function refreshRepertoire() {
 
 function updateRepertoireBadge() {
   const badge = document.getElementById('repertoireBadgeCount');
-  if (badge) {
-    const done = getCompletedSet();
-    const remaining = repertoireDeviations.filter(d => !done.has(posId(d))).length;
-    badge.textContent = remaining || '';
+  if (!badge) return;
+  // No deviations at all (no studies loaded / fresh user): hide the pill entirely
+  if (!repertoireDeviations.length) {
+    badge.className = '';
+    badge.textContent = '';
+    return;
   }
+  // Otherwise show SRS due count (new + overdue), styled as a pill to match the Review tab badge
+  const dueCount = repertoireDeviations.filter(d => isDue(posId(d))).length;
+  badge.className = dueCount > 0 ? 'review-count' : 'review-count empty';
+  badge.textContent = dueCount;
 }
 
 function toggleRepertoireMode() {
@@ -14801,12 +14807,19 @@ function renderRepertoirePanel() {
 
   // Deviations list
   if (repertoireDeviations.length) {
+    const dueCountForBtn = repertoireDeviations.filter(d => isDue(posId(d))).length;
+    const reviewDueBtnHtml = dueCountForBtn > 0
+      ? `<button class="btn btn-primary btn-sm" onclick="startRepertoireReview()" style="font-size:11px;">⏰ Review Due (${dueCountForBtn})</button>`
+      : '';
     html += `<div style="padding:8px 12px;border-bottom:1px solid var(--border);">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:6px;flex-wrap:wrap;">
         <span style="font-size:12px;font-weight:600;color:var(--text-primary);">
           Deviations (${(() => { const done = getCompletedSet(); const rem = repertoireDeviations.filter(d => !done.has(posId(d))).length; return rem < repertoireDeviations.length ? rem + '/' + repertoireDeviations.length : repertoireDeviations.length; })()})
         </span>
-        <button class="btn btn-primary btn-sm" onclick="startRepertoireDrill()" style="font-size:11px;">▶ Drill</button>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+          ${reviewDueBtnHtml}
+          <button class="btn btn-primary btn-sm" onclick="startRepertoireDrill()" style="font-size:11px;">▶ Drill</button>
+        </div>
       </div>`;
     // Group by opening
     const byOpening = new Map();
@@ -15302,6 +15315,46 @@ function startRepertoireDrill() {
   });
 
   // Enter drill mode
+  repertoireDrillMode = true;
+  repertoireDrillCorrect = 0;
+  repertoireDrillWrong = 0;
+  repertoireDrillFailed = [];
+  savedFilteredMistakes = filteredMistakes;
+  filteredMistakes = repertoireDrillQueue;
+
+  closeDrawer();
+
+  loadPosition(0);
+}
+
+// Drill only deviations currently due per SRS (new + overdue cards).
+// Reuses the entire drill-mode infrastructure — just a narrower queue and sort.
+function startRepertoireReview() {
+  if (!repertoireDeviations.length) return;
+
+  const dueDeviations = repertoireDeviations.filter(d => isDue(posId(d)));
+  if (!dueDeviations.length) return;
+
+  // If a prior drill is still active, tear it down cleanly before starting a new one.
+  // Without this, savedFilteredMistakes would be overwritten with the previous drill queue
+  // and the original non-drill filteredMistakes would be lost.
+  if (repertoireDrillMode) exitRepertoireDrill();
+
+  repertoireDrillQueue = dueDeviations.map(d => ({ ...d }));
+
+  // Sort: most overdue first, new items last (by gameCount among new).
+  // Mirrors buildReviewQueue ordering so both review queues feel consistent.
+  repertoireDrillQueue.sort((a, b) => {
+    const ca = getCardForPosition(posId(a));
+    const cb = getCardForPosition(posId(b));
+    if (ca.state === FSRS_STATE.new && cb.state !== FSRS_STATE.new) return 1;
+    if (cb.state === FSRS_STATE.new && ca.state !== FSRS_STATE.new) return -1;
+    if (ca.state === FSRS_STATE.new && cb.state === FSRS_STATE.new) {
+      return (b.gameCount || 0) - (a.gameCount || 0);
+    }
+    return (ca.due || '') < (cb.due || '') ? -1 : 1;
+  });
+
   repertoireDrillMode = true;
   repertoireDrillCorrect = 0;
   repertoireDrillWrong = 0;
