@@ -1401,7 +1401,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">IDB getAll() instead of cursor iteration (50x faster on mobile); bump preload race to 5s</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Wait for IDB preload instead of racing chess.js; request persistent storage</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -6803,19 +6803,19 @@ function buildOpeningIndex() {
   pmiBuilding = true;
   fenIndexBuilding = true;
 
-  // If fen data preload is in flight, wait up to 5s for it. IDB reads can take
-  // several seconds on mobile even with getAll (structured-clone of large payloads
-  // competes with ongoing work like Stockfish/Maia init). Chess.js fallback on
-  // mobile is ~25s for 338 games, so waiting is almost always the right call.
-  const startBuild = () => doBuildOpeningIndex();
+  // Wait for fen data preload to complete. We deliberately do NOT race this against
+  // a timeout: chess.js replay on mobile takes ~25s for 400 games and fully saturates
+  // the main thread, which blocks IDB from delivering its result. Running chess.js
+  // "as a fallback while preload is pending" is self-defeating — preload can't make
+  // progress while chess.js runs, and we waste seconds on work we'll throw away.
+  // If IDB is genuinely unavailable, startFenDataPreload's .catch sets
+  // fenDataCacheLoaded=true with an empty cache, and chess.js fallback runs for
+  // real from inside doBuildOpeningIndex.
   if (fenDataCacheLoaded) {
-    startBuild();
+    doBuildOpeningIndex();
   } else {
     if (!fenDataPreloadPromise) startFenDataPreload();
-    Promise.race([
-      fenDataPreloadPromise,
-      new Promise(r => setTimeout(r, 5000)),
-    ]).then(startBuild, startBuild);
+    fenDataPreloadPromise.then(doBuildOpeningIndex, doBuildOpeningIndex);
   }
 }
 
@@ -6846,8 +6846,9 @@ function doBuildOpeningIndex() {
       const moves = game.moves ? game.moves.split(' ') : [];
       const gameFens = new Set();
 
-      // Obtain moveStats — from cache (check live fenDataCache so late-arriving preload
-      // data is picked up mid-build) or via chess.js replay
+      // Obtain moveStats — from cache or via chess.js replay. (We always read live
+      // fenDataCache rather than a snapshot, so any concurrent saves from another
+      // path are picked up on subsequent games.)
       const cached = (fenDataCacheLoaded && fenDataCache) ? fenDataCache[game.id] : fenData[game.id];
       let moveStats, finalFen;
       if (cached && cached.moveStats) {
@@ -7705,9 +7706,17 @@ function showMainApp() {
 
   // Clear any legacy localStorage fen cache entries (now stored in IndexedDB)
   migrateOldLocalStorageFenCache();
+  // Request persistent storage to reduce the chance of IDB being evicted under
+  // device memory pressure. On Chromium browsers this is usually granted silently
+  // if the site is installed as a PWA or has been engaged with; on others the user
+  // may see a prompt. Fire-and-forget — best-effort.
+  if (navigator.storage && navigator.storage.persist) {
+    navigator.storage.persist().then(granted => {
+      console.log(`[Storage] Persistent storage ${granted ? 'granted' : 'not granted'}`);
+    }).catch(() => {});
+  }
   // Kick off IndexedDB preload of the opening-explorer fen data. Async, non-blocking —
-  // usually settles well before the user opens the explorer so buildOpeningIndex can
-  // run at full cached speed.
+  // buildOpeningIndex will wait for this to complete rather than racing it.
   startFenDataPreload();
 
   // Load repertoire studies in background
