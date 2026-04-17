@@ -1479,7 +1479,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Seed analysis tree with full game when entering from game review</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Refute the user's retry move, not the original mistake</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -14264,15 +14264,31 @@ function stepReviewBestLine(delta) {
 }
 
 function exitReviewBestLine(moveIdx) {
+  const wasRetryContext = !!window._reviewBestLine?.retryContext;
   window._reviewBestLine = null;
+  // Coming back from a retry-context refutation: restore the retry result card
+  // (keeps the user's retry move highlighted and the feedback buttons intact).
+  if (wasRetryContext && restoreRetryResultView()) return;
   goToContLineMove(moveIdx);
   showReviewKeyMoveInfo(moveIdx);
 }
 
-async function showReviewRefutation(moveIdx) {
+async function showReviewRefutation(moveIdx, fromRetry = false) {
   if (!contLine || !contLine.moves[moveIdx]) return;
-  const mv = contLine.moves[moveIdx];
-  const postFen = mv.fen; // position after the bad move
+  const originalMv = contLine.moves[moveIdx];
+
+  // When invoked from a retry result, analyse the user's retry move (not the
+  // original mistake). The stashed _lastRetryResult gives us the retry post-FEN
+  // and the played SAN; we don't navigate contLine either since the board is
+  // already at the retry position.
+  const retry = fromRetry ? window._lastRetryResult : null;
+  const retryValid = !!(retry && retry.moveIdx === moveIdx && retry.postFen && retry.move);
+
+  const postFen = retryValid ? retry.postFen : originalMv.fen;
+  const badSan = retryValid ? retry.move.san : originalMv.san;
+  const badClassification = retryValid
+    ? classifyWpDrop(retry.wpDrop, retry.isExactBest)
+    : originalMv.classification;
 
   // Show loading
   const container = document.getElementById('feedbackContainer');
@@ -14283,20 +14299,21 @@ async function showReviewRefutation(moveIdx) {
     </div>
   `;
 
-  // Navigate to the position after the bad move
-  goToContLineMove(moveIdx);
+  // Normal case: navigate contLine to the mistake position. Retry case: leave
+  // the board at the retry post-FEN (already displayed).
+  if (!retryValid) goToContLineMove(moveIdx);
 
   // Analyze: opponent's best response to the bad move
   const result = await sfAnalyze(postFen, 20, 1);
   if (!result || !result.pvs || !result.pvs[0]) {
-    showReviewKeyMoveInfo(moveIdx);
+    if (retryValid) restoreRetryResultView(); else showReviewKeyMoveInfo(moveIdx);
     return;
   }
 
   const pv = result.pvs[0];
   const pvMoves = (pv.moves || '').trim().split(/\s+/).filter(Boolean);
   if (pvMoves.length === 0) {
-    showReviewKeyMoveInfo(moveIdx);
+    if (retryValid) restoreRetryResultView(); else showReviewKeyMoveInfo(moveIdx);
     return;
   }
 
@@ -14317,7 +14334,7 @@ async function showReviewRefutation(moveIdx) {
   }
 
   if (lineMoves.length === 0) {
-    showReviewKeyMoveInfo(moveIdx);
+    if (retryValid) restoreRetryResultView(); else showReviewKeyMoveInfo(moveIdx);
     return;
   }
 
@@ -14340,16 +14357,16 @@ async function showReviewRefutation(moveIdx) {
 
   // Start with user's bad move for context
   let movesHtml = '';
-  const badMoveNum = mv.fen ? parseInt(mv.fen.split(' ')[5]) || mn : mn;
+  const badMoveNum = parseInt(postFen.split(' ')[5]) || mn;
   const preMoveWhite = postFen.split(' ')[1] !== 'w'; // user moved before this FEN
   if (preMoveWhite) {
     movesHtml += `<span class="move-num">${badMoveNum > 1 ? badMoveNum - 1 : badMoveNum}.</span>`;
   } else {
     movesHtml += `<span class="move-num">${badMoveNum}…</span>`;
   }
-  const cls = MOVE_CLASSIFICATION[mv.classification] || {};
-  const sym = mv.classification === 'good' ? '✓' : (mv.classification === 'best' ? '★' : cls.symbol || '');
-  movesHtml += `<span class="move" style="color:${cls.color || 'var(--text-muted)'}">${escHtml(mv.san)}${sym ? `<span class="move-class" style="color:${cls.color}">${sym}</span>` : ''}</span> `;
+  const cls = MOVE_CLASSIFICATION[badClassification] || {};
+  const sym = badClassification === 'good' ? '✓' : (badClassification === 'best' ? '★' : cls.symbol || '');
+  movesHtml += `<span class="move" style="color:${cls.color || 'var(--text-muted)'}">${escHtml(badSan)}${sym ? `<span class="move-class" style="color:${cls.color}">${sym}</span>` : ''}</span> `;
 
   // Then the refutation line
   for (let i = 0; i < lineMoves.length; i++) {
@@ -14365,12 +14382,14 @@ async function showReviewRefutation(moveIdx) {
     wt = !wt;
   }
 
-  // Store for navigation (reuse same system as best line)
-  window._reviewBestLine = { moveIdx, lineMoves, preFen: postFen, currentIdx: 0 };
+  // Store for navigation (reuse same system as best line). retryContext tells
+  // exitReviewBestLine to restore the retry result view instead of the
+  // original key-move info.
+  window._reviewBestLine = { moveIdx, lineMoves, preFen: postFen, currentIdx: 0, retryContext: retryValid };
 
   container.innerHTML = `
     <div class="feedback-box" style="background:rgba(239,95,95,0.06);border-left:3px solid #ef5f5f;">
-      <div class="feedback-title" style="color:#ef5f5f">Refutation of <code>${escHtml(mv.san)}</code></div>
+      <div class="feedback-title" style="color:#ef5f5f">Refutation of <code>${escHtml(badSan)}</code></div>
       <div class="feedback-text">
         <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">How the opponent punishes this move</div>
         <div class="engine-line-moves" style="margin:6px 0;">${movesHtml}</div>
@@ -14381,6 +14400,20 @@ async function showReviewRefutation(moveIdx) {
       </div>
     </div>
   `;
+}
+
+// Re-render the retry result card from the stashed retry params. Used when
+// exiting a retry-context refutation, or when the refutation analysis fails.
+function restoreRetryResultView() {
+  const r = window._lastRetryResult;
+  if (!r) return false;
+  contLineReviewRetryIdx = r.moveIdx; // handleReviewRetryResult reads this as the target moveIdx
+  if (r.postFen) {
+    gameEngine.load(r.postFen);
+    boardObj.position(r.postFen, false);
+  }
+  handleReviewRetryResult(r.wpDrop, r.move, r.bestMoveSan, r.isExactBest);
+  return true;
 }
 
 function startReviewRetry(moveIdx) {
@@ -14440,6 +14473,10 @@ function cancelReviewRetry(moveIdx) {
 
 function handleReviewRetryResult(wpDrop, move, bestMoveSan, isExactBest) {
   const moveIdx = contLineReviewRetryIdx;
+  // Capture board state BEFORE clearing the retry flag — this FEN is the position
+  // after the user's retry move, needed so Show Refutation analyses the retry move
+  // (not the original mistake) and so Back-to-review can restore this view.
+  const retryPostFen = gameEngine ? gameEngine.fen() : null;
   contLineReviewRetryIdx = -1;
   contLineBrowsing = false; // prevent accidental contLine truncation from board clicks
   stopPreAnalysis();
@@ -14459,6 +14496,10 @@ function handleReviewRetryResult(wpDrop, move, bestMoveSan, isExactBest) {
   highlightSquaresWithColor(move.from, move.to, wpDropToColor(wpDrop));
   moveClassBadge = { square: move.to, classification };
   renderArrows();
+
+  // Stash retry state so Show Refutation / Back-to-review can reference the
+  // user's retry move (not the original mistake). Overwritten on each new retry.
+  window._lastRetryResult = { moveIdx, postFen: retryPostFen, wpDrop, move, bestMoveSan, isExactBest };
 
   const color = wpDropToColor(wpDrop);
   const wpStr = Math.round(wpDrop * 10) / 10;
@@ -14491,7 +14532,7 @@ function handleReviewRetryResult(wpDrop, move, bestMoveSan, isExactBest) {
     <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">
       ${showBest ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewBestArrow(${moveIdx})">Show best</button>` : ''}
       ${showLine ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewBestLine(${moveIdx})">Show line</button>` : ''}
-      ${showRefutation ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewRefutation(${moveIdx})">Show refutation</button>` : ''}
+      ${showRefutation ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewRefutation(${moveIdx}, true)">Show refutation</button>` : ''}
     </div>
   ` : '';
 
