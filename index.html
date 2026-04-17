@@ -1479,7 +1479,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Clear continuation session on game end</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Dismiss mobile feedback popup on any button press</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -15637,6 +15637,15 @@ function closeMobileFeedback() {
   _mobilePopupQueue = [];
   clearTimeout(_mobilePopupTimer);
 }
+
+// Close the popup when any button inside the feedback body is tapped.
+// (Action-row buttons in #mobileFeedbackActions already call closeMobileFeedback()
+// explicitly in their onclick, so this delegation only covers body-content buttons
+// like "Review Game", "Play again", "Back to openings".) Bubble-phase ordering
+// guarantees the button's own onclick runs before we dismiss the popup.
+document.getElementById('mobileFeedbackContent').addEventListener('click', (e) => {
+  if (e.target.closest('button')) closeMobileFeedback();
+});
 
 // ─── Repertoire Check ───
 
