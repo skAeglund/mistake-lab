@@ -1479,7 +1479,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Confirm tactic scan completed even when no tactics found</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Clear stale move list when starting a new continuation</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -13253,6 +13253,10 @@ function launchFilterPractice() {
   // Hide review list, show practice state
   document.getElementById('posInfoCard').style.display = '';
   document.getElementById('feedbackContainer').innerHTML = '';
+  // Wipe any stale contLineBox (PGN move list) from a previous continuation or
+  // review session — otherwise it persists in the right panel until the first
+  // move lands and triggers renderContLine
+  document.getElementById('contLineContainer').innerHTML = '';
   document.getElementById('emptyMsg').classList.add('hidden');
   if (document.body.classList.contains('mobile-browsing')) {
     document.body.classList.remove('mobile-browsing');
@@ -13558,6 +13562,8 @@ function showDeferredEngineLine() {
 }
 
 function startAdvantageContinuation(m) {
+  // Clear any stale contLineBox from a previous review/continuation
+  document.getElementById('contLineContainer').innerHTML = '';
   contLine = {
     baseFen: gameEngine.fen(),
     moves: [],
@@ -14476,6 +14482,8 @@ function exitContLineReview() {
 
 function startTacticContinuation() {
   // Start continuation from the tactic's final position (tactic line stays visible for reference)
+  // Clear any stale contLineBox from a previous continuation/review
+  document.getElementById('contLineContainer').innerHTML = '';
   contLine = {
     baseFen: gameEngine.fen(),
     moves: [],
