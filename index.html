@@ -683,6 +683,11 @@
   .tactic-scan-banner.detected {
     background: rgba(251, 188, 5, 0.08); border-left-color: var(--yellow);
   }
+  .tactic-scan-banner.clean {
+    background: rgba(62, 204, 111, 0.06); border-left-color: var(--accent);
+    transition: opacity 0.4s ease;
+  }
+  .tactic-scan-banner.clean.fading { opacity: 0; }
   .tactic-scan-banner .tsb-title {
     font-weight: 700; font-size: 13px; color: var(--text-primary);
     display: flex; justify-content: space-between; align-items: center;
@@ -1474,7 +1479,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Game Review: smooth analysis ↔ review + background tactic scanning</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Confirm tactic scan completed even when no tactics found</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -4358,7 +4363,13 @@ async function startTacticScan() {
   tacticScanActive = false;
 
   if (session === tacticScanSession) {
-    renderTacticScanBanner();
+    const detected = contLine._tacticCandidates.filter(c => c.chainResult).length;
+    if (detected === 0 && tacticScanProgress.total > 0) {
+      // Positive feedback: let the user know the scan ran and found nothing
+      showTacticScanCleanBanner();
+    } else {
+      renderTacticScanBanner();
+    }
   }
 }
 
@@ -4419,17 +4430,45 @@ function renderTacticScanBanner() {
       <div class="tsb-sub">Tap Review to solve each tactic and decide whether to add it to your SRS queue.</div>
     `;
   } else {
-    // No detections — hide banner (or could show brief "no tactics" message)
-    hideTacticScanBanner();
+    // No detections and scan not active — hide, unless we're currently showing
+    // the "scan complete, all clean" banner (which has its own fade timer)
+    if (!banner.classList.contains('clean')) hideTacticScanBanner();
   }
 }
 
 function hideTacticScanBanner() {
   const banner = document.getElementById('tacticScanBanner');
   if (!banner) return;
+  if (_tacticScanCleanTimer) { clearTimeout(_tacticScanCleanTimer); _tacticScanCleanTimer = null; }
   banner.classList.add('hidden');
-  banner.classList.remove('detected');
+  banner.classList.remove('detected', 'clean', 'fading');
   banner.innerHTML = '';
+}
+
+/** Brief positive feedback when the scan completes with zero detections.
+ *  Auto-hides after ~5s with a soft fade; user can dismiss early. */
+let _tacticScanCleanTimer = null;
+function showTacticScanCleanBanner() {
+  const banner = document.getElementById('tacticScanBanner');
+  if (!banner) return;
+  if (_tacticScanCleanTimer) { clearTimeout(_tacticScanCleanTimer); _tacticScanCleanTimer = null; }
+  banner.classList.remove('hidden', 'detected', 'fading');
+  banner.classList.add('clean');
+  banner.innerHTML = `
+    <div class="tsb-title">
+      <span>✓ Scan complete — no missed tactics</span>
+      <button class="btn btn-ghost btn-sm" style="font-size:11px;padding:3px 8px;" onclick="hideTacticScanBanner()">Dismiss</button>
+    </div>
+    <div class="tsb-sub">Your moves held up against a ${TACTIC_SCAN_DEPTH}-ply tactical search.</div>
+  `;
+  // Fade first, then fully hide
+  _tacticScanCleanTimer = setTimeout(() => {
+    banner.classList.add('fading');
+    _tacticScanCleanTimer = setTimeout(() => {
+      _tacticScanCleanTimer = null;
+      hideTacticScanBanner();
+    }, 450);
+  }, 5000);
 }
 
 /** Stub for Step 5 — opens the detected-tactics review UI. */
