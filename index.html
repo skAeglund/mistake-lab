@@ -1479,7 +1479,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Dismiss mobile feedback popup on any button press</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Seed analysis tree with full game when entering from game review</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -5874,12 +5874,39 @@ function enterAnalysisMode() {
   analysisDepth = 0;
   analysisComplete = false;
 
-  // Build initial tree root
-  analysisTree = makeTreeNode(startFen, null, null, null);
+  // Build initial tree — seed with the full continuation game when entering
+  // from game review so the user can navigate any move and branch anywhere.
+  const fullGameAvailable = inReviewContext && contLine && Array.isArray(contLine.moves) && contLine.moves.length > 0;
+  const treeRootFen = fullGameAvailable ? contLine.baseFen : startFen;
+  analysisTree = makeTreeNode(treeRootFen, null, null, null);
   analysisTreeCurrent = analysisTree;
 
+  if (fullGameAvailable) {
+    // Linear chain of nodes from the base position through every played move
+    let parent = analysisTree;
+    for (const mv of contLine.moves) {
+      if (!mv || !mv.fen || !mv.san) break;
+      const node = makeTreeNode(mv.fen, mv.san, mv.uci || '', parent);
+      parent.children.push(node);
+      parent = node;
+    }
+    // Select the node matching the current board position. Walk the linear
+    // chain iteratively. If no match (retry / engine-line divergence), fall
+    // back to the review cursor; else stay at the root.
+    let matched = null;
+    for (let n = analysisTree; n; n = n.children[0] || null) {
+      if (n.fen === startFen) { matched = n; break; }
+    }
+    if (!matched && typeof contLine.currentIdx === 'number' && contLine.currentIdx >= 0) {
+      let n = analysisTree;
+      for (let i = 0; i <= contLine.currentIdx && n.children.length > 0; i++) n = n.children[0];
+      matched = n;
+    }
+    if (matched) analysisTreeCurrent = matched;
+  }
+
   // Initialize separate chess engine for analysis
-  analysisEngine = new Chess(startFen);
+  analysisEngine = new Chess(analysisTreeCurrent.fen);
 
   // Hide review UI
   document.getElementById('feedbackArea').classList.add('hidden');
@@ -5908,15 +5935,26 @@ function enterAnalysisMode() {
 
   // Set up the board
   boardObj.orientation(analysisOrientation);
-  boardObj.position(startFen, false);
+  boardObj.position(analysisTreeCurrent.fen, false);
   clearHighlights();
   clearArrows();
+  // Highlight the selected move's from/to squares so the user can see which
+  // position is current in the loaded game. Only relevant when the tree was
+  // seeded with moves — in the empty-tree case we preserve whatever highlight
+  // the prior context left on the board.
+  if (fullGameAvailable) {
+    if (analysisTreeCurrent.uci && analysisTreeCurrent.uci.length >= 4) {
+      showLastMoveHighlight(analysisTreeCurrent.uci.substring(0, 2), analysisTreeCurrent.uci.substring(2, 4));
+    } else {
+      clearLastMoveHighlight();
+    }
+  }
 
-  // Render initial tree (empty)
+  // Render tree (seeded with full game if entering from review, else empty)
   renderAnalysisTree();
 
   // Start analysis
-  startAnalysisSearch(startFen);
+  startAnalysisSearch(analysisTreeCurrent.fen);
 }
 
 function exitAnalysisMode() {
