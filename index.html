@@ -672,6 +672,79 @@
     border-radius: 3px; font-size: 12px;
   }
 
+  /* Tactic scan progress banner — lives above feedbackContainer so it
+     persists across key-move walkthrough / best-line / refutation views */
+  .tactic-scan-banner {
+    padding: 10px 14px; border-radius: 8px; margin-bottom: 10px;
+    background: rgba(91, 156, 240, 0.08); border-left: 3px solid var(--blue);
+    font-size: 12px; line-height: 1.4;
+    animation: fadeSlideIn 0.3s ease;
+  }
+  .tactic-scan-banner.detected {
+    background: rgba(251, 188, 5, 0.08); border-left-color: var(--yellow);
+  }
+  .tactic-scan-banner .tsb-title {
+    font-weight: 700; font-size: 13px; color: var(--text-primary);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .tactic-scan-banner .tsb-sub {
+    color: var(--text-muted); font-size: 11px; margin-top: 2px;
+  }
+  .tactic-scan-banner .tsb-bar {
+    height: 3px; background: rgba(255,255,255,0.08); border-radius: 2px;
+    margin-top: 6px; overflow: hidden;
+  }
+  .tactic-scan-banner .tsb-bar-fill {
+    height: 100%; background: var(--blue); transition: width 0.3s ease;
+  }
+  .tactic-scan-banner.detected .tsb-bar-fill { background: var(--yellow); }
+
+  /* Detected-tactics modal rows */
+  .dt-row {
+    padding: 12px; border-radius: 8px; margin-bottom: 10px;
+    background: var(--bg-card); border: 1px solid var(--border);
+    animation: fadeSlideIn 0.25s ease;
+  }
+  .dt-row.saved { border-color: var(--green); background: rgba(62,207,142,0.04); }
+  .dt-row.discarded { opacity: 0.4; }
+  .dt-row-header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 8px; font-size: 12px;
+  }
+  .dt-row-header .dt-badge {
+    font-size: 10px; padding: 2px 8px; border-radius: 10px;
+    font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px;
+  }
+  .dt-row-header .dt-badge.missed {
+    background: rgba(239,95,95,0.15); color: var(--red);
+  }
+  .dt-row-header .dt-badge.found {
+    background: rgba(62,207,142,0.15); color: var(--green);
+  }
+  .dt-row .dt-line {
+    font-family: 'JetBrains Mono', monospace; font-size: 12px;
+    color: var(--text-secondary); line-height: 1.7; margin: 6px 0;
+    padding: 8px 10px; background: var(--bg-panel); border-radius: 6px;
+    word-break: break-word;
+  }
+  .dt-row .dt-line .dt-user-move {
+    color: var(--text-primary); font-weight: 700;
+  }
+  .dt-row .dt-line .dt-move-num {
+    color: var(--text-muted); margin: 0 4px 0 2px; font-weight: 500;
+  }
+  .dt-row .dt-alt-label {
+    font-size: 10px; color: var(--text-muted); margin-top: 4px;
+    text-transform: uppercase; letter-spacing: 0.3px;
+  }
+  .dt-row-actions {
+    display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap;
+  }
+  .dt-empty {
+    text-align: center; padding: 24px; color: var(--text-muted);
+    font-size: 13px;
+  }
+
   .attempts-indicator {
     display: flex; gap: 6px; margin-top: 10px;
   }
@@ -1401,7 +1474,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Voice recognition starts disabled each session</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Game Review: smooth analysis ↔ review + background tactic scanning</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1608,6 +1681,7 @@
           <span class="maia-slider-value" id="maiaPrecisionValue">0.75</span>
         </div>
       </div>
+      <div id="tacticScanBanner" class="tactic-scan-banner hidden"></div>
       <div id="feedbackContainer"></div>
       <div id="contLineContainer"></div>
     </div>
@@ -1615,6 +1689,22 @@
       <h4>Position Queue</h4>
       <div id="queueList" style="max-height:200px;overflow-y:auto;"></div>
     </div>
+  </div>
+</div>
+
+<!-- Detected tactics review modal (Step 5) -->
+<div class="modal-backdrop hidden" id="detectedTacticsModal"
+     onclick="if(event.target===this)closeDetectedTacticsModal()">
+  <div class="modal" style="width:560px;max-width:92vw;max-height:85vh;overflow-y:auto;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+      <h3 style="margin:0;">⚡ Detected Tactics</h3>
+      <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="closeDetectedTacticsModal()">✕</button>
+    </div>
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:14px;line-height:1.5;">
+      Tactics the scanner found in your continuation. Solve each to decide whether to
+      save it to your SRS queue. Saved tactics appear with your other tactics on next reload.
+    </div>
+    <div id="detectedTacticsList"></div>
   </div>
 </div>
 
@@ -1659,6 +1749,16 @@
         </div>
         <label class="toggle-switch" style="flex-shrink:0;margin-left:12px;">
           <input type="checkbox" id="settingsInstantFeedback">
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin:14px 0 0;">
+        <div>
+          <span style="font-size:13px;">Human-style tactic alternatives</span>
+          <div class="hint" style="margin-top:2px;">When scanning for tactics in Game Review, also generate a Maia-sourced alt line showing how a human opponent would likely defend. Adds 10–15 s per tactic.</div>
+        </div>
+        <label class="toggle-switch" style="flex-shrink:0;margin-left:12px;">
+          <input type="checkbox" id="settingsTacticMaiaAlts">
           <span class="toggle-track"></span>
         </label>
       </div>
@@ -1773,6 +1873,25 @@ let evalSfDebounceTimer = null;
 let evalSfPhase = 0;             // 0=idle, 1=phase1 running, 2=phase2 running
 let evalSfPhase2PollTimer = null; // polls for main worker idle to start phase 2
 let evalSfCurrentFen = null;     // FEN being analyzed (for phase 2 continuity)
+// --- Tactic scan dedicated Stockfish worker (lazy-init, long-running batch) ---
+// Fully isolated from main/eval workers so chain-walk scans never compete with
+// interactive work (pre-analysis, review retries, eval bar).
+let tacticSfWorker = null;
+let tacticSfReady = false;
+let tacticSfSearchActive = false;
+let tacticSfSession = 0;
+let tacticSfInitPromise = null;   // in-flight initTacticWorker promise (for coalescing)
+const tacticSfPendingResolvers = new Set();  // analyze-in-flight → resolver cleanup
+const TACTIC_HASH_MB = parseInt(localStorage.getItem('tacticHashMB') || '32', 10);
+// Whether the background scanner should also generate a Maia-sourced
+// "human-likely opponent" alternative line per detected tactic. Adds ~10-15s
+// per tactic on desktop, so user-toggleable. Default on.
+let tacticScanMaiaAlts = localStorage.getItem('mistakelab_tactic_maia_alts') !== 'false';
+// Background scan session state (Step 4)
+let tacticScanActive = false;
+let tacticScanSession = 0;
+let tacticScanCancelCtx = null;   // shared ctx passed to tacticWalkTree for cancel
+let tacticScanProgress = { total: 0, done: 0, detected: 0 };
 const EVAL_WORKER_PHASE1_DEPTH = 16;
 const EVAL_WORKER_PHASE2_DEPTH = 30;
 const SILENT_EVAL_DEPTH = 22;        // depth for background re-evaluation of silent cont moves
@@ -1780,6 +1899,21 @@ const SILENT_REVIEW_MIN_MOVES = 5;   // user moves before "Stop & Review" appear
 let silentEvalQueue = [];             // [{moveIdx, preFen, postFen, userUci}] pending deep evals
 let silentEvalProcessing = false;     // true while processSilentEvalQueue is running (eval worker)
 let silentEvalMainProcessing = false; // true while main worker is helping with queue
+
+// ─── Tactic scan constants (ported from analyzer/analyze.js) ───
+// Thresholds use 0-100 win% scale to match cpToWinPct().
+const TACTIC_FIRST_MOVE_THRESHOLD_WP = 30;  // win% gap required for the first move of a tactic
+const TACTIC_CONTINUATION_THRESHOLD_WP = 20;// relaxed gap for subsequent moves in the chain
+const TACTIC_OPP_WP_CAP = 15;               // max win% gap (from opp's view) an alternative response can be from best
+const TACTIC_MIN_USER_MOVES = 2;            // minimum user moves for a valid tactic chain
+const TACTIC_MIN_OPP_CP_LOSS = 100;         // opp must have lost ≥100cp to create a tactic opportunity
+const TACTIC_MIN_PLY = 6;                   // skip very early opening moves (ply on the board)
+const TACTIC_MIN_REMAINING = 2;             // min contLine moves remaining at/after candidate
+const TACTIC_OPP_CANDIDATES = 3;            // top opp responses considered in chain walk
+const TACTIC_MAX_ALT_LINES = 3;             // cap on alternative lines per tactic
+const TACTIC_MAX_ALT_DEPTH = 3;             // max depth for opp alternative branches
+const TACTIC_SCAN_DEPTH = 20;               // default depth for chain walk (mobile will be offset)
+const TACTIC_MAX_LINE_LENGTH = 14;          // safety cap on chain length (plies)
 let hintLevel = 0;               // 0=no hint, 1=piece shown, 2=full move shown
 let hintUsed = false;            // true if hint was used this position (forces SRS Again)
 let hintMove = null;             // frozen UCI string of the best move when hint was first used
@@ -3001,6 +3135,15 @@ function openSettings() {
     instantFeedback = this.checked;
     localStorage.setItem('instantFeedback', instantFeedback);
   };
+  // Tactic scan: Maia-sourced human-likely alt lines
+  const maiaAltsToggle = document.getElementById('settingsTacticMaiaAlts');
+  if (maiaAltsToggle) {
+    maiaAltsToggle.checked = tacticScanMaiaAlts;
+    maiaAltsToggle.onchange = function() {
+      tacticScanMaiaAlts = this.checked;
+      localStorage.setItem('mistakelab_tactic_maia_alts', tacticScanMaiaAlts ? 'true' : 'false');
+    };
+  }
   // Show mobile depth offset setting only on mobile
   const depthSetting = document.getElementById('mobileDepthSetting');
   if (isMobileView()) {
@@ -3231,6 +3374,212 @@ async function initEvalWorker() {
     console.error('[EvalWorker] init failed:', err);
     evalSfReady = false;
   }
+}
+
+// ─── Tactic scan dedicated Stockfish worker (lazy init, isolated) ──────────
+async function initTacticWorker() {
+  if (tacticSfReady && tacticSfWorker) return;
+  if (tacticSfInitPromise) return tacticSfInitPromise;
+
+  tacticSfInitPromise = (async () => {
+    if (tacticSfWorker) {
+      try { tacticSfWorker.terminate(); } catch (_) {}
+      tacticSfWorker = null;
+    }
+    tacticSfReady = false;
+    tacticSfSearchActive = false;
+    try {
+      tacticSfWorker = new Worker(SF_PATH);
+      tacticSfWorker.addEventListener('error', handleTacticSfCrash);
+      await new Promise((resolve) => {
+        function handler(e) {
+          if (typeof e.data === 'string' && e.data === 'uciok') {
+            tacticSfWorker.removeEventListener('message', handler);
+            resolve();
+          }
+        }
+        tacticSfWorker.addEventListener('message', handler);
+        tacticSfWorker.postMessage('uci');
+      });
+      // Conservative hash — tactic chain walks visit mostly novel positions,
+      // so transposition benefit is low. Keep memory footprint small.
+      const hash = Math.max(16, Math.min(TACTIC_HASH_MB, sfHashMB));
+      tacticSfWorker.postMessage(`setoption name Hash value ${hash}`);
+      tacticSfWorker.postMessage('isready');
+      await new Promise((resolve) => {
+        function handler(e) {
+          if (typeof e.data === 'string' && e.data === 'readyok') {
+            tacticSfWorker.removeEventListener('message', handler);
+            resolve();
+          }
+        }
+        tacticSfWorker.addEventListener('message', handler);
+      });
+      tacticSfReady = true;
+      tacticSfSearchActive = false;
+      sfLog('initTacticWorker', `Tactic worker ready (hash ${hash}MB)`);
+    } catch (err) {
+      console.error('[TacticWorker] init failed:', err);
+      tacticSfReady = false;
+    } finally {
+      tacticSfInitPromise = null;
+    }
+  })();
+  return tacticSfInitPromise;
+}
+
+function handleTacticSfCrash(err) {
+  sfLog('TACTIC-CRASH', `Tactic worker crashed: ${err?.message || err}`);
+  console.error('[TacticWorker:CRASH]', err);
+  tacticSfReady = false;
+  tacticSfSearchActive = false;
+  // Invalidate any in-flight analyze promise by bumping session
+  tacticSfSession++;
+  // Flush any in-flight analyze promises — error listeners fire too, but flushing
+  // here guarantees resolution even if the crash skipped the error event path
+  tacticSfPendingResolvers.forEach(fn => { try { fn(null); } catch (_) {} });
+  tacticSfPendingResolvers.clear();
+  if (tacticSfWorker) {
+    try { tacticSfWorker.terminate(); } catch (_) {}
+    tacticSfWorker = null;
+  }
+  // Scan queue processor will re-init on next analyze call
+}
+
+function terminateTacticWorker() {
+  if (!tacticSfWorker) return;
+  tacticSfSession++;  // invalidate any in-flight analyze
+  // Flush pending analyzes — a terminated worker emits no further messages or
+  // error events, so watchdog would otherwise take up to 60s to resolve them
+  tacticSfPendingResolvers.forEach(fn => { try { fn(null); } catch (_) {} });
+  tacticSfPendingResolvers.clear();
+  try { tacticSfWorker.terminate(); } catch (_) {}
+  tacticSfWorker = null;
+  tacticSfReady = false;
+  tacticSfSearchActive = false;
+  sfLog('terminateTacticWorker', 'terminated');
+}
+
+/** Analyze a position on the tactic worker. Same shape as sfAnalyze /
+ *  evalWorkerAnalyzePosition — returns { bestMove, pvs: [{cp, firstMove, depth, moves}], fen }
+ *  or null on cancellation / error. Never sends 'stop' (WASM constraint);
+ *  cancellation = terminate + reinit. */
+function tacticWorkerAnalyzePosition(fen, depth, multiPv) {
+  return new Promise(async (resolve) => {
+    // Check eval cache first (MultiPV calls at depth ≥ 20 are cache-worthy)
+    const cached = evalCacheGet(fen, depthAdj(depth), multiPv);
+    if (cached) {
+      const pvs = cached.pvs.map(pv => ({
+        cp: pv.cp,
+        firstMove: pv.move,
+        depth: cached.depth,
+        moves: pv.uciLine || pv.move,
+      }));
+      resolve({ bestMove: cached.bestMove, pvs, fen });
+      return;
+    }
+
+    // Ensure worker is up — recover from crash or lazy-init
+    if (!tacticSfReady || !tacticSfWorker) {
+      await initTacticWorker();
+    }
+    if (!tacticSfReady || !tacticSfWorker) { resolve(null); return; }
+
+    // Cancel any in-flight search by terminate+reinit (never 'stop')
+    if (tacticSfSearchActive) {
+      try { tacticSfWorker.terminate(); } catch (_) {}
+      tacticSfWorker = null;
+      tacticSfReady = false;
+      tacticSfSearchActive = false;
+      await initTacticWorker();
+      if (!tacticSfReady || !tacticSfWorker) { resolve(null); return; }
+    }
+
+    const session = ++tacticSfSession;
+    const collected = {};
+    const capturedWorker = tacticSfWorker;
+
+    // Unified cleanup — safe to call multiple times (idempotent via Set deletion).
+    // Used from bestmove, session-mismatch, worker error, watchdog timeout, and
+    // terminateTacticWorker/handleTacticSfCrash flush. First caller resolves;
+    // subsequent calls are no-ops on the already-resolved Promise.
+    let settled = false;
+    function cleanup(result) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(watchdog);
+      tacticSfPendingResolvers.delete(cleanup);
+      try { capturedWorker.removeEventListener('message', handler); } catch (_) {}
+      try { capturedWorker.removeEventListener('error', errorHandler); } catch (_) {}
+      resolve(result);
+    }
+    tacticSfPendingResolvers.add(cleanup);
+
+    // Watchdog: if bestmove doesn't arrive within 60s, give up. Guards against
+    // silent worker stalls that don't fire an error event.
+    const watchdog = setTimeout(() => {
+      sfLog('tacticWorkerAnalyzePosition', `WATCHDOG fired (no bestmove in 60s) fen=${fen.split(' ').slice(0,2).join(' ')}…`);
+      cleanup(null);
+    }, 60000);
+
+    // Error listener: if the worker crashes mid-search (WASM RuntimeError etc.),
+    // handleTacticSfCrash fires too and terminates, but our message listener
+    // would otherwise never be called and the promise would hang.
+    function errorHandler() {
+      cleanup(null);
+    }
+
+    function handler(e) {
+      if (session !== tacticSfSession) {
+        // Session invalidated — bail
+        cleanup(null);
+        return;
+      }
+      const line = typeof e.data === 'string' ? e.data : '';
+      if (line.startsWith('info') && line.includes(' pv ')) {
+        const dM = line.match(/depth (\d+)/);
+        const cpM = line.match(/score cp (-?\d+)/);
+        const mateM = line.match(/score mate (-?\d+)/);
+        const pvM = line.match(/ pv (.+)/);
+        const mpvM = line.match(/multipv (\d+)/);
+        const d = parseInt(dM?.[1] || '0');
+        const pvNum = parseInt(mpvM?.[1] || '1');
+        let cp = 0;
+        if (cpM) cp = parseInt(cpM[1]);
+        else if (mateM) cp = parseInt(mateM[1]) > 0 ? 10000 : -10000;
+        const moves = pvM?.[1]?.trim() || '';
+        if (!collected[pvNum] || d >= collected[pvNum].depth) {
+          collected[pvNum] = { cp, moves, depth: d, firstMove: moves.split(' ')[0] };
+        }
+      }
+      if (line.startsWith('bestmove')) {
+        tacticSfSearchActive = false;
+        const bm = line.split(' ')[1];
+        const pvs = Object.keys(collected)
+          .sort((a, b) => parseInt(a) - parseInt(b))
+          .map(k => collected[k]);
+        // Cache depth-adequate results
+        const finalDepth = pvs[0]?.depth || 0;
+        if (finalDepth >= EVAL_CACHE_MIN_DEPTH) {
+          evalCacheStore(fen, finalDepth, bm, pvs[0]?.cp ?? 0,
+            pvs.map(pv => ({
+              cp: pv.cp, move: pv.firstMove,
+              san: uciToSan(fen, pv.firstMove),
+              uciLine: pv.moves,
+            })),
+            multiPv);
+        }
+        cleanup({ bestMove: bm, pvs, fen });
+      }
+    }
+    capturedWorker.addEventListener('message', handler);
+    capturedWorker.addEventListener('error', errorHandler);
+
+    capturedWorker.postMessage(`setoption name MultiPV value ${multiPv}`);
+    capturedWorker.postMessage(`position fen ${fen}`);
+    capturedWorker.postMessage(`go depth ${depthAdj(depth)}`);
+    tacticSfSearchActive = true;
+  });
 }
 
 /** Start phase 2 (deep search) on the eval worker. Reuses hash from phase 1. */
@@ -3511,6 +3860,14 @@ function applySilentEvalToMove(item, preResult, cpLoss) {
   mv.bestMoveUci = preResult.bestMove || null;
   mv.bestCp = bestCp;
   mv.afterCp = bestCp - cpLoss;
+  // Store the MultiPV snapshot so the tactic scanner can re-use it for the
+  // uniqueness check without a new Stockfish call
+  mv._pvs = (preResult.pvs || []).map(pv => ({
+    cp: pv.cp,
+    firstMove: pv.firstMove,
+    depth: pv.depth,
+    moves: pv.moves,
+  }));
 
   // Retroactively classify preceding opponent move
   if (item.moveIdx > 0) {
@@ -3525,7 +3882,965 @@ function applySilentEvalToMove(item, preResult, cpLoss) {
       prevMv.cpLoss = Math.round(Math.max(0, oppCpLoss));
     }
   }
+
+  // ── Tactic-candidate detection (Phase 1) ──────────────────────────────────
+  // Only user moves qualify. Filters match analyzer/analyze.js exactly (in 0-100 scale).
+  detectTacticCandidate(item.moveIdx);
+
   renderContLine();
+}
+
+/** Cheap tactic pre-filter + uniqueness check. Runs after silent eval classifies
+ *  a user move. Pushes qualifying candidates to contLine._tacticCandidates so
+ *  the background scanner can pick them up later. No new Stockfish work here —
+ *  uses mv._pvs captured during silent eval. */
+function detectTacticCandidate(moveIdx) {
+  if (!contLine || !contLine.moves[moveIdx]) return;
+  const mv = contLine.moves[moveIdx];
+  if (!mv.isUser) return;
+  if (!mv._pvs || mv._pvs.length === 0) return;
+
+  // Pre-filter 1: opp's preceding move must have lost ≥ TACTIC_MIN_OPP_CP_LOSS cp
+  const prevMv = moveIdx > 0 ? contLine.moves[moveIdx - 1] : null;
+  // The first user move of the continuation has no opp predecessor inside contLine.
+  // We could look at the mistake's own eval swing as a proxy, but for simplicity skip.
+  if (!prevMv || prevMv.isUser !== false) return;
+  const oppCpLoss = prevMv.cpLoss;
+  if (oppCpLoss == null || oppCpLoss < TACTIC_MIN_OPP_CP_LOSS) return;
+
+  // Pre-filter 2: ply on the board (from FEN) ≥ TACTIC_MIN_PLY
+  const preFen = moveIdx > 0 ? contLine.moves[moveIdx - 1].fen : contLine.baseFen;
+  const fenParts = preFen.split(' ');
+  const fullmove = parseInt(fenParts[5]) || 1;
+  const sideToMove = fenParts[1];
+  const ply = fullmove * 2 - (sideToMove === 'w' ? 1 : 0);
+  if (ply < TACTIC_MIN_PLY) return;
+
+  // Pre-filter 3: remaining plies ≥ TACTIC_MIN_REMAINING
+  if (contLine.moves.length - moveIdx < TACTIC_MIN_REMAINING) return;
+
+  // Uniqueness check using stored pvs (side-to-move perspective — user is to move
+  // at preFen, so pvs[0].cp is from user's POV).
+  if (mv._pvs.length < 2) {
+    // Only one legal move — forced, not a tactic start
+    return;
+  }
+  const gapWp = cpToWinPct(mv._pvs[0].cp) - cpToWinPct(mv._pvs[1].cp);
+  if (gapWp < TACTIC_FIRST_MOVE_THRESHOLD_WP) return;
+
+  // Derive player color from the mistake (the user is always moving in contLine
+  // on even/odd plies relative to fenBefore, so playerColor from the mistake is canonical)
+  const mistake = currentMistakeIdx >= 0 ? filteredMistakes[currentMistakeIdx] : null;
+  const playerColor = mistake?.playerColor ||
+    (sideToMove === 'w' ? 'white' : 'black');
+
+  if (!contLine._tacticCandidates) contLine._tacticCandidates = [];
+  // De-dup: don't re-add if we already have a candidate at this moveIdx
+  if (contLine._tacticCandidates.some(c => c.moveIdx === moveIdx)) return;
+
+  contLine._tacticCandidates.push({
+    moveIdx,
+    preFen,
+    playerColor,
+    oppCpLoss,
+    gapWp: Math.round(gapWp * 10) / 10,
+    bestMoveUci: mv._pvs[0].firstMove,
+    // Snapshot pvs so later scan has the initial MultiPV 3 result
+    initialPvs: mv._pvs.map(pv => ({ ...pv })),
+    // Filled in by the scanner (Phase 2):
+    scanned: false,
+    scanFailed: false,
+    chainResult: null,     // { moves: [...], alternativeLines: [...] }
+    userFound: null,       // true/false — did the user play the tactic's first move?
+    detectedAt: Date.now(),
+  });
+  sfLog('detectTacticCandidate', `candidate at moveIdx=${moveIdx} gapWp=${gapWp.toFixed(1)} oppCpLoss=${oppCpLoss} ply=${ply}`);
+}
+
+// ─── Tactic chain walk (ported from analyzer/analyze.js) ───
+// Note on perspective: MultiPV results in the browser carry cp from the
+// SIDE-TO-MOVE perspective (not white-perspective as in the Node analyzer).
+// This simplifies uniqueness: cpToWinPct(pvs[0].cp) - cpToWinPct(pvs[1].cp)
+// is already "how much better is PV1 than PV2 for the current mover".
+
+/** Check if a position has a unique best move. pvs must be the full MultiPV
+ *  result (≥ 2 entries ideal). thresholdWp is in 0-100 win% scale. */
+function tacticCheckUniqueness(pvs, thresholdWp) {
+  if (!pvs || pvs.length < 1) return { unique: false, gap: 0 };
+  if (pvs.length === 1) {
+    // Only one legal move — trivially unique but not an interesting tactic start
+    return {
+      unique: true,
+      gap: 100,
+      forcedOnly: true,
+      bestMove: pvs[0].firstMove,
+      bestPv: pvs[0],
+      secondPv: null,
+    };
+  }
+  const bestWp = cpToWinPct(pvs[0].cp);
+  const secondWp = cpToWinPct(pvs[1].cp);
+  const gap = bestWp - secondWp;
+  return {
+    unique: gap >= thresholdWp,
+    gap: Math.round(gap * 10) / 10,
+    forcedOnly: false,
+    bestMove: pvs[0].firstMove,
+    bestPv: pvs[0],
+    secondPv: pvs[1],
+  };
+}
+
+/** Recursively walk the tactic tree. `analyzeFn(fen, depth, multiPv)` must
+ *  return a Promise of `{ bestMove, pvs: [{cp, firstMove, ...}] }` or null.
+ *  Results are collected into ctx.paths (primary = ctx.paths[0]).
+ *  ctx.canceled short-circuits at every await boundary. */
+async function tacticWalkTree(analyzeFn, fen, playerColor, tacticDepth,
+                              prefix, branchDepth, isFirstMove,
+                              initPvs, initUniq, ctx) {
+  if (ctx.canceled) return;
+  if (prefix.length >= TACTIC_MAX_LINE_LENGTH) { ctx.paths.push(prefix); return; }
+
+  // --- User's move (must be unique) ---
+  const threshold = isFirstMove
+    ? TACTIC_FIRST_MOVE_THRESHOLD_WP
+    : TACTIC_CONTINUATION_THRESHOLD_WP;
+
+  let userPvs = initPvs;
+  if (!userPvs) {
+    const result = await analyzeFn(fen, tacticDepth, 2);
+    if (ctx.canceled) return;
+    if (!result || !result.pvs || result.pvs.length === 0) return;
+    userPvs = result.pvs;
+  }
+  const userUniq = initUniq || tacticCheckUniqueness(userPvs, threshold);
+  if (!userUniq.unique) return;
+
+  const chess = new Chess(fen);
+  const userMove = chess.move(userUniq.bestMove, { sloppy: true });
+  if (!userMove) return;
+
+  const userPath = [...prefix, {
+    uci: userUniq.bestMove,
+    san: userMove.san,
+    fen: chess.fen(),
+    isUser: true,
+  }];
+
+  // Game over after user's move — complete path
+  if (chess.in_checkmate() || chess.in_stalemate() || chess.in_draw()) {
+    ctx.paths.push(userPath);
+    return;
+  }
+
+  // --- Opponent responses ---
+  const oppResult = await analyzeFn(chess.fen(), tacticDepth, TACTIC_OPP_CANDIDATES);
+  if (ctx.canceled) return;
+  if (!oppResult || !oppResult.pvs || oppResult.pvs.length === 0) {
+    ctx.paths.push(userPath);
+    return;
+  }
+  const oppPvs = oppResult.pvs;
+  const bestOppWp = cpToWinPct(oppPvs[0].cp);
+  let anyValidBranch = false;
+
+  for (let oi = 0; oi < Math.min(oppPvs.length, TACTIC_OPP_CANDIDATES); oi++) {
+    if (ctx.canceled) return;
+
+    // Win-probability cap on alternative defenses (skip for best defense oi=0)
+    if (oi > 0) {
+      const thisOppWp = cpToWinPct(oppPvs[oi].cp);
+      if (bestOppWp - thisOppWp > TACTIC_OPP_WP_CAP) continue;
+    }
+    // Branch-depth limit applies to alternatives only
+    if (oi > 0 && branchDepth >= ctx.maxBranchDepth) continue;
+    // Stop if we already have primary + maxAlts paths
+    if (ctx.paths.length > ctx.maxAlts + 1) break;
+
+    const oppMoveUci = oppPvs[oi].firstMove;
+    const scratchChess = new Chess(chess.fen());
+    const oppMove = scratchChess.move(oppMoveUci, { sloppy: true });
+    if (!oppMove) continue;
+
+    const oppPath = [...userPath, {
+      uci: oppMoveUci,
+      san: oppMove.san,
+      fen: scratchChess.fen(),
+      isUser: false,
+    }];
+
+    // Game over after opponent's move
+    if (scratchChess.in_checkmate() || scratchChess.in_stalemate() || scratchChess.in_draw()) {
+      ctx.paths.push(oppPath);
+      anyValidBranch = true;
+      continue;
+    }
+
+    const prevCount = ctx.paths.length;
+    const nextBranchDepth = oi === 0 ? branchDepth : branchDepth + 1;
+    await tacticWalkTree(analyzeFn, scratchChess.fen(), playerColor, tacticDepth,
+      oppPath, nextBranchDepth, false, null, null, ctx);
+    if (ctx.canceled) return;
+
+    if (ctx.paths.length > prevCount) anyValidBranch = true;
+  }
+
+  // If no opponent response yielded a valid continuation, tactic ends at user's move
+  if (!anyValidBranch) ctx.paths.push(userPath);
+}
+
+/** Build a full tactic chain from a pre-filtered candidate. Returns
+ *  { moves: primary[], alternativeLines: [...], canceled: bool } with
+ *  empty `moves` when nothing valid is found. */
+async function tacticBuildBestChain(analyzeFn, cand, tacticDepth) {
+  const ctx = {
+    paths: [],
+    maxAlts: TACTIC_MAX_ALT_LINES,
+    maxBranchDepth: TACTIC_MAX_ALT_DEPTH,
+    canceled: false,
+  };
+  // Seed uniqueness check from silent-eval pvs — avoids a redundant SF call
+  // at the candidate's root position.
+  const seedUniq = cand.initialPvs && cand.initialPvs.length >= 2
+    ? tacticCheckUniqueness(cand.initialPvs, TACTIC_FIRST_MOVE_THRESHOLD_WP)
+    : null;
+
+  await tacticWalkTree(analyzeFn, cand.preFen, cand.playerColor, tacticDepth,
+    [], 0, true, cand.initialPvs || null, seedUniq, ctx);
+
+  if (ctx.canceled) return { moves: [], alternativeLines: [], canceled: true };
+  if (ctx.paths.length === 0) return { moves: [], alternativeLines: [], canceled: false };
+
+  const primary = ctx.paths[0];
+  const alts = ctx.paths.slice(1)
+    .filter(alt => alt.filter(m => m.isUser).length >= TACTIC_MIN_USER_MOVES)
+    .slice(0, TACTIC_MAX_ALT_LINES);
+
+  return { moves: primary, alternativeLines: alts, canceled: false };
+}
+
+/** Deduplicate alternative lines: remove any that are a prefix/extension of
+ *  the primary or of each other (continuations are not true alternatives). */
+function tacticDedupeAltLines(primary, alts) {
+  const primaryOpp = primary.filter(m => !m.isUser).map(m => m.uci).join(',');
+  const kept = [];
+  for (const alt of alts) {
+    const altOpp = alt.filter(m => !m.isUser).map(m => m.uci).join(',');
+    if (altOpp === primaryOpp ||
+        altOpp.startsWith(primaryOpp + ',') ||
+        primaryOpp.startsWith(altOpp + ',')) continue;
+    const dupOfKept = kept.some(k => {
+      const keptOpp = k.filter(m => !m.isUser).map(m => m.uci).join(',');
+      return altOpp === keptOpp ||
+             altOpp.startsWith(keptOpp + ',') ||
+             keptOpp.startsWith(altOpp + ',');
+    });
+    if (dupOfKept) continue;
+    kept.push(alt);
+  }
+  return kept;
+}
+
+/** Generate a Maia-sourced alternative line for a detected tactic. At each
+ *  user move, Stockfish verifies uniqueness at tactic thresholds. At each
+ *  opponent move, Maia predicts a human-likely response. Returns the chain
+ *  (array of moves) or null if Maia agrees with the primary throughout,
+ *  Maia is unavailable, or uniqueness fails. Moves sourced from Maia carry
+ *  `source: 'maia'`.
+ *
+ *  Runs exclusively on the tactic worker + the shared Maia model — does not
+ *  interfere with main-worker pre-analysis or eval-worker queue. */
+async function tacticGenerateMaiaLine(analyzeFn, cand, primaryChain, tacticDepth, cancelCtx) {
+  if (!maiaReady) return null;
+  if (!primaryChain || primaryChain.length < 3) return null;
+
+  const primaryOppMoves = primaryChain.filter(m => !m.isUser).map(m => m.uci);
+  const chain = [];
+  const chess = new Chess(cand.preFen);
+  let isFirst = true;
+  let diverged = false;
+  let oppMoveIdx = 0;
+
+  while (chain.length < TACTIC_MAX_LINE_LENGTH) {
+    if (cancelCtx?.canceled) return null;
+
+    // User's move — Stockfish MultiPV 2 for uniqueness
+    const threshold = isFirst ? TACTIC_FIRST_MOVE_THRESHOLD_WP : TACTIC_CONTINUATION_THRESHOLD_WP;
+    isFirst = false;
+
+    const userResult = await analyzeFn(chess.fen(), tacticDepth, 2);
+    if (cancelCtx?.canceled) return null;
+    if (!userResult || !userResult.pvs || userResult.pvs.length === 0) break;
+    const userUniq = tacticCheckUniqueness(userResult.pvs, threshold);
+    if (!userUniq.unique) break;
+
+    const userUci = userUniq.bestMove;
+    const userMove = chess.move(userUci, { sloppy: true });
+    if (!userMove) break;
+
+    chain.push({
+      uci: userUci,
+      san: userMove.san,
+      fen: chess.fen(),
+      isUser: true,
+    });
+
+    if (chess.in_checkmate() || chess.in_stalemate() || chess.in_draw()) break;
+
+    // Opponent's move — Maia argmax / sampled (uses live maiaPrecision + maiaElo)
+    const maiaUci = await maiaPredict(chess.fen());
+    if (cancelCtx?.canceled) return null;
+    if (!maiaUci) break;
+
+    // Divergence check against the primary opp line
+    if (!diverged && oppMoveIdx < primaryOppMoves.length) {
+      if (maiaUci !== primaryOppMoves[oppMoveIdx]) diverged = true;
+      oppMoveIdx++;
+    } else {
+      diverged = true;  // past primary line
+    }
+
+    const oppMove = chess.move(maiaUci, { sloppy: true });
+    if (!oppMove) break;
+
+    chain.push({
+      uci: maiaUci,
+      san: oppMove.san,
+      fen: chess.fen(),
+      isUser: false,
+      source: 'maia',
+    });
+
+    if (chess.in_checkmate() || chess.in_stalemate() || chess.in_draw()) break;
+  }
+
+  // Only return if Maia actually diverged
+  if (!diverged) return null;
+  // Must have at least 2 user moves
+  const userMoveCount = chain.filter(m => m.isUser).length;
+  if (userMoveCount < TACTIC_MIN_USER_MOVES) return null;
+
+  return chain;
+}
+
+// ─── Background tactic scan queue (Step 4) ─────────────────────────────────
+/** Start a background chain-walk scan for all un-scanned candidates on
+ *  contLine. Idempotent while active (second call is a no-op). Updates the
+ *  tacticScanBanner as each candidate resolves. */
+async function startTacticScan() {
+  if (tacticScanActive) return;
+  if (!contLine) return;
+  if (!Array.isArray(contLine._tacticCandidates) || contLine._tacticCandidates.length === 0) return;
+
+  const pending = contLine._tacticCandidates.filter(c => !c.scanned);
+  if (pending.length === 0) {
+    // All candidates already scanned — just re-render banner from existing results
+    renderTacticScanBanner();
+    return;
+  }
+
+  tacticScanActive = true;
+  const session = ++tacticScanSession;
+  const ownedContLine = contLine;  // capture — if contLine is replaced mid-scan, bail
+  const depth = depthAdj(TACTIC_SCAN_DEPTH);
+
+  // Track plies covered by detected tactics so we skip overlapping candidates
+  // (mirrors `alreadyCovered` in analyzer/analyze.js line 945).
+  const alreadyCovered = new Set();
+  // Seed from any previously-detected tactics on this contLine
+  for (const c of ownedContLine._tacticCandidates) {
+    if (c.chainResult && c.chainResult.moves) {
+      for (let k = 0; k < c.chainResult.moves.length; k++) {
+        alreadyCovered.add(c.moveIdx + k);
+      }
+    }
+  }
+
+  const alreadyDetected = ownedContLine._tacticCandidates.filter(c => c.chainResult).length;
+  tacticScanProgress = {
+    total: pending.length,
+    done: 0,
+    detected: alreadyDetected,
+  };
+  renderTacticScanBanner();
+
+  // Process candidates in moveIdx order (natural chronological scan)
+  pending.sort((a, b) => a.moveIdx - b.moveIdx);
+
+  for (const cand of pending) {
+    if (session !== tacticScanSession) break;
+    if (contLine !== ownedContLine) break;  // new continuation started — bail
+
+    // Skip if this candidate falls within an already-detected tactic's chain
+    if (alreadyCovered.has(cand.moveIdx)) {
+      cand.scanned = true;
+      cand.skippedAsOverlap = true;
+      tacticScanProgress.done++;
+      renderTacticScanBanner();
+      continue;
+    }
+
+    const ctx = { canceled: false };
+    tacticScanCancelCtx = ctx;
+
+    try {
+      // Direct-delegated analyzeFn routes through the tactic worker and
+      // honors this scan's cancellation flag.
+      const analyzeFn = async (fen, d, mpv) => {
+        if (ctx.canceled || session !== tacticScanSession) return null;
+        return await tacticWorkerAnalyzePosition(fen, d, mpv);
+      };
+
+      const result = await tacticBuildBestChain(analyzeFn, cand, depth);
+      if (session !== tacticScanSession) break;
+
+      cand.scanned = true;
+      if (!result.canceled && result.moves && result.moves.length > 0) {
+        const userMoveCount = result.moves.filter(m => m.isUser).length;
+        if (userMoveCount >= TACTIC_MIN_USER_MOVES) {
+          let alternatives = tacticDedupeAltLines(result.moves, result.alternativeLines || []);
+
+          // Optional Maia-sourced alt line — toggle is user-controlled. Runs
+          // on the same tactic worker + the already-loaded Maia model, so no
+          // interference with main or eval workers.
+          if (tacticScanMaiaAlts && maiaReady) {
+            try {
+              const maiaChain = await tacticGenerateMaiaLine(analyzeFn, cand, result.moves, depth, ctx);
+              if (session !== tacticScanSession) break;
+              if (maiaChain && !ctx.canceled) {
+                // Only add if it differs from the primary/existing alts
+                const combined = tacticDedupeAltLines(result.moves, [...alternatives, maiaChain]);
+                if (combined.length > alternatives.length) {
+                  alternatives = combined.slice(0, TACTIC_MAX_ALT_LINES);
+                  sfLog('startTacticScan', `Maia alt line added for moveIdx=${cand.moveIdx} (${maiaChain.length} plies)`);
+                }
+              }
+            } catch (err) {
+              console.warn('[TacticScan] Maia line generation failed for moveIdx=' + cand.moveIdx, err);
+            }
+          }
+
+          cand.chainResult = {
+            moves: result.moves,
+            alternativeLines: alternatives,
+          };
+          // found = did the user actually play the tactic's first move?
+          const userUci = contLine.moves[cand.moveIdx]?.uci;
+          cand.userFound = userUci === result.moves[0].uci;
+          tacticScanProgress.detected++;
+          // Mark all plies in this tactic's chain as covered
+          for (let k = 0; k < result.moves.length; k++) {
+            alreadyCovered.add(cand.moveIdx + k);
+          }
+          sfLog('startTacticScan', `detected tactic at moveIdx=${cand.moveIdx} chainLen=${result.moves.length} alts=${alternatives.length} userFound=${cand.userFound}`);
+        } else {
+          cand.scanFailed = true;
+        }
+      } else if (!result.canceled) {
+        cand.scanFailed = true;
+      }
+    } catch (err) {
+      console.warn('[TacticScan] error on candidate moveIdx=' + cand.moveIdx, err);
+      cand.scanFailed = true;
+    }
+
+    tacticScanProgress.done++;
+    renderTacticScanBanner();
+    // If the user has the detected-tactics modal open while the scan runs,
+    // refresh it so newly-detected tactics appear live
+    const modal = document.getElementById('detectedTacticsModal');
+    if (modal && !modal.classList.contains('hidden')) {
+      renderDetectedTacticsList();
+    }
+  }
+
+  tacticScanCancelCtx = null;
+  tacticScanActive = false;
+
+  if (session === tacticScanSession) {
+    renderTacticScanBanner();
+  }
+}
+
+/** Cancel any in-flight tactic scan. Used from loadPosition teardown and
+ *  other navigation paths that leave the current contLine. */
+function cancelTacticScan() {
+  if (!tacticScanActive && !tacticScanCancelCtx) return;
+  tacticScanSession++;  // invalidate outstanding awaits
+  if (tacticScanCancelCtx) tacticScanCancelCtx.canceled = true;
+  tacticScanCancelCtx = null;
+  tacticScanActive = false;
+  // Banner stays in whatever final state it was; loadPosition teardown hides it
+  sfLog('cancelTacticScan', 'canceled');
+}
+
+/** Render the tactic scan banner based on current state. Idempotent. */
+function renderTacticScanBanner() {
+  const banner = document.getElementById('tacticScanBanner');
+  if (!banner) return;
+  // Suppress banner while user is inline-solving a detected tactic — the banner
+  // would reappear on every scan progress tick and overlap the solve UI
+  if (detectedTacticSolveMode) {
+    banner.classList.add('hidden');
+    return;
+  }
+  if (!contLine || !Array.isArray(contLine._tacticCandidates)) {
+    hideTacticScanBanner();
+    return;
+  }
+  const detected = contLine._tacticCandidates.filter(c => c.chainResult).length;
+
+  if (tacticScanActive) {
+    const { total, done, detected: liveDetected } = tacticScanProgress;
+    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    banner.classList.remove('hidden', 'detected');
+    banner.innerHTML = `
+      <div class="tsb-title">
+        <span>⚡ Scanning for tactics… ${done}/${total}</span>
+        <span style="font-weight:500;color:var(--text-muted);font-size:11px;">
+          ${liveDetected > 0 ? `${liveDetected} detected so far` : ''}
+        </span>
+      </div>
+      <div class="tsb-bar"><div class="tsb-bar-fill" style="width:${pct}%"></div></div>
+    `;
+    return;
+  }
+
+  // Scan not active — show results if any
+  if (detected > 0) {
+    const missed = contLine._tacticCandidates.filter(c => c.chainResult && !c.userFound).length;
+    banner.classList.remove('hidden');
+    banner.classList.add('detected');
+    banner.innerHTML = `
+      <div class="tsb-title">
+        <span>⚡ ${detected} tactic${detected === 1 ? '' : 's'} detected${missed > 0 ? ` · ${missed} missed` : ''}</span>
+        <button class="btn btn-ghost btn-sm" style="font-size:11px;padding:3px 8px;" onclick="reviewDetectedTactics()">Review</button>
+      </div>
+      <div class="tsb-sub">Tap Review to solve each tactic and decide whether to add it to your SRS queue.</div>
+    `;
+  } else {
+    // No detections — hide banner (or could show brief "no tactics" message)
+    hideTacticScanBanner();
+  }
+}
+
+function hideTacticScanBanner() {
+  const banner = document.getElementById('tacticScanBanner');
+  if (!banner) return;
+  banner.classList.add('hidden');
+  banner.classList.remove('detected');
+  banner.innerHTML = '';
+}
+
+/** Stub for Step 5 — opens the detected-tactics review UI. */
+function reviewDetectedTactics() {
+  openDetectedTacticsModal();
+}
+
+// ─── Detected-tactics review modal + inline solve (Step 5) ─────────────────
+let detectedTacticSolveMode = false;
+let _detectedTacticCand = null;         // cand object currently being solved
+let _detectedTacticCandIdx = -1;        // index of cand in the scan results list
+let _detectedTacticReviewSnapshot = null; // for restoring review state after solve
+
+function openDetectedTacticsModal() {
+  const modal = document.getElementById('detectedTacticsModal');
+  if (!modal) return;
+  renderDetectedTacticsList();
+  modal.classList.remove('hidden');
+}
+
+function closeDetectedTacticsModal() {
+  const modal = document.getElementById('detectedTacticsModal');
+  if (modal) modal.classList.add('hidden');
+}
+
+/** Build SAN-style preview line for a detected tactic chain. Returns HTML. */
+function formatTacticSanLine(chain, startFen) {
+  if (!chain || chain.length === 0) return '';
+  const fenParts = startFen.split(' ');
+  let moveNum = parseInt(fenParts[5]) || 1;
+  let isWhite = fenParts[1] === 'w';
+  let html = '';
+  for (let i = 0; i < chain.length; i++) {
+    const mv = chain[i];
+    if (isWhite) {
+      html += `<span class="dt-move-num">${moveNum}.</span>`;
+    } else if (i === 0) {
+      html += `<span class="dt-move-num">${moveNum}…</span>`;
+    }
+    const cls = mv.isUser ? 'dt-user-move' : '';
+    html += `<span class="${cls}">${escHtml(mv.san)}</span> `;
+    if (!isWhite) moveNum++;
+    isWhite = !isWhite;
+  }
+  return html;
+}
+
+function renderDetectedTacticsList() {
+  const listEl = document.getElementById('detectedTacticsList');
+  if (!listEl) return;
+  if (!contLine || !Array.isArray(contLine._tacticCandidates)) {
+    listEl.innerHTML = '<div class="dt-empty">No tactics available.</div>';
+    return;
+  }
+  const detected = contLine._tacticCandidates.filter(c => c.chainResult);
+  if (detected.length === 0) {
+    listEl.innerHTML = '<div class="dt-empty">No tactics detected in this continuation.</div>';
+    return;
+  }
+
+  let html = '';
+  for (let i = 0; i < detected.length; i++) {
+    const cand = detected[i];
+    // Derive a friendly move number for the header
+    const fenParts = cand.preFen.split(' ');
+    const moveNum = parseInt(fenParts[5]) || 1;
+    const sideToMove = fenParts[1];
+    const badge = cand.userFound
+      ? '<span class="dt-badge found">✓ Found</span>'
+      : '<span class="dt-badge missed">✕ Missed</span>';
+    const altCount = (cand.chainResult.alternativeLines || []).length;
+    const altLabel = altCount > 0
+      ? `<div class="dt-alt-label">${altCount + 1} lines total (primary + ${altCount} alternative${altCount > 1 ? 's' : ''})</div>`
+      : '';
+    const sanLine = formatTacticSanLine(cand.chainResult.moves, cand.preFen);
+    const rowCls = cand._saved ? 'dt-row saved' : (cand._discarded ? 'dt-row discarded' : 'dt-row');
+
+    // Primary action button reflects state:
+    //   not-saved, not-discarded → Try · Save · Discard
+    //   saved                    → Saved · (Try still available)
+    //   discarded                → Discarded · Undo
+    let actions;
+    if (cand._saved) {
+      actions = `
+        <button class="btn btn-ghost btn-sm" style="font-size:11px;" disabled>✓ Saved</button>
+        <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="tryDetectedTactic(${i})">🎯 Try again</button>`;
+    } else if (cand._discarded) {
+      actions = `
+        <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="undoDiscardDetectedTactic(${i})">↺ Undo discard</button>`;
+    } else {
+      actions = `
+        <button class="btn btn-primary btn-sm" style="font-size:11px;" onclick="tryDetectedTactic(${i})">🎯 Try</button>
+        <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="saveDetectedTactic(${i})">💾 Save</button>
+        <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="discardDetectedTactic(${i})">✕ Discard</button>`;
+    }
+
+    html += `
+      <div class="${rowCls}">
+        <div class="dt-row-header">
+          <span>Tactic at move ${moveNum}${sideToMove === 'b' ? '…' : ''}
+            · ${cand.playerColor === 'white' ? '♔' : '♚'} to play</span>
+          ${badge}
+        </div>
+        <div class="dt-line">${sanLine}</div>
+        ${altLabel}
+        <div class="dt-row-actions">${actions}</div>
+      </div>`;
+  }
+  listEl.innerHTML = html;
+}
+
+/** Find the index of a cand within the detected list (skipping non-detected) */
+function _getDetectedTactic(listIdx) {
+  if (!contLine || !Array.isArray(contLine._tacticCandidates)) return null;
+  const detected = contLine._tacticCandidates.filter(c => c.chainResult);
+  return detected[listIdx] || null;
+}
+
+function saveDetectedTactic(listIdx) {
+  const cand = _getDetectedTactic(listIdx);
+  if (!cand) return;
+  const result = savePracticeTactic(cand);
+  if (result.saved || result.reason === 'already-saved') {
+    cand._saved = true;
+  } else {
+    alert(`Couldn't save: ${result.reason || 'unknown error'}`);
+    return;
+  }
+  renderDetectedTacticsList();
+  renderTacticScanBanner();  // update banner counts if we track saved there
+}
+
+function discardDetectedTactic(listIdx) {
+  const cand = _getDetectedTactic(listIdx);
+  if (!cand) return;
+  cand._discarded = true;
+  renderDetectedTacticsList();
+}
+
+function undoDiscardDetectedTactic(listIdx) {
+  // listIdx here is the index AFTER the discard — we need to work around
+  // because discarded items still appear in the list. Simplest: find the
+  // nth item in the detected list (including discarded ones).
+  const cand = _getDetectedTactic(listIdx);
+  if (!cand) return;
+  cand._discarded = false;
+  renderDetectedTacticsList();
+}
+
+/** Enter inline tactic solve. Saves review state, sets up tacticMode, loads
+ *  position. Completion is intercepted by finishDetectedTacticSolve. */
+function tryDetectedTactic(listIdx) {
+  const cand = _getDetectedTactic(listIdx);
+  if (!cand || !cand.chainResult || !cand.chainResult.moves) return;
+  if (detectedTacticSolveMode) return;  // already solving
+
+  // Snapshot review state so we can restore after solve / abandon
+  _detectedTacticReviewSnapshot = {
+    contLineCurrentIdx: contLine.currentIdx,
+    reviewMode: contLineReviewMode,
+    keyMoves: contLineReviewKeyMoves ? [...contLineReviewKeyMoves] : [],
+    keyIdx: contLineReviewKeyIdx,
+    reviewBestLineData: window._reviewBestLine
+      ? JSON.parse(JSON.stringify(window._reviewBestLine))
+      : null,
+    feedbackHtml: document.getElementById('feedbackContainer').innerHTML,
+    boardFen: gameEngine ? gameEngine.fen() : null,
+    boardHighlights: captureBoardHighlights(),
+    moveClassBadge: moveClassBadge ? { ...moveClassBadge } : null,
+    bestMoveArrow: bestMoveArrow ? { ...bestMoveArrow } : null,
+    orientation: boardObj ? boardObj.orientation() : null,
+  };
+
+  // Suspend review navigation
+  contLineReviewMode = false;
+  contLineReviewRetryIdx = -1;
+  window._reviewBestLine = null;
+
+  // Enter detected-tactic solve
+  detectedTacticSolveMode = true;
+  _detectedTacticCand = cand;
+  _detectedTacticCandIdx = listIdx;
+
+  // Initialize tacticMode with the chain — same shape as a real tactic item
+  tacticMode = true;
+  tacticCompleted = false;
+  tacticMoves = JSON.parse(JSON.stringify(cand.chainResult.moves));
+  tacticAltLines = JSON.parse(JSON.stringify(cand.chainResult.alternativeLines || []));
+  tacticAltIdx = -1;
+  tacticStepIdx = 0;
+  currentAttempts = 0;
+  tacticWrongAttempts = 0;
+  tacticHintUsed = false;
+  tacticSolvedLines = [];
+  tacticPrefixUserMoves = 0;
+  tacticLine = { baseFen: cand.preFen, moves: [], currentIdx: -1 };
+
+  // Set up the board
+  if (!boardObj) return;
+  boardObj.orientation(cand.playerColor || 'white');
+  boardObj.position(cand.preFen, false);
+  gameEngine = new Chess(cand.preFen);
+  currentSolveFen = cand.preFen;
+  clearHighlights();
+  clearLastMoveHighlight();
+  clearArrows();
+  moveClassBadge = null;
+  bestMoveArrow = null;
+
+  // UI: close modal, hide scan banner, show tactic prompt
+  closeDetectedTacticsModal();
+  hideTacticScanBanner();
+
+  // Hide toolbar buttons that would mis-trigger during solve. We record
+  // prior visibility on the snapshot so abandon restores exactly.
+  const btnIds = ['btnRetry', 'btnLichess', 'btnViewGame', 'btnNote'];
+  _detectedTacticReviewSnapshot.btnVisibility = {};
+  btnIds.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) {
+      _detectedTacticReviewSnapshot.btnVisibility[id] = !el.classList.contains('hidden');
+      el.classList.add('hidden');
+    }
+  });
+
+  // Hint button is allowed during solve (same as normal tactic)
+  const hintBtn = document.getElementById('btnHint');
+  if (hintBtn) {
+    hintBtn.classList.remove('hidden');
+    hintBtn.disabled = false;
+    hintBtn.textContent = '💡 Hint';
+    hintBtn.style.borderColor = '';
+    hintBtn.style.color = '';
+  }
+
+  renderDetectedTacticPrompt();
+  renderTacticLine();
+}
+
+/** Feedback card shown at the start of solve and on each "Your turn" moment. */
+function renderDetectedTacticPrompt() {
+  const container = document.getElementById('feedbackContainer');
+  if (!container) return;
+  const cand = _detectedTacticCand;
+  if (!cand) return;
+  const totalUserMoves = tacticMoves.filter(tm => tm.isUser).length;
+  container.innerHTML = `
+    <div class="feedback-box info">
+      <div class="feedback-title">🎯 Find the tactic</div>
+      <div class="feedback-text">
+        <div>The scanner spotted a winning tactic here — ${totalUserMoves} move${totalUserMoves > 1 ? 's' : ''} to find.</div>
+        <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;">
+          <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="abandonDetectedTacticSolve()">✕ Back to list</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+/** Called from finishTacticComplete when detectedTacticSolveMode is active.
+ *  Shows save/discard decision card, then restores review on confirmation. */
+function finishDetectedTacticSolve(lastMoveSan) {
+  const cand = _detectedTacticCand;
+  if (!cand) {
+    abandonDetectedTacticSolve();
+    return;
+  }
+  // Mark the tactic infrastructure as completed (prevents re-entry)
+  tacticMode = false;
+  tacticCompleted = true;
+
+  const wrongAttempts = tacticWrongAttempts;
+  const hintWasUsed = tacticHintUsed;
+
+  const container = document.getElementById('feedbackContainer');
+  if (!container) return;
+
+  const verdict = wrongAttempts === 0 && !hintWasUsed
+    ? { title: '✓ Solved cleanly!', color: '#3ecc6f', bg: 'rgba(62,204,111,0.08)' }
+    : hintWasUsed
+    ? { title: '✓ Solved with a hint', color: 'var(--yellow)', bg: 'rgba(251,188,5,0.06)' }
+    : { title: `✓ Solved (${wrongAttempts} wrong attempt${wrongAttempts > 1 ? 's' : ''})`, color: 'var(--yellow)', bg: 'rgba(251,188,5,0.06)' }
+
+  const savedAlready = cand._saved;
+  const saveBtn = savedAlready
+    ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" disabled>✓ Saved</button>`
+    : `<button class="btn btn-primary btn-sm" style="font-size:11px;" onclick="saveAndReturnDetectedTactic()">💾 Save to SRS</button>`;
+
+  container.innerHTML = `
+    <div class="feedback-box" style="background:${verdict.bg};border-left-color:${verdict.color};">
+      <div class="feedback-title" style="color:${verdict.color}">${verdict.title}</div>
+      <div class="feedback-text">
+        <div>Add this tactic to your review queue so you'll solve it again later?</div>
+        <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;">
+          ${saveBtn}
+          <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="discardAndReturnDetectedTactic()">✕ Discard</button>
+          <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="abandonDetectedTacticSolve()">← Back to list</button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.getElementById('btnRetry').classList.add('hidden');
+  document.getElementById('btnHint').classList.add('hidden');
+}
+
+function saveAndReturnDetectedTactic() {
+  const cand = _detectedTacticCand;
+  if (!cand) {
+    abandonDetectedTacticSolve();
+    return;
+  }
+  const result = savePracticeTactic(cand);
+  if (result.saved || result.reason === 'already-saved') {
+    cand._saved = true;
+    abandonDetectedTacticSolve();
+  } else {
+    // Surface the failure instead of silently abandoning. Common reasons:
+    // 'invalid-chain', 'too-few-user-moves' — both indicate scanner produced
+    // something malformed (shouldn't happen for detected candidates, but guard).
+    alert(`Couldn't save this tactic (${result.reason || 'unknown error'}). You can still discard it or go back.`);
+  }
+}
+
+function discardAndReturnDetectedTactic() {
+  const cand = _detectedTacticCand;
+  if (cand) cand._discarded = true;
+  abandonDetectedTacticSolve();
+}
+
+/** Exit detected-tactic solve and restore the review state we snapshotted. */
+function abandonDetectedTacticSolve() {
+  if (!detectedTacticSolveMode) return;
+  const snap = _detectedTacticReviewSnapshot;
+
+  // Tear down tactic state
+  detectedTacticSolveMode = false;
+  tacticMode = false;
+  tacticCompleted = false;
+  tacticMoves = [];
+  tacticStepIdx = 0;
+  tacticAltLines = [];
+  tacticAltIdx = -1;
+  tacticSolvedLines = [];
+  tacticPrefixUserMoves = 0;
+  tacticWrongAttempts = 0;
+  tacticHintUsed = false;
+  tacticLine = null;
+  currentAttempts = 0;
+  hintLevel = 0;
+  hintArrow = null;
+  clearHintHighlights();
+  // Wrong-move engine line can be left open from a failed attempt; clear it
+  engineLine = null;
+  browsingLine = false;
+  contWrongMovePending = false;
+
+  // Abort any in-flight SF analysis from wrong-move engine-line building
+  if (sfSearchActive && sfWorker) {
+    try { sfWorker.terminate(); } catch (_) {}
+    sfWorker = null;
+    sfReady = false;
+    sfSearchActive = false;
+    initStockfish();
+  }
+
+  // Restore review state using the same mechanism as exitAnalysisMode
+  if (snap && contLine) {
+    // Restore toolbar button visibility first (simple DOM state, no deps)
+    if (snap.btnVisibility) {
+      Object.entries(snap.btnVisibility).forEach(([id, wasVisible]) => {
+        const el = document.getElementById(id);
+        if (el) {
+          if (wasVisible) el.classList.remove('hidden');
+          else el.classList.add('hidden');
+        }
+      });
+    }
+    contLineReviewMode = snap.reviewMode;
+    window._reviewBestLine = snap.reviewBestLineData || null;
+    if (snap.orientation && boardObj && boardObj.orientation() !== snap.orientation) {
+      boardObj.orientation(snap.orientation);
+    }
+    clearArrows();
+    // Restore contLine position (sets eval bar / graph cursor / note / line render)
+    goToContLineMove(snap.contLineCurrentIdx);
+    // Overpaint board if snapshot diverged from contLine's implied position
+    if (snap.boardFen && snap.boardFen !== gameEngine.fen()) {
+      gameEngine.load(snap.boardFen);
+      boardObj.position(snap.boardFen, false);
+    }
+    if (snap.boardHighlights) applyBoardHighlights(snap.boardHighlights);
+    moveClassBadge = snap.moveClassBadge || null;
+    bestMoveArrow = snap.bestMoveArrow || null;
+    renderArrows();
+    if (snap.feedbackHtml) {
+      document.getElementById('feedbackContainer').innerHTML = snap.feedbackHtml;
+    }
+    // Re-show the tactic scan banner and contLine container
+    renderTacticScanBanner();
+    updateNoteButton();
+    updateLineNavBar();
+    updateEvalBar();
+  }
+
+  _detectedTacticCand = null;
+  _detectedTacticCandIdx = -1;
+  _detectedTacticReviewSnapshot = null;
+
+  // Reopen modal so the user can try another / continue reviewing
+  openDetectedTacticsModal();
 }
 
 /** Main worker helps with eval queue when idle (after pre-analysis completes). */
@@ -4434,9 +5749,48 @@ function makeTreeNode(fen, san, uci, parent) {
 
 function enterAnalysisMode() {
   if (analysisMode) return;
+  // Block during detected-tactic solve — entering analysis would orphan the
+  // tactic state and the review snapshot we took in tryDetectedTactic
+  if (detectedTacticSolveMode) return;
   if (currentMistakeIdx < 0) return;
   const m = filteredMistakes[currentMistakeIdx];
   if (!m) return;
+
+  // Snapshot game-review state if we're coming from game review
+  // (contLineReviewMode, or the post-review Complete card which clears the flag but keeps keyMoves)
+  let reviewSnapshot = null;
+  const inReviewContext = contLine && !continuationMode &&
+    (contLineReviewMode || window._reviewBestLine ||
+     (contLineReviewKeyMoves && contLineReviewKeyMoves.length > 0));
+  if (inReviewContext) {
+    const wasRetrying = contLineReviewRetryIdx >= 0;
+    const retryMoveIdx = wasRetrying ? contLineReviewRetryIdx : null;
+    // Cancel any in-flight retry — user hitting Analyse = giving up on the retry
+    if (wasRetrying) {
+      contLineReviewRetryIdx = -1;
+      document.getElementById('btnHint').classList.add('hidden');
+      clearHintHighlights();
+    }
+    reviewSnapshot = {
+      contLineCurrentIdx: contLine.currentIdx,
+      reviewMode: contLineReviewMode,
+      keyMoves: contLineReviewKeyMoves ? [...contLineReviewKeyMoves] : [],
+      keyIdx: contLineReviewKeyIdx,
+      retryMoveIdx,
+      reviewBestLineData: window._reviewBestLine
+        ? JSON.parse(JSON.stringify(window._reviewBestLine))
+        : null,
+      // If user was mid-retry the feedback HTML is the retry prompt — skip it and
+      // rebuild the key-move card on exit instead
+      feedbackHtml: wasRetrying ? null : document.getElementById('feedbackContainer').innerHTML,
+      // Capture raw board state — needed for the retry-result card where gameEngine
+      // diverges from contLine.currentIdx, and harmlessly idempotent elsewhere
+      boardFen: gameEngine ? gameEngine.fen() : null,
+      boardHighlights: captureBoardHighlights(),
+      moveClassBadge: moveClassBadge ? { ...moveClassBadge } : null,
+      bestMoveArrow: bestMoveArrow ? { ...bestMoveArrow } : null,
+    };
+  }
 
   // Save review state
   analysisSavedState = {
@@ -4444,6 +5798,7 @@ function enterAnalysisMode() {
     fen: m.fenBefore,
     engineLineState: engineLine,
     browsingLineState: browsingLine,
+    reviewSnapshot,
   };
 
   // Determine the current position on the board
@@ -4528,8 +5883,10 @@ function exitAnalysisMode() {
   const qp = document.getElementById('queuePanel');
   if (qp) qp.style.display = '';
 
-  // Restore review state
-  if (analysisSavedState) {
+  // Restore review state (if we came from game review) OR the standard mistake state
+  if (analysisSavedState?.reviewSnapshot) {
+    restoreReviewStateAfterAnalysis(analysisSavedState.reviewSnapshot);
+  } else if (analysisSavedState) {
     const m = filteredMistakes[analysisSavedState.mistakeIdx];
     if (m) {
       gameEngine = new Chess(m.fenBefore);
@@ -4550,6 +5907,109 @@ function exitAnalysisMode() {
   analysisSavedState = null;
   updateEvalBar();
   updateLineNavBar();
+}
+
+function captureBoardHighlights() {
+  // Snapshot .square-lastmove + .square-hl (with their --hl-color) from the DOM
+  const lastmove = [];
+  document.querySelectorAll('.square-lastmove').forEach(el => {
+    const m = el.className.match(/\bsquare-([a-h][1-8])\b/);
+    if (m) lastmove.push(m[1]);
+  });
+  const hl = [];
+  document.querySelectorAll('.square-hl').forEach(el => {
+    const m = el.className.match(/\bsquare-([a-h][1-8])\b/);
+    if (m) hl.push({ square: m[1], color: el.style.getPropertyValue('--hl-color') });
+  });
+  return { lastmove, hl };
+}
+
+function applyBoardHighlights(snap) {
+  clearHighlights();            // removes .square-hl
+  clearLastMoveHighlight();     // removes .square-lastmove
+  if (snap && snap.lastmove && snap.lastmove.length === 2) {
+    showLastMoveHighlight(snap.lastmove[0], snap.lastmove[1]);
+  }
+  if (snap && snap.hl && snap.hl.length > 0) {
+    snap.hl.forEach(h => {
+      const el = document.querySelector(`.square-${h.square}`);
+      if (el) {
+        el.classList.add('square-hl');
+        if (h.color) el.style.setProperty('--hl-color', h.color);
+      }
+    });
+  }
+}
+
+function restoreReviewStateAfterAnalysis(rs) {
+  // Edge case — contLine could conceivably be nulled between entry and exit
+  if (!contLine) return;
+
+  // Restore review flags (retry was canceled on entry and stays canceled)
+  contLineReviewMode = rs.reviewMode;
+  contLineReviewKeyMoves = rs.keyMoves || [];
+  contLineReviewKeyIdx = rs.keyIdx;
+  contLineReviewRetryIdx = -1;
+  window._reviewBestLine = rs.reviewBestLineData || null;
+
+  // Ensure board orientation matches the review — analysis may have flipped it
+  const m = filteredMistakes[currentMistakeIdx];
+  const reviewOrient = m?.playerColor || 'white';
+  if (boardObj.orientation() !== reviewOrient) boardObj.orientation(reviewOrient);
+
+  // Wipe analysis-mode arrows before repainting
+  clearArrows();
+
+  if (rs.retryMoveIdx != null) {
+    // Retry was canceled on entry — land cleanly on the key-move card for that move.
+    // goToContLineMove + showReviewKeyMoveInfo paint everything from scratch; no
+    // overpaint from the snapshot (which captured the mid-retry pre-move state).
+    goToContLineMove(rs.retryMoveIdx);
+    showReviewKeyMoveInfo(rs.retryMoveIdx);
+  } else {
+    // Summary / key-move / retry-result / best-line / refutation / complete
+    // Phase 1: restore contLine position (eval bar, graph cursor, note indicator,
+    // contLine panel render). This paints a board state derived from contLine.
+    goToContLineMove(rs.contLineCurrentIdx);
+
+    // Phase 2: overpaint board FEN if the user was looking at a position that
+    // diverged from contLine[currentIdx] (best-line/refutation view, or retry-result
+    // card where gameEngine holds the retry move's post-position).
+    if (rs.reviewBestLineData) {
+      const data = rs.reviewBestLineData;
+      const idx = data.currentIdx ?? 0;
+      if (idx < 0) {
+        gameEngine.load(data.preFen);
+        boardObj.position(data.preFen, false);
+      } else {
+        const lm = data.lineMoves[idx];
+        if (lm) {
+          gameEngine.load(lm.fen);
+          boardObj.position(lm.fen, false);
+        }
+      }
+    } else if (rs.boardFen && rs.boardFen !== gameEngine.fen()) {
+      gameEngine.load(rs.boardFen);
+      boardObj.position(rs.boardFen, false);
+    }
+
+    // Phase 3: overpaint highlights / badge / arrow from the snapshot.
+    // Idempotent when snapshot matches goToContLineMove's output (key-move,
+    // summary); corrective for best-line and retry-result.
+    if (rs.boardHighlights) applyBoardHighlights(rs.boardHighlights);
+    moveClassBadge = rs.moveClassBadge || null;
+    bestMoveArrow = rs.bestMoveArrow || null;
+    renderArrows();
+
+    // Phase 4: restore the feedback panel content
+    if (rs.feedbackHtml) {
+      document.getElementById('feedbackContainer').innerHTML = rs.feedbackHtml;
+    }
+  }
+
+  updateNoteButton();
+  updateLineNavBar();
+  updateEvalBar();
 }
 
 function openLichessAnalysisFromMode() {
@@ -6662,6 +8122,29 @@ function extractAllMistakes() {
     }
   }
 
+  // Merge saved practice tactics from Gist (Step 6)
+  // These come from the background tactic scanner in Game Review. Shape
+  // mirrors the analyzer's tactic objects so posId prefixes correctly ('t').
+  if (gistData?.practiceTactics?.length) {
+    for (const pt of gistData.practiceTactics) {
+      // posId for tactics: `${gameId}_t${movePly}`
+      const pid = `${pt.gameId}_t${pt.movePly}`;
+      if (allMistakes.some(m => posId(m) === pid)) continue;
+      allMistakes.push({
+        ...pt,
+        game: {
+          id: pt.gameId,
+          speed: 'practice',
+          opening: { name: pt._opening || 'Practice' },
+          createdAt: pt._createdAt || Date.now(),
+          _source: 'practice',
+          rated: false,
+          players: {},
+        },
+      });
+    }
+  }
+
   // Sort by severity (biggest win% drop / tactic swing first)
   allMistakes.sort((a, b) => b.wpDrop - a.wpDrop);
   // Discard games with zero positions (no mistakes and no tactics)
@@ -8549,6 +10032,17 @@ function loadPosition(globalIdx) {
     evalSfSearchActive = false;
     evalSfPhase = 0;
   }
+  // Cancel any in-flight tactic scan and tear down its worker — the tactic
+  // worker is kept alive only for the duration of a review session.
+  cancelTacticScan();
+  terminateTacticWorker();
+  hideTacticScanBanner();
+  // Reset detected-tactic solve state if the user bailed mid-solve via navigation
+  detectedTacticSolveMode = false;
+  _detectedTacticCand = null;
+  _detectedTacticCandIdx = -1;
+  _detectedTacticReviewSnapshot = null;
+  closeDetectedTacticsModal();
   contLineReviewMode = false;
   contLineReviewKeyMoves = [];
   contLineReviewKeyIdx = -1;
@@ -8958,7 +10452,11 @@ function onSnapEnd() {
 // ─── Evaluate a move in tactic-solving mode ───
 async function evaluateTacticMove(from, to, move) {
   const m = filteredMistakes[currentMistakeIdx];
-  if (!m || m.type !== 'tactic') return;
+  // In detectedTacticSolveMode we solve an ephemeral tactic from the scanner
+  // without loadPosition (contLine review state is preserved for restore).
+  if (!detectedTacticSolveMode) {
+    if (!m || m.type !== 'tactic') return;
+  }
 
   const expectedMove = tacticMoves[tacticStepIdx];
   if (!expectedMove || !expectedMove.isUser) return;
@@ -8990,7 +10488,11 @@ async function evaluateTacticMove(from, to, move) {
 
       // Check if there are unsolved alternative lines remaining
       // (an alt is "unsolved" only if it has user moves beyond the common prefix)
-      const invLinesCheck = getInvalidatedLines(posId(m));
+      // In detected-tactic solve, m is the original mistake — not the tactic's
+      // owner — so getInvalidatedLines(posId(m)) would be semantically wrong.
+      const invLinesCheck = detectedTacticSolveMode
+        ? new Set()
+        : getInvalidatedLines(posId(m));
       let unsolvedAltCount = 0;
       for (let ai = tacticAltIdx + 1; ai < tacticAltLines.length; ai++) {
         const alt = tacticAltLines[ai];
@@ -9136,6 +10638,9 @@ function tacticAutoPlayOpponent() {
 }
 
 function finishTacticComplete(lastMoveSan) {
+  if (detectedTacticSolveMode) {
+    return finishDetectedTacticSolve(lastMoveSan);
+  }
   const m = filteredMistakes[currentMistakeIdx];
   if (!m) return;
 
@@ -9180,14 +10685,19 @@ function finishTacticComplete(lastMoveSan) {
 
 function loadNextTacticAlt() {
   const m = filteredMistakes[currentMistakeIdx];
-  if (!m || m.type !== 'tactic') return;
+  const inDetectedSolve = detectedTacticSolveMode;
+  if (!inDetectedSolve && (!m || m.type !== 'tactic')) return;
+
+  // In detected-tactic solve, the root fen comes from the candidate, not `m`.
+  // No invalidated-lines tracking — detected tactics aren't in SRS yet.
+  const tacticBaseFen = inDetectedSolve ? _detectedTacticCand.preFen : m.fenBefore;
+  const invLines = inDetectedSolve ? new Set() : getInvalidatedLines(posId(m));
 
   tacticAltIdx++;
   const altLine = tacticAltLines[tacticAltIdx];
   if (!altLine || altLine.length < 3) return;
 
   // Skip invalidated lines
-  const invLines = getInvalidatedLines(posId(m));
   if (invLines.has(lineFingerprint(altLine))) {
     if (tacticAltIdx + 1 < tacticAltLines.length) {
       loadNextTacticAlt();
@@ -9224,8 +10734,8 @@ function loadNextTacticAlt() {
   }
 
   // Reset board and replay the common prefix
-  gameEngine = new Chess(m.fenBefore);
-  boardObj.position(m.fenBefore, false);
+  gameEngine = new Chess(tacticBaseFen);
+  boardObj.position(tacticBaseFen, false);
   clearHighlights();
   clearArrows();
 
@@ -9236,7 +10746,7 @@ function loadNextTacticAlt() {
   hintLevel = 0;
   hintArrow = null;
   clearHintHighlights();
-  tacticLine = { baseFen: m.fenBefore, moves: [], currentIdx: -1 };
+  tacticLine = { baseFen: tacticBaseFen, moves: [], currentIdx: -1 };
 
   // Auto-play all common prefix moves instantly
   for (let i = 0; i < commonLen && i < altLine.length; i++) {
@@ -9445,6 +10955,10 @@ function tacticTryAgain() {
 }
 
 function handleInvalidateLine() {
+  // Detected-tactic solves don't have an SRS position to mark invalidated.
+  // Silently no-op — the Bad-line button shouldn't be used in this context,
+  // but the button can appear in the multi-line completion feedback.
+  if (detectedTacticSolveMode) return;
   const m = filteredMistakes[currentMistakeIdx];
   if (!m || m.type !== 'tactic') return;
   const pid = posId(m);
@@ -11872,6 +13386,104 @@ function savePracticeMistake(moveIdx) {
   console.log(`[Practice] Saved mistake: ${mv.san} at ${fenBefore.split(' ').slice(0, 2).join(' ')}…`);
 }
 
+// ─── Practice tactic persistence (Step 6) ──────────────────────────────────
+/** Persist a scan-detected tactic as a practice tactic. The input `cand` must
+ *  have a populated `chainResult` from the background scan. The tactic becomes
+ *  a `type: 'tactic'` item in allMistakes/filteredMistakes immediately and is
+ *  synced to Gist for cross-device + cross-session persistence.
+ *  Returns { saved: bool, reason?: string }. */
+function savePracticeTactic(cand) {
+  if (!cand || !cand.chainResult || !Array.isArray(cand.chainResult.moves) ||
+      cand.chainResult.moves.length < 3) {
+    return { saved: false, reason: 'invalid-chain' };
+  }
+  const userMoveCount = cand.chainResult.moves.filter(mv => mv.isUser).length;
+  if (userMoveCount < TACTIC_MIN_USER_MOVES) {
+    return { saved: false, reason: 'too-few-user-moves' };
+  }
+
+  const fenBefore = cand.preFen;
+  const fenParts = fenBefore.split(' ');
+  const moveNum = parseInt(fenParts[5]) || 1;
+  const ply = (moveNum - 1) * 2 + (fenParts[1] === 'b' ? 1 : 0);
+  const playerColor = cand.playerColor || 'white';
+
+  if (!gistData) gistData = { positions: {}, notes: {}, version: 1 };
+  if (!gistData.practiceTactics) gistData.practiceTactics = [];
+
+  // Dedup by fenBefore + primary chain UCI signature
+  const chainSig = cand.chainResult.moves.map(mv => mv.uci).join(',');
+  const already = gistData.practiceTactics.some(pt =>
+    pt.fenBefore === fenBefore && pt._chainSig === chainSig
+  );
+  if (already) return { saved: false, reason: 'already-saved' };
+
+  // Approximate wpSwing from the opp's blunder magnitude + uniqueness gap.
+  // Both are already-computed numbers; no new Stockfish work.
+  const approxSwing = Math.round((cand.gapWp || 0) * 10) / 10;
+
+  const gameId = `_practice_tactic_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const sourceLabel = detectPracticeSourceLabel();
+
+  // Persisted shape — mirrors analyzer tactic shape so the standard tactic
+  // extraction path (line ~6475) picks it up without modification.
+  const tacticRecord = {
+    type: 'tactic',
+    gameId,
+    movePly: ply,
+    fenBefore,
+    playerColor,
+    moveNumber: moveNum,
+    tacticMoves: cand.chainResult.moves,
+    tacticAltLines: cand.chainResult.alternativeLines || [],
+    maiaOpponentMoves: cand.maiaOpponentMoves || null,
+    wpSwing: approxSwing,
+    wpDrop: Math.abs(approxSwing),
+    found: cand.userFound === true,
+    evalBefore: { eval: cand.initialPvs?.[0]?.cp ?? 0 },  // from side-to-move (user) POV
+    evalAfter: null,     // not computed for practice tactics (would need extra SF call)
+    _opening: lookupOpeningName(fenBefore) ||
+              filteredMistakes[currentMistakeIdx]?.game?.opening?.name ||
+              'Practice',
+    _createdAt: Date.now(),
+    _source: sourceLabel,
+    _chainSig: chainSig,  // for dedup on re-save attempts
+  };
+
+  gistData.practiceTactics.push(tacticRecord);
+  debounceSyncToGist();
+
+  // Inject into live lists so it appears in the SRS queue immediately
+  const liveEntry = {
+    ...tacticRecord,
+    game: {
+      id: gameId,
+      speed: 'practice',
+      opening: { name: tacticRecord._opening },
+      createdAt: tacticRecord._createdAt,
+      _source: 'practice',
+      rated: false,
+      players: {},
+    },
+  };
+  allMistakes.push(liveEntry);
+  // Don't applyFilters() here — same reason as savePracticeMistake: would
+  // wipe an active practiceContItem. The user sees the tactic in the queue
+  // on next navigation.
+  filteredMistakes.push(liveEntry);
+
+  console.log(`[Practice] Saved tactic: ${cand.chainResult.moves[0].san} at ${fenBefore.split(' ').slice(0, 2).join(' ')}… (${userMoveCount} user moves, found=${cand.userFound})`);
+  return { saved: true, liveEntry };
+}
+
+/** Label the source of a practice tactic ("Continuation" / "Filter Practice" /
+ *  "Advantage"). Used only for debug / display. */
+function detectPracticeSourceLabel() {
+  if (practiceContItem) return 'Filter Practice';
+  if (advantageMode) return 'Advantage';
+  return 'Continuation';
+}
+
 // ─── Continuation Practice ───
 function showContinuationOptions(m, move, contUci) {
   continuationContUci = contUci;
@@ -12302,6 +13914,11 @@ async function startContLineReview() {
     goToContLineMove(-1); // go to base position
     renderContLine();
   }
+
+  // Kick off background tactic scan (non-blocking). The banner renders
+  // progress above the feedback area and survives navigation within review.
+  // A second call while a scan is active is a no-op (idempotent guard).
+  startTacticScan();
 }
 
 function reviewNextKeyMove() {
@@ -13229,6 +14846,8 @@ async function advanceContinuation(contUci) {
 
 // ─── Navigation ───
 function prevPosition() {
+  // Detected-tactic solve hijacks the board — treat nav as "cancel solve"
+  if (detectedTacticSolveMode) { abandonDetectedTacticSolve(); return; }
   if (openingFilterMode) { filterUndoMove(); return; }
   if (currentMistakeIdx <= 0) return;
   clearArrows()
@@ -13248,6 +14867,7 @@ function prevPosition() {
 }
 
 function nextPosition() {
+  if (detectedTacticSolveMode) { abandonDetectedTacticSolve(); return; }
   if (openingFilterMode) { filterRedoMove(); return; }
   if (currentMistakeIdx < 0) return;
   clearArrows()
@@ -13264,6 +14884,7 @@ function nextPosition() {
 }
 
 function skipPosition() {
+  if (detectedTacticSolveMode) { abandonDetectedTacticSolve(); return; }
   if (currentMistakeIdx < 0) return;
   clearArrows()
   const m = filteredMistakes[currentMistakeIdx];
@@ -13300,6 +14921,7 @@ function advanceReviewQueue() {
 }
 
 function retryPosition() {
+  if (detectedTacticSolveMode) { abandonDetectedTacticSolve(); return; }
   if (currentMistakeIdx < 0) return;
   const m = filteredMistakes[currentMistakeIdx];
 
@@ -16628,6 +18250,10 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     if (voiceMode && voicePendingMove) { voiceProcessResult({ type: 'confirm', value: false }); return; }
     if (analysisMode) { exitAnalysisMode(); return; }
+    if (detectedTacticSolveMode) { abandonDetectedTacticSolve(); return; }
+    // If the detected-tactics modal is open (but not yet solving), close it
+    const dtModal = document.getElementById('detectedTacticsModal');
+    if (dtModal && !dtModal.classList.contains('hidden')) { closeDetectedTacticsModal(); return; }
     if (openingFilterMode) { exitOpeningFilter(false); return; }
     if (!document.getElementById('mobileFeedbackOverlay').classList.contains('hidden')) { closeMobileFeedback(); return; }
     if (document.body.classList.contains('drawer-open')) { closeDrawer(); return; }
