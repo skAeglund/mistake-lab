@@ -5,7 +5,6 @@
   "start_url": "/mistake-lab/",
   "scope": "/mistake-lab/",
   "display": "standalone",
-  "orientation": "any",
   "background_color": "#0c0e13",
   "theme_color": "#0c0e13",
   "icons": [
