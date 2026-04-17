@@ -1479,7 +1479,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix tactic scan skipping first moves + show banner when clean</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Show Analysis and Note buttons in Game Review</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -13926,6 +13926,21 @@ async function startContLineReview() {
   contLineReviewMode = true;
   contLineReviewKeyMoves = data.keyMoves;
   contLineReviewKeyIdx = -1;
+
+  // Reveal toolbar buttons useful in review. Filter practice bypasses
+  // loadPosition entirely, so btnLichess (Analysis) and btnNote stay hidden
+  // in their default state — unhide them here. btnViewGame stays hidden
+  // for synthetic practice/resumed items (no real game to view); unhidden
+  // only when the current item has a real game id.
+  document.getElementById('btnLichess').classList.remove('hidden');
+  document.getElementById('btnNote').classList.remove('hidden');
+  const currentItem = currentMistakeIdx >= 0 ? filteredMistakes[currentMistakeIdx] : null;
+  const realGame = currentItem?.game?.id &&
+    !currentItem.game.id.startsWith('_practice') &&
+    !currentItem.game.id.startsWith('_resumed');
+  if (realGame) {
+    document.getElementById('btnViewGame').classList.remove('hidden');
+  }
 
   // Show summary in feedback area
   const container = document.getElementById('feedbackContainer');
