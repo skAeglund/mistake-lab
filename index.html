@@ -1479,7 +1479,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Show Analysis and Note buttons in Game Review</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Clear continuation session on game end</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -13643,6 +13643,7 @@ function finishAdvantage(outcome) {
   silentContinuation = false;
   lastContUserAfterCp = null;
   continuationMode = false;
+  clearContSession();
   hideMaiaControls();
   stopPreAnalysis();
 
@@ -13767,6 +13768,7 @@ function stopAndReviewContinuation() {
   recordPracticeResult(evalToResult(afterMoveCpWhite), afterMoveCpWhite);
   continuationMode = false;
   silentContinuation = false;
+  clearContSession();
   hideMaiaControls();
   stopPreAnalysis();
 
@@ -14623,6 +14625,7 @@ async function advanceContinuation(contUci) {
     const wasSilent = silentContinuation;
     continuationMode = false;
     silentContinuation = false;
+    clearContSession();
     hideMaiaControls();
     const reviewBtn = wasSilent && contLine && contLine.moves.some(mv => mv.classification)
       ? '<div style="margin-top:8px;"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="startContLineReview()">📋 Review Game</button></div>'
@@ -14691,6 +14694,7 @@ async function advanceContinuation(contUci) {
         recordPracticeResult(evalToResult(afterMoveCpWhite), afterMoveCpWhite);
         continuationMode = false;
         silentContinuation = false;
+        clearContSession();
         hideMaiaControls();
         showFeedback('info', 'Continuation ended', 'Could not determine opponent\'s best response.' + practiceEndBtns());
         document.getElementById('btnRetry').classList.remove('hidden');
@@ -14739,6 +14743,7 @@ async function advanceContinuation(contUci) {
     recordPracticeResult(evalToResult(afterMoveCpWhite), afterMoveCpWhite);
     continuationMode = false;
     silentContinuation = false;
+    clearContSession();
     hideMaiaControls();
     showFeedback('info', 'Continuation ended', 'Could not play opponent\'s move.' + practiceEndBtns());
     document.getElementById('btnRetry').classList.remove('hidden');
@@ -14777,6 +14782,7 @@ async function advanceContinuation(contUci) {
     const wasSilent2 = silentContinuation;
     continuationMode = false;
     silentContinuation = false;
+    clearContSession();
     hideMaiaControls();
     const m = filteredMistakes[currentMistakeIdx];
     const reviewBtn2 = wasSilent2 && contLine && contLine.moves.some(mv => mv.classification)
@@ -14806,6 +14812,7 @@ async function advanceContinuation(contUci) {
     const wasSilent3 = silentContinuation;
     continuationMode = false;
     silentContinuation = false;
+    clearContSession();
     hideMaiaControls();
     const reviewBtn3 = wasSilent3 && contLine && contLine.moves.some(mv => mv.classification)
       ? '<div style="margin-top:8px;"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="startContLineReview()">📋 Review Game</button></div>'
