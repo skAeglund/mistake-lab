@@ -1479,7 +1479,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Clear stale move list when starting a new continuation</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix tactic scan skipping first moves + show banner when clean</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3905,15 +3905,20 @@ function detectTacticCandidate(moveIdx) {
   if (!mv.isUser) return;
   if (!mv._pvs || mv._pvs.length === 0) return;
 
-  // Pre-filter 1: opp's preceding move must have lost ≥ TACTIC_MIN_OPP_CP_LOSS cp
+  // Opp-blunder pre-filter — mirrors analyzer/analyze.js scanGameForTactics
+  // (line ~923): the check is GATED on `i >= 2`. For the first 1-2 moves of
+  // the sequence, we don't have enough history to evaluate an opponent blunder,
+  // so we skip the check entirely and rely purely on PV gap for detection.
+  // This is critical for filter practice starting from a tactical position
+  // (the tactic lives at moveIdx 0/1, and there's no opp move preceding it).
   const prevMv = moveIdx > 0 ? contLine.moves[moveIdx - 1] : null;
-  // The first user move of the continuation has no opp predecessor inside contLine.
-  // We could look at the mistake's own eval swing as a proxy, but for simplicity skip.
-  if (!prevMv || prevMv.isUser !== false) return;
-  const oppCpLoss = prevMv.cpLoss;
-  if (oppCpLoss == null || oppCpLoss < TACTIC_MIN_OPP_CP_LOSS) return;
+  if (moveIdx >= 2) {
+    if (!prevMv || prevMv.isUser !== false) return;
+    const oppCpLoss = prevMv.cpLoss;
+    if (oppCpLoss == null || oppCpLoss < TACTIC_MIN_OPP_CP_LOSS) return;
+  }
 
-  // Pre-filter 2: ply on the board (from FEN) ≥ TACTIC_MIN_PLY
+  // Pre-filter: ply on the board (from FEN) ≥ TACTIC_MIN_PLY
   const preFen = moveIdx > 0 ? contLine.moves[moveIdx - 1].fen : contLine.baseFen;
   const fenParts = preFen.split(' ');
   const fullmove = parseInt(fenParts[5]) || 1;
@@ -3921,7 +3926,7 @@ function detectTacticCandidate(moveIdx) {
   const ply = fullmove * 2 - (sideToMove === 'w' ? 1 : 0);
   if (ply < TACTIC_MIN_PLY) return;
 
-  // Pre-filter 3: remaining plies ≥ TACTIC_MIN_REMAINING
+  // Pre-filter: remaining plies ≥ TACTIC_MIN_REMAINING
   if (contLine.moves.length - moveIdx < TACTIC_MIN_REMAINING) return;
 
   // Uniqueness check using stored pvs (side-to-move perspective — user is to move
@@ -3947,7 +3952,7 @@ function detectTacticCandidate(moveIdx) {
     moveIdx,
     preFen,
     playerColor,
-    oppCpLoss,
+    oppCpLoss: prevMv?.cpLoss ?? null,
     gapWp: Math.round(gapWp * 10) / 10,
     bestMoveUci: mv._pvs[0].firstMove,
     // Snapshot pvs so later scan has the initial MultiPV 3 result
@@ -3959,7 +3964,7 @@ function detectTacticCandidate(moveIdx) {
     userFound: null,       // true/false — did the user play the tactic's first move?
     detectedAt: Date.now(),
   });
-  sfLog('detectTacticCandidate', `candidate at moveIdx=${moveIdx} gapWp=${gapWp.toFixed(1)} oppCpLoss=${oppCpLoss} ply=${ply}`);
+  sfLog('detectTacticCandidate', `candidate at moveIdx=${moveIdx} gapWp=${gapWp.toFixed(1)} oppCpLoss=${prevMv?.cpLoss ?? 'N/A'} ply=${ply}`);
 }
 
 // ─── Tactic chain walk (ported from analyzer/analyze.js) ───
@@ -4235,7 +4240,13 @@ async function tacticGenerateMaiaLine(analyzeFn, cand, primaryChain, tacticDepth
 async function startTacticScan() {
   if (tacticScanActive) return;
   if (!contLine) return;
-  if (!Array.isArray(contLine._tacticCandidates) || contLine._tacticCandidates.length === 0) return;
+  if (!Array.isArray(contLine._tacticCandidates) || contLine._tacticCandidates.length === 0) {
+    // No candidates qualified during Phase 1. Still let the user know we
+    // looked — otherwise the scanning feature is completely invisible for
+    // games where the user played cleanly (filter practice especially).
+    showTacticScanCleanBanner();
+    return;
+  }
 
   const pending = contLine._tacticCandidates.filter(c => !c.scanned);
   if (pending.length === 0) {
