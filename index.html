@@ -1401,7 +1401,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add SRS due-review queue to Repertoire tab</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Voice recognition starts disabled each session</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1991,6 +1991,9 @@ function loadVoiceSettings() {
     const s = JSON.parse(localStorage.getItem('mistakelab_voice_settings'));
     if (s) Object.assign(voiceSettings, s);
   } catch(e) {}
+  // Always start disabled — user must explicitly enable each session to trigger the permission prompt.
+  // This also keeps TTS off (all TTS sites are gated on voiceMode, which only activates via voiceStart()).
+  voiceSettings.enabled = false;
 }
 function saveVoiceSettings() {
   localStorage.setItem('mistakelab_voice_settings', JSON.stringify(voiceSettings));
