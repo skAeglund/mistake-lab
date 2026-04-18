@@ -1189,6 +1189,21 @@
     }
     body.mobile-browsing .drawer-close-btn { display: none !important; }
   }
+  /* Note panel: on portrait mobile, render inline directly under the board
+     instead of as a floating overlay. Landscape mobile + desktop keep the
+     floater behavior from the base rule and the mobile rule above. */
+  @media (max-width: 768px) and (orientation: portrait) {
+    .board-container { flex-wrap: wrap; }
+    .note-panel {
+      position: static;
+      left: auto; right: auto; top: auto; bottom: auto;
+      transform: none;
+      width: auto;
+      flex-basis: 100%;
+      margin-top: 8px;
+      box-shadow: none;
+    }
+  }
   /* Sync indicator */
   .sync-status {
     display: flex; align-items: center; gap: 6px;
@@ -1456,7 +1471,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">BUG-002 followup: Also hide Stop &amp; Review button when user manually stops continuation (not just game-end)</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">IMP-001 followup: Render note panel inline below board on portrait mobile (prevents board overlap)</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
