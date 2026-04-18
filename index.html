@@ -1456,7 +1456,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">BUG-005: Clear stale review state (_reviewBestLine / _lastRetryResult / engineLine) on review-enter and filter-enter to fix cross-session nav corruption</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">BUG-002 followup: Also hide Stop &amp; Review button when user manually stops continuation (not just game-end)</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -13851,6 +13851,7 @@ function stopAndReviewContinuation() {
   silentContinuation = false;
   clearContSession();
   hideMaiaControls();
+  hideContStopReview();
   stopPreAnalysis();
 
   document.getElementById('btnRetry').classList.remove('hidden');
