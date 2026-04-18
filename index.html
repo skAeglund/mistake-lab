@@ -1454,7 +1454,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix RepertoireCheck Finish drill button duplicating summary on repeat clicks</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Show line: skip pre-move reset when board is already on the post-best-move position</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -14092,19 +14092,9 @@ async function showReviewBestLine(moveIdx) {
 
   const preFen = moveIdx - 1 >= 0 ? contLine.moves[moveIdx - 1].fen : contLine.baseFen;
 
-  // Show loading state
-  const container = document.getElementById('feedbackContainer');
-  container.innerHTML = `
-    <div class="feedback-box" style="background:var(--bg-card);border-left:3px solid var(--accent);">
-      <div class="feedback-title" style="color:var(--accent)">Analyzing best line…</div>
-      <div class="feedback-text"><div class="spinner" style="margin:8px 0"></div></div>
-    </div>
-  `;
-
-  // Navigate to pre-move position
-  goToContLineMove(moveIdx - 1);
-
-  // Play the stored best move on a temp chess instance to get its SAN and the post-move FEN
+  // Play the stored best move on a temp chess instance to get its SAN and the post-move FEN.
+  // Done up front so we can detect whether the board is already showing that position
+  // (e.g. after a successful best-move retry) and skip the flicker-reset in that case.
   const chess = new Chess(preFen);
   const bestFrom = mv.bestMoveUci.substring(0, 2);
   const bestTo = mv.bestMoveUci.substring(2, 4);
@@ -14114,16 +14104,31 @@ async function showReviewBestLine(moveIdx) {
     showReviewKeyMoveInfo(moveIdx);
     return;
   }
+  const postBestFen = chess.fen();
+  const alreadyAtPostBest = !!gameEngine && gameEngine.fen() === postBestFen;
+
+  // Show loading state
+  const container = document.getElementById('feedbackContainer');
+  container.innerHTML = `
+    <div class="feedback-box" style="background:var(--bg-card);border-left:3px solid var(--accent);">
+      <div class="feedback-title" style="color:var(--accent)">Analyzing best line…</div>
+      <div class="feedback-text"><div class="spinner" style="margin:8px 0"></div></div>
+    </div>
+  `;
+
+  // Navigate to pre-move position (skipped when board already shows post-best-move)
+  if (!alreadyAtPostBest) {
+    goToContLineMove(moveIdx - 1);
+  }
 
   const fenParts = preFen.split(' ');
   let isWhite = fenParts[1] === 'w';
-  const lineMoves = [{ san: bestMoveResult.san, uci: mv.bestMoveUci, fen: chess.fen(), isWhite }];
+  const lineMoves = [{ san: bestMoveResult.san, uci: mv.bestMoveUci, fen: postBestFen, isWhite }];
   let lineNum = parseInt(fenParts[5]) || 1;
   if (!isWhite) lineNum++;
   isWhite = !isWhite;
 
   // Analyze the position AFTER the best move to get the continuation
-  const postBestFen = chess.fen();
   const result = await sfAnalyze(postBestFen, 20, 1);
   if (result && result.pvs && result.pvs[0]) {
     const pvMoves = (result.pvs[0].moves || '').trim().split(/\s+/).filter(Boolean);
@@ -14139,10 +14144,14 @@ async function showReviewBestLine(moveIdx) {
     }
   }
 
-  // Play the best move on the board
-  gameEngine.load(preFen);
-  gameEngine.move({ from: bestFrom, to: bestTo, promotion: bestPromo });
-  boardObj.position(gameEngine.fen(), true);
+  // Play the best move on the board (skipped when already there)
+  if (!alreadyAtPostBest) {
+    gameEngine.load(preFen);
+    gameEngine.move({ from: bestFrom, to: bestTo, promotion: bestPromo });
+    boardObj.position(gameEngine.fen(), true);
+  }
+  // Always (re-)apply the stable last-move highlight on the best-move squares,
+  // so the skip path matches the non-skip path visually.
   showLastMoveHighlightDeferred(bestFrom, bestTo);
   bestMoveArrow = null;
   moveClassBadge = null;
