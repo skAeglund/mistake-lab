@@ -1456,7 +1456,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Uniform badge centering via foreignObject flexbox for all symbols; drop circle outline</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix move-class badge landing on rook square after opponent castles (update stored UCI to king-destination form)</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -14871,6 +14871,11 @@ async function advanceContinuation(contUci) {
     const piece = gameEngine.get(fromSq);
     if (piece && piece.type === 'k') {
       toSq = remappedTo;
+      // Keep the stored UCI in sync with the remapped destination so downstream
+      // consumers (classification badge square, last-move highlight re-render on
+      // navigation, etc.) land on the king's actual destination rather than the
+      // rook's origin square.
+      opponentUci = fromSq + toSq + (promo || '');
     }
   }
 
