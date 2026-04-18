@@ -1456,7 +1456,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">BUG-004: Backfill opponent move afterCp so eval bar updates on opponent moves in Game Review</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">BUG-005: Clear stale review state (_reviewBestLine / _lastRetryResult / engineLine) on review-enter and filter-enter to fix cross-session nav corruption</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -8538,6 +8538,10 @@ function toggleOpeningFilter() {
 
 function enterOpeningFilter() {
   if (analysisMode) exitAnalysisMode();
+  // BUG-005: wipe any lingering review state (review mode flag, _reviewBestLine,
+  // _lastRetryResult, engineLine, browsingLine). Otherwise a subsequent new
+  // continuation's review can inherit stale nav data from the previous session.
+  exitContLineReview();
   cleanupPracticeCont();
   continuationMode = false;
   silentContinuation = false;
@@ -13958,6 +13962,12 @@ function updateReviewGraphCursor(moveIdx) {
 }
 
 async function startContLineReview() {
+  // BUG-005: wipe any review state left over from a previous review (the user
+  // could have gone back to Opening Filter and started a new continuation).
+  // exitContLineReview clears _reviewBestLine, _lastRetryResult, engineLine,
+  // retryIdx, keyMoves. The new review re-enters review mode further down.
+  exitContLineReview();
+
   // IMP-003: the game has ended — the "Current Position" card (Continuation
   // Practice / Your turn / Stop & Review / etc.) is stale and redundant next to
   // the Game Review summary. Hide it here; subsequent navigation (retryPosition,
@@ -14691,6 +14701,14 @@ function exitContLineReview() {
   contLineReviewKeyIdx = -1;
   contLineReviewRetryIdx = -1;
   window._reviewBestLine = null;
+  // BUG-005: also clear retry-result stash and any engine-line browsing state so
+  // a subsequent review (or a fresh continuation) can't inherit stale nav data.
+  // lineNavStep routes arrow-key / mobile nav through _reviewBestLine → engineLine
+  // → contLine in order, so a stale _reviewBestLine or engineLine from a prior
+  // session hijacks navigation of the new contLine.
+  window._lastRetryResult = null;
+  engineLine = null;
+  browsingLine = false;
 }
 
 function startTacticContinuation() {
