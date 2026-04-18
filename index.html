@@ -1456,7 +1456,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">IMP-001: Auto-show floating note panel on repertoire correct/reveal (remove inline note in feedback box)</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">IMP-002: RepertoireCheck drill — Auto Next toggle (auto-advance to next item after 0.75s delay)</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2038,6 +2038,8 @@ let repertoireDrillCorrect = 0;  // positions solved on first attempt
 let repertoireDrillWrong = 0;    // positions that needed >1 attempt or reveal
 let repertoireDrillFailed = [];  // positionKeys of failed items for retry loop
 let repertoireDrillStartTime = 0; // timestamp when current position was loaded
+let repertoireAutoNext = false;   // IMP-002: auto-advance drill to next item (not persisted between sessions)
+let repertoireAutoNextTimer = null; // pending setTimeout id
 let repContActive = false;        // in repertoire continuation mode (ungraded)
 let repContMode = 'random';       // 'random' | 'all'
 let repContPendingBranches = [];  // [{fen, opponentMove, depth}] — unsolved branches for 'all' mode
@@ -10035,6 +10037,7 @@ function renderQueue() {
 // ─── Load a position ───
 function loadPosition(globalIdx) {
   if (voiceMode) voiceStop();
+  cancelRepertoireAutoNext();
   // Clean up any synthetic practice item from filter continuation
   if (practiceContItem) {
     const pIdx = filteredMistakes.indexOf(practiceContItem);
@@ -10281,7 +10284,7 @@ function loadPosition(globalIdx) {
           <button class="btn btn-ghost btn-sm" onclick="exitRepertoireDrill()" style="font-size:10px;padding:2px 6px;">✕ Exit</button>
         </div>
         <div>Find the move from your repertoire</div>
-        <div style="margin-top:4px;display:flex;gap:6px;"><button class="btn btn-ghost btn-sm" onclick="startRepertoireFromBeginning()" style="font-size:10px;">⏮ Start from beginning</button><button class="btn btn-ghost btn-sm" onclick="replayRepertoireBeginning()" style="font-size:10px;">▶ Replay beginning</button></div>
+        <div style="margin-top:4px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;"><button class="btn btn-ghost btn-sm" onclick="startRepertoireFromBeginning()" style="font-size:10px;">⏮ Start from beginning</button><button class="btn btn-ghost btn-sm" onclick="replayRepertoireBeginning()" style="font-size:10px;">▶ Replay beginning</button><label style="font-size:11px;color:var(--text-secondary);display:flex;align-items:center;gap:5px;cursor:pointer;margin-left:auto;"><input type="checkbox" ${repertoireAutoNext ? 'checked' : ''} onchange="repertoireAutoNext = this.checked" style="accent-color:var(--accent);">Auto Next</label></div>
       </div>
     `;
     stopPreAnalysis();
@@ -17245,6 +17248,28 @@ function exitRepertoireDrill() {
   if (repertoireMode) renderRepertoirePanel();
 }
 
+function scheduleRepertoireAutoNext(currentIdx) {
+  // IMP-002: auto-advance to next drill item after short delay if toggle is on.
+  // Guards ensure we abort if the user manually advances, exits, or dives into
+  // a continuation / engine line / note-edit during the delay.
+  if (!repertoireAutoNext) return;
+  if (currentIdx >= filteredMistakes.length - 1) return; // last item — don't auto-finish drill
+  if (repertoireAutoNextTimer) { clearTimeout(repertoireAutoNextTimer); repertoireAutoNextTimer = null; }
+  repertoireAutoNextTimer = setTimeout(() => {
+    repertoireAutoNextTimer = null;
+    if (!repertoireAutoNext) return;
+    if (!repertoireDrillMode) return;
+    if (currentMistakeIdx !== currentIdx) return;       // user already advanced manually
+    if (repContActive || browsingLine || engineLine) return; // user dove deeper
+    if (noteEditMode) return;                            // user is editing a note
+    loadPosition(currentIdx + 1);
+  }, 750);
+}
+
+function cancelRepertoireAutoNext() {
+  if (repertoireAutoNextTimer) { clearTimeout(repertoireAutoNextTimer); repertoireAutoNextTimer = null; }
+}
+
 function evaluateRepertoireMove(source, target, move) {
   const m = filteredMistakes[currentMistakeIdx];
   if (!m || m.type !== 'repertoire') return;
@@ -17300,9 +17325,10 @@ function evaluateRepertoireMove(source, target, move) {
     showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
       `♟ Correct! <code>${escHtml(move.san)}</code>`,
       `That's your repertoire move.${srsInfo}${contBtns}${chessableBtn(m)}${lichessStudyBtn(m)}${nextBtn}`);
-    if (repNote) openNotePanel();
+    if (repNote && !repertoireAutoNext) openNotePanel();
     updateSessionProgress();
     renderQueue();
+    scheduleRepertoireAutoNext(currentMistakeIdx);
   } else {
     // Wrong move
     if (currentAttempts >= 3) {
@@ -17361,9 +17387,10 @@ function revealRepertoireAnswer(m, expected, isLastItem) {
   showColorFeedback('var(--red)', 'rgba(239,83,80,0.08)',
     `♟ The repertoire move is <code>${escHtml(expected.san)}</code>`,
     `You played <code>${escHtml(m.playedMove.san)}</code>.${srsInfo}${contBtns}${chessableBtn(m)}${lichessStudyBtn(m)}${nextBtn}`);
-  if (repNote) openNotePanel();
+  if (repNote && !repertoireAutoNext) openNotePanel();
   updateSessionProgress();
   renderQueue();
+  scheduleRepertoireAutoNext(currentMistakeIdx);
 }
 
 function repertoireRevealAnswer() {
