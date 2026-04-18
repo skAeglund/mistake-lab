@@ -1456,7 +1456,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Widen desktop left panel to 340px so typical opening names fit on one line</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Clear feedback/arrows/overlays on actual tab transitions</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -9482,6 +9482,14 @@ function renderGameList() {
 // ─── Review mode ───
 function activatePanelTab(tab) {
   if (analysisMode) exitAnalysisMode();
+  // Detect an actual tab transition so we can wipe any stale feedback/overlays
+  // from the previous context (e.g. a completed "Checkmate!" feedback leaking
+  // in from continuation practice after switching to Repertoire). No-op when
+  // the user re-taps the already-active tab.
+  const currentTab = reviewMode ? 'review' : (repertoireMode ? 'repertoire' : 'games');
+  if (currentTab !== tab) {
+    clearFeedbackAndOverlays();
+  }
   if (tab === 'games') {
     if (reviewMode) toggleReviewMode();
     if (repertoireMode) toggleRepertoireMode();
@@ -15279,6 +15287,44 @@ function clearHighlights() {
     el.style.removeProperty('--hl-color');
   });
   clearSelection();
+}
+
+// Clear the right-side feedback panels (feedback box, continuation line, pos info
+// card) AND any lingering board overlays (arrows, badges, highlights, premove,
+// user annotations). Called from activatePanelTab when the user changes tab/mode
+// so stale content from the previous context (e.g. a "Checkmate!" feedback box
+// from continuation practice) doesn't leak into the new one.
+function clearFeedbackAndOverlays() {
+  // Right-side panels
+  const fb = document.getElementById('feedbackContainer');
+  if (fb) fb.innerHTML = '';
+  const contLineDiv = document.getElementById('contLineContainer');
+  if (contLineDiv) contLineDiv.innerHTML = '';
+  const infoCard = document.getElementById('posInfoCard');
+  if (infoCard) infoCard.style.display = 'none';
+  const infoContent = document.getElementById('posInfoContent');
+  if (infoContent) infoContent.innerHTML = '';
+
+  // Arrow / badge overlay state
+  bestMoveArrow = null;
+  analysisArrow = null;
+  hintArrow = null;
+  moveClassBadge = null;
+  ghostArrow = null;
+  ghostCircle = null;
+  ghostCircleWasColor = null;
+  analysisPvArrows = [];
+  if (activeArrows && typeof activeArrows.clear === 'function') activeArrows.clear();
+  if (activeCircles && typeof activeCircles.clear === 'function') activeCircles.clear();
+
+  // Board square classes
+  clearLastMoveHighlight();
+  clearHighlights();
+  clearHintHighlights();
+  clearPremove();
+
+  // Flush SVG overlay
+  if (typeof renderArrows === 'function') renderArrows();
 }
 
 function clearPremove() {
