@@ -1456,7 +1456,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">BUG-002: Hide stale "Stop &amp; Review" button from posInfoCard when continuation game ends</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">IMP-003: Hide stale "Current Position" card when Game Review opens from continuation practice</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -13953,6 +13953,14 @@ function updateReviewGraphCursor(moveIdx) {
 }
 
 async function startContLineReview() {
+  // IMP-003: the game has ended — the "Current Position" card (Continuation
+  // Practice / Your turn / Stop & Review / etc.) is stale and redundant next to
+  // the Game Review summary. Hide it here; subsequent navigation (retryPosition,
+  // loadPosition, clearBoard, enterOpeningFilter) will re-show or re-hide it
+  // as appropriate for the new context.
+  const posCardEl = document.getElementById('posInfoCard');
+  if (posCardEl) posCardEl.style.display = 'none';
+
   // Wait for background eval queue to finish
   if (silentEvalProcessing || silentEvalMainProcessing || silentEvalQueue.length > 0) {
     window._skipEvalQueueWait = false;
