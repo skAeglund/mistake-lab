@@ -1479,7 +1479,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hide empty-board overlay by default</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Actually dismiss mobile feedback popup on body button tap</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -15663,6 +15663,17 @@ function _cleanFeedbackHtml(html) {
   tmp.querySelectorAll('[id^="rev_"]').forEach(el => el.remove());
   // Remove attempt dots (shown in feedbackContainer)
   tmp.querySelectorAll('.attempts-indicator').forEach(el => el.remove());
+  // Ensure any button tap dismisses the popup. Action-row buttons in
+  // #mobileFeedbackActions already prepend closeMobileFeedback() in their
+  // own onclick; here we do the same for body-content buttons like
+  // "Review Game" / "Play again" / "Back to openings" so tapping them
+  // doesn't leave the popup covering the board.
+  tmp.querySelectorAll('button').forEach(btn => {
+    const existing = btn.getAttribute('onclick') || '';
+    if (!existing.includes('closeMobileFeedback(')) {
+      btn.setAttribute('onclick', `closeMobileFeedback();${existing}`);
+    }
+  });
   return tmp.innerHTML;
 }
 
@@ -15716,15 +15727,6 @@ function closeMobileFeedback() {
   _mobilePopupQueue = [];
   clearTimeout(_mobilePopupTimer);
 }
-
-// Close the popup when any button inside the feedback body is tapped.
-// (Action-row buttons in #mobileFeedbackActions already call closeMobileFeedback()
-// explicitly in their onclick, so this delegation only covers body-content buttons
-// like "Review Game", "Play again", "Back to openings".) Bubble-phase ordering
-// guarantees the button's own onclick runs before we dismiss the popup.
-document.getElementById('mobileFeedbackContent').addEventListener('click', (e) => {
-  if (e.target.closest('button')) closeMobileFeedback();
-});
 
 // ─── Repertoire Check ───
 
