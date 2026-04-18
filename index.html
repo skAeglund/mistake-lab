@@ -1456,7 +1456,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">IMP-003: Hide stale "Current Position" card when Game Review opens from continuation practice</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">BUG-003: Suppress stale best-move arrow during refutation analysis in Game Review</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -14394,6 +14394,15 @@ async function showReviewRefutation(moveIdx, fromRetry = false) {
   // Normal case: navigate contLine to the mistake position. Retry case: leave
   // the board at the retry post-FEN (already displayed).
   if (!retryValid) goToContLineMove(moveIdx);
+
+  // BUG-003: clear the "best move" arrow (set by goToContLineMove for the key
+  // move) and any stale move-class badge before the analysis await. Otherwise
+  // the user sees a stale green arrow on the board while "Analyzing refutation…"
+  // spins — confusing in a refutation context where the user's own "best move"
+  // hint is irrelevant.
+  bestMoveArrow = null;
+  moveClassBadge = null;
+  renderArrows();
 
   // Analyze: opponent's best response to the bad move
   const result = await sfAnalyze(postFen, 20, 1);
