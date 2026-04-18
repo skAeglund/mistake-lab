@@ -1454,7 +1454,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Remove mobile feedback popup, use inline feedback everywhere</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix RepertoireCheck Finish drill button duplicating summary on repeat clicks</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -17206,9 +17206,9 @@ function showRepertoireDrillSummary() {
   summaryHtml += `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="exitRepertoireDrill()">Back to Repertoire</button>`;
   summaryHtml += `</div></div>`;
 
-  // Append summary to existing feedback
+  // Replace feedback with summary (removes "Finish drill" button, prevents duplicate summaries on repeat clicks)
   const fb = document.getElementById('feedbackContainer');
-  if (fb) fb.innerHTML += summaryHtml;
+  if (fb) fb.innerHTML = summaryHtml;
 }
 
 function retryFailedRepertoirePositions() {
