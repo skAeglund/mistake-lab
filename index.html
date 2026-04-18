@@ -1456,7 +1456,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Raise compact-layout breakpoint to 1280px so the wider left panel doesn't shrink the board at mid-widths</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Show line: auto-animate the next 2 moves of the line instead of a delayed highlight flash</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -14188,10 +14188,8 @@ async function showReviewBestLine(moveIdx) {
     gameEngine.load(preFen);
     gameEngine.move({ from: bestFrom, to: bestTo, promotion: bestPromo });
     boardObj.position(gameEngine.fen(), true);
+    showLastMoveHighlightDeferred(bestFrom, bestTo);
   }
-  // Always (re-)apply the stable last-move highlight on the best-move squares,
-  // so the skip path matches the non-skip path visually.
-  showLastMoveHighlightDeferred(bestFrom, bestTo);
   bestMoveArrow = null;
   moveClassBadge = null;
   renderArrows();
@@ -14232,11 +14230,53 @@ async function showReviewBestLine(moveIdx) {
       </div>
     </div>
   `;
+
+  // Auto-animate the next moves of the line so the user gets a quick visual
+  // preview instead of a single late highlight flash. When the user already had
+  // the best move on the board (alreadyAtPostBest) we skip ply 1 since it's
+  // already there; otherwise the chessboard.js animation from the preceding
+  // boardObj.position(...) call above handles ply 1 for us.
+  animateLinePreview(moveIdx, 1, 2);
+}
+
+// Auto-steps the review best-line from startIdx through endIdx, animating each
+// board transition. Respects cancellation: any user nav (← →, clicking a move
+// in the list, or Back-to-review) flips `data.animating` to stop the loop, and
+// a replacement _reviewBestLine (new "Show line" / "Show refutation" press)
+// also aborts via the supersession check.
+async function animateLinePreview(moveIdx, startIdx, endIdx) {
+  const data = window._reviewBestLine;
+  if (!data || data.moveIdx !== moveIdx) return;
+  data.animating = true;
+
+  for (let i = startIdx; i <= endIdx && i < data.lineMoves.length; i++) {
+    // Let chessboard.js finish its settle before we start the next move.
+    // First iteration also gives a brief pause so the user sees the starting
+    // position before the sequence begins.
+    await new Promise(r => setTimeout(r, 400));
+
+    if (window._reviewBestLine !== data || !data.animating) return;
+
+    const lm = data.lineMoves[i];
+    gameEngine.load(lm.fen);
+    boardObj.position(lm.fen, true); // animated
+    if (lm.uci) {
+      showLastMoveHighlight(lm.uci.substring(0, 2), lm.uci.substring(2, 4));
+    }
+    data.currentIdx = i;
+
+    // Update active state in the move list
+    const moves = document.querySelectorAll('#feedbackContainer .engine-line-moves .move');
+    moves.forEach((el, idx) => el.classList.toggle('active', idx === i));
+  }
+
+  if (window._reviewBestLine === data) data.animating = false;
 }
 
 function goToReviewLine(moveIdx, lineIdx) {
   const data = window._reviewBestLine;
   if (!data || data.moveIdx !== moveIdx || !data.lineMoves[lineIdx]) return;
+  data.animating = false; // cancel auto-preview if user clicked a move
   data.currentIdx = lineIdx;
   const lm = data.lineMoves[lineIdx];
   gameEngine.load(lm.fen);
@@ -14257,6 +14297,7 @@ function goToReviewLine(moveIdx, lineIdx) {
 function stepReviewBestLine(delta) {
   const data = window._reviewBestLine;
   if (!data) return;
+  data.animating = false; // cancel auto-preview if user steps with ← →
   const currentIdx = data.currentIdx ?? 0;
   const newIdx = currentIdx + delta;
   if (newIdx < -1 || newIdx >= data.lineMoves.length) return;
@@ -15316,6 +15357,9 @@ function clearFeedbackAndOverlays() {
   analysisPvArrows = [];
   if (activeArrows && typeof activeArrows.clear === 'function') activeArrows.clear();
   if (activeCircles && typeof activeCircles.clear === 'function') activeCircles.clear();
+  // Cancel any in-flight best-line preview animation (supersession check inside
+  // the loop aborts on null).
+  window._reviewBestLine = null;
 
   // Board square classes
   clearLastMoveHighlight();
