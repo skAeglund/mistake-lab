@@ -1456,7 +1456,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">BUG-003: Suppress stale best-move arrow during refutation analysis in Game Review</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">BUG-004: Backfill opponent move afterCp so eval bar updates on opponent moves in Game Review</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3862,6 +3862,11 @@ function applySilentEvalToMove(item, preResult, cpLoss) {
       prevMv.classification = classifyWpDrop(Math.max(0, oppWpDrop), oppWpDrop < 0.5);
       prevMv.wpDrop = Math.round(Math.max(0, oppWpDrop) * 10) / 10;
       prevMv.cpLoss = Math.round(Math.max(0, oppCpLoss));
+      // BUG-004: also backfill the opponent move's post-move eval so the eval
+      // bar updates when the user navigates to an opponent move in game review.
+      // bestCp is the eval at the user's pre-move position (= after the opponent
+      // moved), from the user's perspective — same convention as mv.afterCp.
+      prevMv.afterCp = bestCp;
     }
   }
 
