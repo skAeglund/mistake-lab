@@ -1454,7 +1454,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Show line: skip pre-move reset when board is already on the post-best-move position</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Exclude repertoire moves from mistakes (extraction filter + Game Review keyMoves)</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -7776,32 +7776,38 @@ function extractMistakesForGame(game) {
     const wpDrop = wpBefore - wpAfter;
 
     if (wpDrop > MISTAKES_CACHE_PARAMS.wpDropThreshold) {
-      // Clock data: game.clocks[i] = seconds remaining after move i
-      const hasClocks = Array.isArray(game.clocks) && game.clocks.length > i;
-      const clockRemaining = hasClocks ? game.clocks[i] : null;
-      const moveTime = hasClocks && i >= 2 && game.clocks[i - 2] != null
-        ? Math.max(0, Math.round((game.clocks[i - 2] - game.clocks[i]) * 10) / 10)
-        : null;
-      const timeTrouble = clockRemaining != null && clockRemaining < 45
-        && moveTime != null && moveTime < 10;
+      // Skip if the user deliberately played a move from their repertoire here.
+      // (Harmless no-op when repertoireTrie hasn't loaded yet — the post-filter in
+      // extractAllMistakes catches these once the trie is populated.)
+      const moveUci = moveResult.from + moveResult.to + (moveResult.promotion || '');
+      if (!isRepertoireMove(fenBefore, moveResult.san, moveUci)) {
+        // Clock data: game.clocks[i] = seconds remaining after move i
+        const hasClocks = Array.isArray(game.clocks) && game.clocks.length > i;
+        const clockRemaining = hasClocks ? game.clocks[i] : null;
+        const moveTime = hasClocks && i >= 2 && game.clocks[i - 2] != null
+          ? Math.max(0, Math.round((game.clocks[i - 2] - game.clocks[i]) * 10) / 10)
+          : null;
+        const timeTrouble = clockRemaining != null && clockRemaining < 45
+          && moveTime != null && moveTime < 10;
 
-      mistakes.push({
-        type: 'mistake',
-        gameId: game.id,
-        movePly: ply,
-        fenBefore: fenBefore,
-        sanPlayed: san,
-        cpLoss: Math.round(cpLoss),
-        cpBefore: Math.round(cpBefore),
-        cpAfter: Math.round(cpAfter),
-        wpDrop: Math.round(wpDrop * 10) / 10,
-        playerColor: playerColor,
-        moveNumber: Math.ceil(ply / 2),
-        bestEval: evalBefore,
-        clockRemaining,
-        moveTime,
-        timeTrouble,
-      });
+        mistakes.push({
+          type: 'mistake',
+          gameId: game.id,
+          movePly: ply,
+          fenBefore: fenBefore,
+          sanPlayed: san,
+          cpLoss: Math.round(cpLoss),
+          cpBefore: Math.round(cpBefore),
+          cpAfter: Math.round(cpAfter),
+          wpDrop: Math.round(wpDrop * 10) / 10,
+          playerColor: playerColor,
+          moveNumber: Math.ceil(ply / 2),
+          bestEval: evalBefore,
+          clockRemaining,
+          moveTime,
+          timeTrouble,
+        });
+      }
     }
 
     // Advantage capitalization tracking (only after opening, ply > 15)
@@ -8198,6 +8204,17 @@ function extractAllMistakes() {
         },
       });
     }
+  }
+
+  // Drop mistakes where the user's played move matches their repertoire
+  // (they deliberately chose to play it — not a surprise to drill).
+  // Runs after practice-mistake merging so user-saved mistakes are also checked.
+  // No-op when the repertoire trie hasn't loaded yet; the .then() after
+  // loadRepertoireTrie re-runs extractAllMistakes to filter them in that case.
+  if (repertoireTrie && repertoireTrie.size > 0) {
+    allMistakes = allMistakes.filter(m =>
+      m.type !== 'mistake' || !isRepertoireMove(m.fenBefore, m.sanPlayed)
+    );
   }
 
   // Sort by severity (biggest win% drop / tactic swing first)
@@ -9264,6 +9281,14 @@ function showMainApp() {
   loadRepertoireTrie().then(() => {
     detectRepertoireDeviations();
     updateRepertoireBadge();
+    // Re-extract so repertoire moves are filtered out of the mistake list.
+    // Guarded on currentMistakeIdx < 0 (same pattern as the cache-first sync path)
+    // so we don't re-shuffle the queue while the user is mid-drill.
+    if (currentMistakeIdx < 0 && repertoireTrie && repertoireTrie.size > 0 && allMistakes.length > 0) {
+      extractAllMistakes();
+      applyFilters();
+      updateSessionProgress();
+    }
   });
 
   // Check for an interrupted continuation session (Android tab discard / screen timeout)
@@ -13736,10 +13761,14 @@ function buildContLineReviewData() {
   // Accuracy = % of user moves that are good or better
   const goodOrBetter = (tally.great || 0) + (tally.best || 0) + (tally.excellent || 0) + (tally.good || 0);
   const accuracy = userMoves.length > 0 ? Math.round((goodOrBetter / userMoves.length) * 100) : 100;
-  // Key moves = user mistakes/blunders (wpDrop > 5)
+  // Key moves = user mistakes/blunders (wpDrop > 5), excluding repertoire moves
+  // (user deliberately played those per their study — not surprises to revisit).
+  // Classification tally / accuracy / eval graph still reflect the raw evaluation.
   const keyMoves = [];
   for (let i = 0; i < moves.length; i++) {
     if (moves[i].isUser && moves[i].classification && moves[i].wpDrop > 5) {
+      const preFen = i === 0 ? contLine.baseFen : moves[i - 1].fen;
+      if (isRepertoireMove(preFen, moves[i].san, moves[i].uci)) continue;
       keyMoves.push(i);
     }
   }
@@ -16128,6 +16157,28 @@ function trieMatchesMove(posKey, san, uci) {
   const arr = repertoireTrie?.get(posKey);
   if (!arr) return false;
   return arr.some(e => e.uci === uci || e.san === san);
+}
+
+// True when the move played at fenBefore matches the user's repertoire for that
+// position. `uci` is optional — if absent, it's derived from `san` via chess.js.
+// Safe to call before the trie is loaded (returns false).
+function isRepertoireMove(fenBefore, san, uci) {
+  if (!repertoireTrie || !repertoireTrie.size || !fenBefore || !san) return false;
+  const posKey = fenPositionKey(fenBefore);
+  if (!repertoireTrie.has(posKey)) return false;
+  // Canonicalize san/uci via chess.js when uci is missing so that disambiguation
+  // differences (e.g. "Nf3" vs "Ngf3") between game PGN and the trie's stored san
+  // don't cause false negatives.
+  if (!uci) {
+    try {
+      const chess = new Chess(fenBefore);
+      const r = chess.move(san, { sloppy: true });
+      if (!r) return false;
+      san = r.san;
+      uci = r.from + r.to + (r.promotion || '');
+    } catch { return false; }
+  }
+  return trieMatchesMove(posKey, san, uci);
 }
 
 // ── Deviation & Gap Detection ──
