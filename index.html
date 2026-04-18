@@ -1109,8 +1109,10 @@
     /* Hide posInfoCard on mobile when continuation info is merged into line header */
     body.cont-info-merged #posInfoCard { display: none !important; }
 
-    /* Show inline Stop & Review button when posInfoCard is hidden */
-    body.cont-info-merged .cont-stop-mobile { display: inline-block; }
+    /* Show inline Stop & Review button when posInfoCard is hidden.
+       Explicit order:3 places it after .engine-line-moves (order:2) so the
+       continuation line appears above the button rather than below it. */
+    body.cont-info-merged .cont-stop-mobile { display: inline-block; order: 3; margin-top: 10px; }
 
     /* Engine line: nav buttons above the move list on mobile */
     .engine-line {
@@ -1454,7 +1456,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Exclude repertoire moves from mistakes (extraction filter + Game Review keyMoves)</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Mobile: place Stop & Review button below the continuation line with breathing room</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -12739,7 +12741,7 @@ function renderContLine() {
   const showContStop = continuationMode && !contLineBrowsing && !contLineReviewMode &&
     (practiceContItem || (silentContinuation && !advantageMode && userMoves >= SILENT_REVIEW_MIN_MOVES));
   const contStopHtml = showContStop
-    ? '<button class="btn btn-ghost btn-sm cont-stop-mobile" style="font-size:11px;border-color:var(--accent);color:var(--accent);margin-top:4px;" onclick="stopAndReviewContinuation()">📋 Stop & Review</button>'
+    ? '<button class="btn btn-ghost btn-sm cont-stop-mobile" style="font-size:11px;border-color:var(--accent);color:var(--accent);" onclick="stopAndReviewContinuation()">📋 Stop & Review</button>'
     : '';
 
   div.innerHTML = `
