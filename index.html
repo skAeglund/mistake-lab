@@ -54,10 +54,6 @@
     pointer-events: none;
     z-index: 100;
   }
-  /* IMP-002 followup: fade pieces during RepertoireCheck auto-next transition.
-     Duration is driven by --piece-fade-duration (set via JS per phase). */
-  #board img { transition: opacity var(--piece-fade-duration, 0.25s) ease-in-out; }
-  #board.pieces-invisible img { opacity: 0; }
   /* Header */
   .header {
     display: flex;
@@ -1473,7 +1469,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">IMP-001 followup fix: Reparent note panel out of .board-container on portrait mobile (replaces flawed flex-wrap approach); defensive fade-class clear on orientation change</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">IMP-002 followup revert: Drop piece-fade transition on auto-next; use instant swap (skipAnimation=true on loadPosition)</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2056,9 +2052,7 @@ let repertoireDrillWrong = 0;    // positions that needed >1 attempt or reveal
 let repertoireDrillFailed = [];  // positionKeys of failed items for retry loop
 let repertoireDrillStartTime = 0; // timestamp when current position was loaded
 let repertoireAutoNext = false;   // IMP-002: auto-advance drill to next item (not persisted between sessions)
-let repertoireAutoNextTimer = null; // pending setTimeout id (Phase 1: wait before fade-out)
-let repertoireAutoNextPhase2Timer = null; // pending setTimeout id (Phase 2: after fade-out, swap position)
-let _autoNextFadeInProgress = false; // true during Phase 2 loadPosition so cancelRepertoireAutoNext preserves fade state
+let repertoireAutoNextTimer = null; // pending setTimeout id
 let repContActive = false;        // in repertoire continuation mode (ungraded)
 let repContMode = 'random';       // 'random' | 'all'
 let repContPendingBranches = [];  // [{fen, opponentMove, depth}] — unsolved branches for 'all' mode
@@ -9679,15 +9673,6 @@ function initBoard() {
     // if it's currently open (panel may need to move between inside/outside
     // board-container based on viewport).
     if (notePanelOpen) reparentNotePanelForViewport();
-    // IMP-002 followup safety net: if an auto-next fade happened to leave the
-    // #board.pieces-invisible class stuck (e.g. a requestAnimationFrame that
-    // never fired due to visibility change during rotation), clear it so the
-    // board doesn't render blank after rotating.
-    const bEl = document.getElementById('board');
-    if (bEl && bEl.classList.contains('pieces-invisible') && !_autoNextFadeInProgress) {
-      bEl.style.setProperty('--piece-fade-duration', '0s');
-      bEl.classList.remove('pieces-invisible');
-    }
   });
   // Strip chessboard.js highlight classes the instant they're added (during drag)
   new MutationObserver(muts => {
@@ -17339,17 +17324,11 @@ function exitRepertoireDrill() {
 
 function scheduleRepertoireAutoNext(currentIdx) {
   // IMP-002: auto-advance to next drill item after short delay if toggle is on.
-  // Two-phase flow for smooth fade transition (IMP-002 followup):
-  //   Phase 1 (t=0 → t=500ms):   wait, then start 0.25s piece fade-out
-  //   Phase 2 (t=500 → t=750ms): fade-out completes, load new position while
-  //                              pieces invisible, then fade in over 0.15s
   // Guards ensure we abort if the user manually advances, exits, or dives into
   // a continuation / engine line / note-edit during the delay.
   if (!repertoireAutoNext) return;
   if (currentIdx >= filteredMistakes.length - 1) return; // last item — don't auto-finish drill
   if (repertoireAutoNextTimer) { clearTimeout(repertoireAutoNextTimer); repertoireAutoNextTimer = null; }
-  if (repertoireAutoNextPhase2Timer) { clearTimeout(repertoireAutoNextPhase2Timer); repertoireAutoNextPhase2Timer = null; }
-
   repertoireAutoNextTimer = setTimeout(() => {
     repertoireAutoNextTimer = null;
     if (!repertoireAutoNext) return;
@@ -17357,62 +17336,13 @@ function scheduleRepertoireAutoNext(currentIdx) {
     if (currentMistakeIdx !== currentIdx) return;       // user already advanced manually
     if (repContActive || browsingLine || engineLine) return; // user dove deeper
     if (noteEditMode) return;                            // user is editing a note
-
-    // Phase 1 → start 0.25s fade-out
-    const boardEl = document.getElementById('board');
-    if (boardEl) {
-      boardEl.style.setProperty('--piece-fade-duration', '0.25s');
-      boardEl.classList.add('pieces-invisible');
-    }
-
-    repertoireAutoNextPhase2Timer = setTimeout(() => {
-      repertoireAutoNextPhase2Timer = null;
-
-      // Re-check guards at Phase 2. If the user invalidated the flow during
-      // the 250ms fade-out, abort: restore pieces instantly (no fade) and bail.
-      if (!repertoireAutoNext || !repertoireDrillMode || currentMistakeIdx !== currentIdx
-          || repContActive || browsingLine || engineLine || noteEditMode) {
-        if (boardEl) {
-          boardEl.style.setProperty('--piece-fade-duration', '0s');
-          boardEl.classList.remove('pieces-invisible');
-        }
-        return;
-      }
-
-      // Phase 2 → swap position (new pieces inherit invisibility from the
-      // class still on #board), then fade them in over 0.15s on the next frame.
-      if (boardEl) boardEl.style.setProperty('--piece-fade-duration', '0.15s');
-
-      // loadPosition calls cancelRepertoireAutoNext at its top, which would
-      // strip the fade class prematurely. Gate that cleanup with a flag.
-      _autoNextFadeInProgress = true;
-      try {
-        loadPosition(currentIdx + 1, true); // skipAnimation — teleport, fade handles the motion
-      } finally {
-        _autoNextFadeInProgress = false;
-      }
-
-      requestAnimationFrame(() => {
-        if (boardEl) boardEl.classList.remove('pieces-invisible');
-      });
-    }, 250);
-  }, 500);
+    // Instant swap — no chessboard.js piece-slide animation (skipAnimation=true).
+    loadPosition(currentIdx + 1, true);
+  }, 750);
 }
 
 function cancelRepertoireAutoNext() {
   if (repertoireAutoNextTimer) { clearTimeout(repertoireAutoNextTimer); repertoireAutoNextTimer = null; }
-  if (repertoireAutoNextPhase2Timer) { clearTimeout(repertoireAutoNextPhase2Timer); repertoireAutoNextPhase2Timer = null; }
-  // Only reset fade state on external cancellation; Phase 2's own loadPosition
-  // call flips _autoNextFadeInProgress so we preserve the invisible state until
-  // chessboard.js has swapped in the new pieces.
-  if (!_autoNextFadeInProgress) {
-    const boardEl = document.getElementById('board');
-    if (boardEl && boardEl.classList.contains('pieces-invisible')) {
-      // Instant restore — user interrupted, don't continue the fade
-      boardEl.style.setProperty('--piece-fade-duration', '0s');
-      boardEl.classList.remove('pieces-invisible');
-    }
-  }
 }
 
 function evaluateRepertoireMove(source, target, move) {
