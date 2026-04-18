@@ -1193,18 +1193,16 @@
     }
     body.mobile-browsing .drawer-close-btn { display: none !important; }
   }
-  /* Note panel: on portrait mobile, render inline directly under the board
-     instead of as a floating overlay. Landscape mobile + desktop keep the
-     floater behavior from the base rule and the mobile rule above. */
+  /* Note panel on portrait mobile: JS reparents it out of .board-container and
+     makes it a sibling between the board and the action-button row. These
+     rules apply to the panel in that out-of-flex-container state. */
   @media (max-width: 768px) and (orientation: portrait) {
-    .board-container { flex-wrap: wrap; }
     .note-panel {
       position: static;
       left: auto; right: auto; top: auto; bottom: auto;
       transform: none;
       width: auto;
-      flex-basis: 100%;
-      margin-top: 8px;
+      margin: 0;
       box-shadow: none;
     }
   }
@@ -1475,7 +1473,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">IMP-002 followup: Piece fade transition on auto-next (0.25s fade-out → swap → 0.15s fade-in)</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">IMP-001 followup fix: Reparent note panel out of .board-container on portrait mobile (replaces flawed flex-wrap approach); defensive fade-class clear on orientation change</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -9674,7 +9672,23 @@ function initBoard() {
     onDrop: onDrop,
     onSnapEnd: onSnapEnd,
   });
-  window.addEventListener('resize', () => { boardObj.resize(); renderArrows(); });
+  window.addEventListener('resize', () => {
+    boardObj.resize();
+    renderArrows();
+    // IMP-001 followup: re-evaluate note panel placement on orientation change
+    // if it's currently open (panel may need to move between inside/outside
+    // board-container based on viewport).
+    if (notePanelOpen) reparentNotePanelForViewport();
+    // IMP-002 followup safety net: if an auto-next fade happened to leave the
+    // #board.pieces-invisible class stuck (e.g. a requestAnimationFrame that
+    // never fired due to visibility change during rotation), clear it so the
+    // board doesn't render blank after rotating.
+    const bEl = document.getElementById('board');
+    if (bEl && bEl.classList.contains('pieces-invisible') && !_autoNextFadeInProgress) {
+      bEl.style.setProperty('--piece-fade-duration', '0s');
+      bEl.classList.remove('pieces-invisible');
+    }
+  });
   // Strip chessboard.js highlight classes the instant they're added (during drag)
   new MutationObserver(muts => {
     for (const m of muts) {
@@ -18479,8 +18493,37 @@ function openNotePanel() {
   }
 }
 
+function reparentNotePanelForViewport() {
+  // IMP-001 followup: on portrait mobile, move the note panel out of
+  // .board-container so it flows inline below the board instead of clashing
+  // with the board-container's flex layout. Desktop + landscape keep the
+  // original "inside board-container, absolutely positioned beside the board"
+  // behavior. Call this before showing the panel and on viewport changes.
+  const panel = document.getElementById('notePanel');
+  if (!panel) return;
+  const boardContainer = document.getElementById('boardContainer');
+  if (!boardContainer) return;
+  const panelCenter = boardContainer.parentElement;
+  if (!panelCenter) return;
+
+  const isPortraitMobile = window.matchMedia('(max-width: 768px) and (orientation: portrait)').matches;
+
+  if (isPortraitMobile) {
+    // Move to sibling position directly after board-container
+    if (panel.parentElement !== panelCenter || panel.previousElementSibling !== boardContainer) {
+      panelCenter.insertBefore(panel, boardContainer.nextSibling);
+    }
+  } else {
+    // Move back inside board-container (original desktop positioning works)
+    if (panel.parentElement !== boardContainer) {
+      boardContainer.appendChild(panel);
+    }
+  }
+}
+
 function showNoteViewMode(panel, note) {
   noteEditMode = false;
+  reparentNotePanelForViewport();
   // Show note arrows as overlay
   showNoteArrows(note);
 
@@ -18506,6 +18549,7 @@ function enterNoteEditMode() {
 
   notePanelOpen = true;
   noteEditMode = true;
+  reparentNotePanelForViewport();
 
   // Restore saved arrows/circles as live annotations for editing
   activeArrows.clear();
