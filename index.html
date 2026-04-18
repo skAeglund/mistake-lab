@@ -1469,7 +1469,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">IMP-002 followup revert: Drop piece-fade transition on auto-next; use instant swap (skipAnimation=true on loadPosition)</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Board-animation audit: 8 cross-position snap sites (retryPosition, clearBoard, exitOpeningFilter 3x, filter-reset, set-from-FEN, item-removed-empty) now pass animate=false for instant swap</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -8601,7 +8601,7 @@ function enterOpeningFilter() {
 
   // Initialize board if needed (must happen after mobile layout switch)
   if (!boardObj) { document.getElementById('board').offsetHeight; initBoard(); }
-  boardObj.position(filterChess.fen());
+  boardObj.position(filterChess.fen(), false);
   clearLastMoveHighlight();
 
   // Restore saved filter orientation, or default to white on first entry
@@ -8648,18 +8648,18 @@ function exitOpeningFilter(clearFilter) {
       if (newIdx >= 0) {
         loadPosition(newIdx);
       } else {
-        boardObj.position('start');
+        boardObj.position('start', false);
         currentMistakeIdx = -1;
         document.getElementById('emptyMsg').classList.remove('hidden');
       }
     } else {
-      boardObj.position('start');
+      boardObj.position('start', false);
       currentMistakeIdx = -1;
       document.getElementById('emptyMsg').classList.remove('hidden');
     }
     savedBoardState = null;
   } else {
-    boardObj.position('start');
+    boardObj.position('start', false);
     currentMistakeIdx = -1;
     document.getElementById('emptyMsg').classList.remove('hidden');
   }
@@ -8774,7 +8774,7 @@ function filterReset() {
   filterChess.reset();
   filterMoveHistory = [filterChess.fen()];
   filterMoveIdx = 0;
-  boardObj.position('start');
+  boardObj.position('start', false);
   applyOpeningFilterFromBoard();
 }
 
@@ -8793,7 +8793,7 @@ function setFilterFromFen(fenStr) {
   filterChess = testChess;
   filterMoveHistory = [filterChess.fen()];
   filterMoveIdx = 0;
-  boardObj.position(filterChess.fen());
+  boardObj.position(filterChess.fen(), false);
   applyOpeningFilterFromBoard();
 }
 
@@ -11235,7 +11235,7 @@ function confirmRemoveMistake() {
   // Navigate to next position or show empty state
   if (filteredMistakes.length === 0) {
     currentMistakeIdx = -1;
-    boardObj.position('start');
+    boardObj.position('start', false);
     clearLastMoveHighlight();
     document.getElementById('emptyMsg').classList.remove('hidden');
     document.getElementById('posInfoCard').style.display = 'none';
@@ -15334,7 +15334,7 @@ function retryPosition() {
   // Reset chess engine and board to original position
   gameEngine = new Chess(m.fenBefore);
   currentSolveFen = m.fenBefore;
-  boardObj.position(m.fenBefore, true);
+  boardObj.position(m.fenBefore, false);
 
   // Reset info card (keep analysis status)
   document.getElementById('posInfoContent').innerHTML = `
@@ -15377,7 +15377,7 @@ function renderAttemptDots() {
 }
 
 function clearBoard() {
-  if (boardObj) boardObj.position('start');
+  if (boardObj) boardObj.position('start', false);
   gameEngine = null;
   document.getElementById('posInfoCard').style.display = 'none';
   document.getElementById('feedbackContainer').innerHTML = '';
