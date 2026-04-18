@@ -1456,7 +1456,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">BUG-001: Shorten "Start from beginning" to "From beginning" to prevent Replay button overflow</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">BUG-002: Hide stale "Stop &amp; Review" button from posInfoCard when continuation game ends</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -12660,7 +12660,7 @@ function resumeContSession(session) {
           <div style="color:var(--blue);font-weight:600;">Resumed Game</div>
           <div>Move ${moveCount + 1} · Your turn</div>
           <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
-          <div style="margin-top:6px;">
+          <div id="contStopReviewWrap" style="margin-top:6px;">
             <button class="btn btn-ghost btn-sm" style="font-size:11px;border-color:var(--accent);color:var(--accent);" onclick="stopAndReviewContinuation()">📋 Stop & Review</button>
           </div>
         </div>`;
@@ -13355,7 +13355,7 @@ function launchFilterPractice() {
         <div style="color:var(--blue);font-weight:600;">Practice</div>
         <div>Your turn · Find the best move</div>
         <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
-        <div style="margin-top:6px;">
+        <div id="contStopReviewWrap" style="margin-top:6px;">
           <button class="btn btn-ghost btn-sm" style="font-size:11px;border-color:var(--accent);color:var(--accent);" onclick="stopAndReviewContinuation()">📋 Stop & Review</button>
         </div>
       </div>`;
@@ -13414,6 +13414,14 @@ function practiceEndBtns() {
     '<button class="btn btn-ghost btn-sm" style="font-size:12px;" onclick="retryPosition()">▶ Play again</button>' +
     '<button class="btn btn-ghost btn-sm" style="font-size:12px;" onclick="enterOpeningFilter()">↩ Back to openings</button>' +
     '</div>';
+}
+
+function hideContStopReview() {
+  // BUG-002: remove the stale "Stop & Review" button from posInfoCard when a
+  // continuation game ends (checkmate / draw / turn-mismatch). The game-end
+  // feedback already has a "Review Game" button, so this one is redundant.
+  const el = document.getElementById('contStopReviewWrap');
+  if (el) el.remove();
 }
 
 function ignorePracticeRepertoire() {
@@ -14782,6 +14790,7 @@ async function advanceContinuation(contUci) {
     silentContinuation = false;
     clearContSession();
     hideMaiaControls();
+    hideContStopReview();
     const reviewBtn = wasSilent && contLine && contLine.moves.some(mv => mv.classification)
       ? '<div style="margin-top:8px;"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="startContLineReview()">📋 Review Game</button></div>'
       : '';
@@ -14850,6 +14859,7 @@ async function advanceContinuation(contUci) {
         continuationMode = false;
         silentContinuation = false;
         clearContSession();
+        hideContStopReview();
         hideMaiaControls();
         showFeedback('info', 'Continuation ended', 'Could not determine opponent\'s best response.' + practiceEndBtns());
         document.getElementById('btnRetry').classList.remove('hidden');
@@ -14905,6 +14915,7 @@ async function advanceContinuation(contUci) {
     silentContinuation = false;
     clearContSession();
     hideMaiaControls();
+    hideContStopReview();
     showFeedback('info', 'Continuation ended', 'Could not play opponent\'s move.' + practiceEndBtns());
     document.getElementById('btnRetry').classList.remove('hidden');
     document.getElementById('btnHint').classList.add('hidden');
@@ -14944,6 +14955,7 @@ async function advanceContinuation(contUci) {
     silentContinuation = false;
     clearContSession();
     hideMaiaControls();
+    hideContStopReview();
     const m = filteredMistakes[currentMistakeIdx];
     const reviewBtn2 = wasSilent2 && contLine && contLine.moves.some(mv => mv.classification)
       ? '<div style="margin-top:8px;"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="startContLineReview()">📋 Review Game</button></div>'
@@ -14974,6 +14986,7 @@ async function advanceContinuation(contUci) {
     silentContinuation = false;
     clearContSession();
     hideMaiaControls();
+    hideContStopReview();
     const reviewBtn3 = wasSilent3 && contLine && contLine.moves.some(mv => mv.classification)
       ? '<div style="margin-top:8px;"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="startContLineReview()">📋 Review Game</button></div>'
       : '';
@@ -15004,7 +15017,7 @@ async function advanceContinuation(contUci) {
       ? `<div style="color:#4caf50;font-weight:600;">${ICON_ADVANTAGE} Convert the Advantage</div>`
       : `<div style="color:var(--blue);font-weight:600;">Continuation Practice</div>`;
     const stopReviewBtn = (!isAdv && moveCount >= SILENT_REVIEW_MIN_MOVES)
-      ? `<div style="margin-top:6px;"><button class="btn btn-ghost btn-sm" style="font-size:11px;border-color:var(--accent);color:var(--accent);" onclick="stopAndReviewContinuation()">📋 Stop & Review</button></div>`
+      ? `<div id="contStopReviewWrap" style="margin-top:6px;"><button class="btn btn-ghost btn-sm" style="font-size:11px;border-color:var(--accent);color:var(--accent);" onclick="stopAndReviewContinuation()">📋 Stop & Review</button></div>`
       : '';
     const sourceIcon = lastOpponentSource.startsWith('DB') ? '📊' : lastOpponentSource === 'Maia' ? '🧠' : '';
     const sourceTag = lastOpponentSource && sourceIcon
