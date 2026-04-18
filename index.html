@@ -1456,7 +1456,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">IMP-002: RepertoireCheck drill — Auto Next toggle (auto-advance to next item after 0.75s delay)</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">BUG-001: Shorten "Start from beginning" to "From beginning" to prevent Replay button overflow</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -10284,7 +10284,7 @@ function loadPosition(globalIdx) {
           <button class="btn btn-ghost btn-sm" onclick="exitRepertoireDrill()" style="font-size:10px;padding:2px 6px;">✕ Exit</button>
         </div>
         <div>Find the move from your repertoire</div>
-        <div style="margin-top:4px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;"><button class="btn btn-ghost btn-sm" onclick="startRepertoireFromBeginning()" style="font-size:10px;">⏮ Start from beginning</button><button class="btn btn-ghost btn-sm" onclick="replayRepertoireBeginning()" style="font-size:10px;">▶ Replay beginning</button><label style="font-size:11px;color:var(--text-secondary);display:flex;align-items:center;gap:5px;cursor:pointer;margin-left:auto;"><input type="checkbox" ${repertoireAutoNext ? 'checked' : ''} onchange="repertoireAutoNext = this.checked" style="accent-color:var(--accent);">Auto Next</label></div>
+        <div style="margin-top:4px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;"><button class="btn btn-ghost btn-sm" onclick="startRepertoireFromBeginning()" style="font-size:10px;">⏮ From beginning</button><button class="btn btn-ghost btn-sm" onclick="replayRepertoireBeginning()" style="font-size:10px;">▶ Replay beginning</button><label style="font-size:11px;color:var(--text-secondary);display:flex;align-items:center;gap:5px;cursor:pointer;margin-left:auto;"><input type="checkbox" ${repertoireAutoNext ? 'checked' : ''} onchange="repertoireAutoNext = this.checked" style="accent-color:var(--accent);">Auto Next</label></div>
       </div>
     `;
     stopPreAnalysis();
