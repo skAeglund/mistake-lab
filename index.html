@@ -1456,7 +1456,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add 'Book' classification for repertoire moves in Game Review</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Sharper move-class badges: bigger radius, smoother circle, perfect emoji centering via foreignObject</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -15679,10 +15679,25 @@ function renderArrows() {
           const r = el.getBoundingClientRect();
           const cx = r.left - boardRect.left + r.width * 0.85;
           const cy = r.top - boardRect.top + r.height * 0.15;
-          const radius = sqSize * 0.18;
-          const sym = moveClassBadge.classification === 'good' ? '✓' : (moveClassBadge.classification === 'best' ? '★' : cls.symbol);
-          html += `<circle cx="${cx}" cy="${cy}" r="${radius}" fill="${cls.color}" stroke="rgba(0,0,0,0.3)" stroke-width="0.5" />`;
-          html += `<text x="${cx}" y="${cy}" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="${radius * 1.3}px" font-weight="700" font-family="sans-serif">${sym}</text>`;
+          const radius = sqSize * 0.2;
+          const classif = moveClassBadge.classification;
+          const sym = classif === 'good' ? '✓' : (classif === 'best' ? '★' : cls.symbol);
+          // Book uses an emoji glyph; all others are text glyphs with well-known
+          // ASCII/Unicode metrics. Emoji renders best in a foreignObject (HTML
+          // div) where the browser can use its native color-emoji font and
+          // flex-center it pixel-perfectly; plain text stays as <text> where
+          // dominant-baseline handles it cleanly.
+          const isEmoji = classif === 'book';
+          html += `<circle cx="${cx.toFixed(2)}" cy="${cy.toFixed(2)}" r="${radius.toFixed(2)}" fill="${cls.color}" stroke="rgba(0,0,0,0.35)" stroke-width="1" shape-rendering="geometricPrecision" />`;
+          if (isEmoji) {
+            const size = radius * 2;
+            const fontPx = radius * 1.15;
+            html += `<foreignObject x="${(cx - radius).toFixed(2)}" y="${(cy - radius).toFixed(2)}" width="${size.toFixed(2)}" height="${size.toFixed(2)}" style="overflow:visible;pointer-events:none">`
+                  + `<div xmlns="http://www.w3.org/1999/xhtml" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:${fontPx.toFixed(2)}px;line-height:1;font-family:'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji','Twemoji Mozilla',sans-serif;">${sym}</div>`
+                  + `</foreignObject>`;
+          } else {
+            html += `<text x="${cx.toFixed(2)}" y="${cy.toFixed(2)}" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="${(radius * 1.3).toFixed(2)}px" font-weight="700" font-family="'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" text-rendering="geometricPrecision">${sym}</text>`;
+          }
         }
       }
     }
