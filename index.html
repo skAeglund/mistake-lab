@@ -1456,7 +1456,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Show line: auto-animate the next 2 moves of the line instead of a delayed highlight flash</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add 'Book' classification for repertoire moves in Game Review</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1927,6 +1927,7 @@ const MOVE_CLASSIFICATION = {
   best:       { symbol: '★',  label: 'Best',        color: '#62cf8e' },
   excellent:  { symbol: '!',  label: 'Excellent',    color: '#96c84a' },
   good:       { symbol: '✓',  label: 'Good',         color: '#96bc4b' },
+  book:       { symbol: '📖', label: 'Book',         color: '#8b7dd8' },
   miss:       { symbol: '✕',  label: 'Miss',         color: '#e04040' },
   inaccuracy: { symbol: '?!', label: 'Inaccuracy',   color: '#e8a62d' },
   mistake:    { symbol: '?',  label: 'Mistake',      color: '#e07a3a' },
@@ -3824,9 +3825,14 @@ function applySilentEvalToMove(item, preResult, cpLoss) {
   const isExactBest = isLiteralBest || wpDrop < 0.5;
   const baseClass = classifyWpDrop(wpDrop, isExactBest);
   const pv2Cp = preResult.pvs[1]?.cp ?? null;
-  const classification = classifyWithContext(baseClass, bestCp, pv2Cp, wpDrop);
+  let classification = classifyWithContext(baseClass, bestCp, pv2Cp, wpDrop);
 
   const mv = contLine.moves[item.moveIdx];
+  // Book override (same rule as the live evaluation path): deliberate prep
+  // moves get a 'book' classification regardless of engine eval.
+  if (isRepertoireMove(item.preFen, mv.san, mv.uci)) {
+    classification = 'book';
+  }
   mv.classification = classification;
   mv.wpDrop = Math.round(wpDrop * 10) / 10;
   mv.cpLoss = Math.round(cpLoss);
@@ -11561,7 +11567,18 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
     const baseClass = classifyWpDrop(wpDrop, isExactBest);
     // Get PV2 cp for context-aware classification (Great/Miss detection)
     const pv2Cp = preAnalysis?.pvs?.[1]?.cp ?? null;
-    const classification = classifyWithContext(baseClass, bestCp, pv2Cp, wpDrop);
+    let classification = classifyWithContext(baseClass, bestCp, pv2Cp, wpDrop);
+
+    // Book override: if this move matches the user's repertoire, label it as
+    // "Book" regardless of engine eval (deliberate prep). Pre-move FEN is the
+    // last entry in contLine (the move we're about to add hasn't been pushed
+    // yet — see addContLineMove at end of this function) or the baseFen.
+    const fenBefore = contLine.moves.length > 0
+      ? contLine.moves[contLine.moves.length - 1].fen
+      : contLine.baseFen;
+    if (isRepertoireMove(fenBefore, move.san, userUci)) {
+      classification = 'book';
+    }
 
     // Retroactively annotate the opponent's previous move (if any)
     if (lastContUserAfterCp !== null && contLine.moves.length > 0) {
@@ -13768,8 +13785,9 @@ function buildContLineReviewData() {
   for (const mv of userMoves) {
     if (tally[mv.classification] !== undefined) tally[mv.classification]++;
   }
-  // Accuracy = % of user moves that are good or better
-  const goodOrBetter = (tally.great || 0) + (tally.best || 0) + (tally.excellent || 0) + (tally.good || 0);
+  // Accuracy = % of user moves that are good or better (Book counts too —
+  // deliberate prep is a positive outcome, not a mistake regardless of eval).
+  const goodOrBetter = (tally.great || 0) + (tally.best || 0) + (tally.excellent || 0) + (tally.good || 0) + (tally.book || 0);
   const accuracy = userMoves.length > 0 ? Math.round((goodOrBetter / userMoves.length) * 100) : 100;
   // Key moves = user mistakes/blunders (wpDrop > 5), excluding repertoire moves
   // (user deliberately played those per their study — not surprises to revisit).
