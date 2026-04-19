@@ -1469,7 +1469,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">IMP-005: clearArrows() now also clears hintArrow — removes asymmetry where hintArrow was rendered by renderArrows() but not cleared by clearArrows(), forcing callers to call clearHintHighlights() separately</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">BUG-008: Clear board overlays on in-line PGN navigation within a game review — piece selection, legal-move dots, and user-drawn annotations no longer persist when clicking a move in the move list (matches existing prevPosition/nextPosition behavior)</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -12836,6 +12836,14 @@ function renderContLine() {
 function goToContLineMove(idx) {
   if (!contLine || idx < -1 || idx >= contLine.moves.length) return;
   if (engineLine) return; // engine line takes priority — don't navigate contLine while engine line is showing
+  // BUG-008 / follow-up to IMP-004: apply the "nothing persists across a
+  // position change" rule to in-line navigation too. Wipes any selection dots
+  // the user left from tapping a piece mid-browse, stale hint state, and
+  // user-drawn annotations (matches the pattern already used by prevPosition /
+  // nextPosition / selectGame). bestMoveArrow and moveClassBadge are re-set
+  // explicitly below for the new move; noteArrows get repopulated by the
+  // updateNoteButton → closeNotePanel chain at the end of this function.
+  clearBoardOverlays();
   contLine.currentIdx = idx;
   const wasBrowsing = contLineBrowsing;
   contLineBrowsing = idx < contLine.moves.length - 1;
