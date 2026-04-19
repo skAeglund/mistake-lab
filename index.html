@@ -1469,7 +1469,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">BUG-006: Clear piece selection and legal-move dots when starting a game review (exitContLineReview handles review-state only, not board interaction state)</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">IMP-004: Unify board overlay clearing on mode/position transitions via new clearBoardOverlays() helper applied to 16 entry points — legal-move dots, hint state, and arrows can no longer persist across position or mode changes</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -5931,8 +5931,10 @@ function enterAnalysisMode() {
   // Set up the board
   boardObj.orientation(analysisOrientation);
   boardObj.position(analysisTreeCurrent.fen, false);
-  clearHighlights();
-  clearArrows();
+  // IMP-004: clearHighlights + clearArrows missed .square-hint / hintArrow — if
+  // the user had activated a hint before entering analysis, it persisted. Unified
+  // helper covers selection, hint state, and all arrow/badge overlays.
+  clearBoardOverlays();
   // Highlight the selected move's from/to squares so the user can see which
   // position is current in the loaded game. Only relevant when the tree was
   // seeded with moves — in the empty-tree case we preserve whatever highlight
@@ -5976,8 +5978,9 @@ function exitAnalysisMode() {
       boardObj.orientation(m.playerColor || 'white');
       boardObj.position(m.fenBefore, false);
       currentSolveFen = m.fenBefore;
-      clearHighlights();
-      clearArrows();
+      // IMP-004: previous clearHighlights + clearArrows missed hint state; the
+      // unified helper covers selection, hint state, and all arrow/badge overlays.
+      clearBoardOverlays();
       // Restart pre-analysis
       startPreAnalysis(m.fenBefore);
     }
@@ -8602,6 +8605,9 @@ function enterOpeningFilter() {
   // Initialize board if needed (must happen after mobile layout switch)
   if (!boardObj) { document.getElementById('board').offsetHeight; initBoard(); }
   boardObj.position(filterChess.fen(), false);
+  // IMP-004: wipe selection, hint state, and arrows from whatever position the
+  // user was just on — previously only clearLastMoveHighlight was called.
+  clearBoardOverlays();
   clearLastMoveHighlight();
 
   // Restore saved filter orientation, or default to white on first entry
@@ -8622,6 +8628,12 @@ function enterOpeningFilter() {
 
 function exitOpeningFilter(clearFilter) {
   openingFilterMode = false;
+
+  // IMP-004: clear any overlays the filter board may have accumulated (user
+  // annotations, hint arrows). The loadPosition branch below would re-clear
+  // idempotently; the two 'start'-position fallback branches previously left
+  // overlays visible on the empty board.
+  clearBoardOverlays();
 
   // Save filter orientation for re-entry
   savedFilterOrientation = boardObj ? boardObj.orientation() : null;
@@ -10183,11 +10195,10 @@ function loadPosition(globalIdx, skipAnimation = false) {
   contLineBrowsing = false;
   contLineSubtitle = '';
   updateLineNavBar();
-  clearHighlights();
-  clearHintHighlights();
-  activeArrows.clear();
-  activeCircles.clear();
-  hideArrow();
+  // IMP-004: unified clearing of selection/legal-dots, .square-hl, hint state,
+  // and every arrow/badge (incl. activeArrows, activeCircles, note*, analysisPv).
+  // Superset of the previous hand-rolled calls.
+  clearBoardOverlays();
   hideEvaluatingFeedback();
 
   // Set up chess engine at the mistake position
@@ -12644,6 +12655,10 @@ function resumeContSession(session) {
   boardObj.orientation(orientation);
   boardObj.position(resumeFen, false);
   gameEngine = new Chess(resumeFen);
+  // IMP-004: wipe any overlays from the pre-close state so they don't leak into
+  // the resumed session.
+  clearBoardOverlays();
+  clearLastMoveHighlight();
 
   // Restore contLine
   contLine = session.contLine;
@@ -13347,6 +13362,10 @@ function launchFilterPractice() {
   gameEngine = new Chess(fen);
   boardObj.position(fen, false);
   boardObj.orientation(orientation);
+  // IMP-004: wipe any overlays left on the filter board (user annotations,
+  // selection, hint state) so they don't leak into practice mode.
+  clearBoardOverlays();
+  clearLastMoveHighlight();
   currentMistakeIdx = practiceIdx;
 
   // Hide review list, show practice state
@@ -13987,13 +14006,10 @@ async function startContLineReview() {
   // could have gone back to Opening Filter and started a new continuation).
   // exitContLineReview clears _reviewBestLine, _lastRetryResult, engineLine,
   // retryIdx, keyMoves. The new review re-enters review mode further down.
+  // BUG-006 / IMP-004: exitContLineReview also clears piece selection, legal-move
+  // dots, hint highlights, and every arrow/badge via clearBoardOverlays — so
+  // continuation-practice overlays can't leak into review mode.
   exitContLineReview();
-
-  // BUG-006: if the user had tapped a piece during continuation practice (showing
-  // .square-selected + .square-legal-dot / .square-legal-capture), those board
-  // highlights persist into review mode because exitContLineReview only handles
-  // review-state, not board interaction state. Clear them explicitly.
-  clearSelection();
 
   // IMP-003: the game has ended — the "Current Position" card (Continuation
   // Practice / Your turn / Stop & Review / etc.) is stale and redundant next to
@@ -14736,12 +14752,18 @@ function exitContLineReview() {
   window._lastRetryResult = null;
   engineLine = null;
   browsingLine = false;
+  // IMP-004: clear review-scoped board overlays (best-move arrows, move-class
+  // badges, hint state, selection) so they can't leak into whatever comes next.
+  clearBoardOverlays();
 }
 
 function startTacticContinuation() {
   // Start continuation from the tactic's final position (tactic line stays visible for reference)
   // Clear any stale contLineBox from a previous continuation/review
   document.getElementById('contLineContainer').innerHTML = '';
+  // IMP-004: wipe overlays from the just-completed tactic (selection dots, any
+  // arrows from the tactic flow) before transitioning into continuation mode.
+  clearBoardOverlays();
   contLine = {
     baseFen: gameEngine.fen(),
     moves: [],
@@ -14795,6 +14817,12 @@ async function showTacticEngineLine() {
 
 function startContinuationMode() {
   continuationMode = true;
+
+  // IMP-004: clear overlays left over from the evaluation feedback (best-move
+  // arrow, move-class badge, any selection/annotations) before entering
+  // continuation. .square-lastmove from the user's good move is intentionally
+  // preserved — clearBoardOverlays doesn't touch it.
+  clearBoardOverlays();
 
   // Start voice mode if enabled
   if (voiceSettings.enabled) voiceStart();
@@ -15265,10 +15293,11 @@ function retryPosition() {
     contWrongMovePending = false;
     clearPremove();
     hideMaiaControls();
-    clearHighlights();
+    // IMP-004: superset of the previous clearHighlights + clearHintHighlights +
+    // hideArrow; also wipes activeArrows/activeCircles (user-drawn annotations)
+    // which the old path left behind.
+    clearBoardOverlays();
     clearLastMoveHighlight();
-    clearHintHighlights();
-    hideArrow();
     engineLine = null;
     browsingLine = false;
     updateLineNavBar();
@@ -15332,10 +15361,11 @@ function retryPosition() {
   contLineBrowsing = false;
   contLineSubtitle = '';
   updateLineNavBar();
-  clearHighlights();
+  // IMP-004: superset of the previous clearHighlights + clearHintHighlights +
+  // hideArrow; also wipes activeArrows/activeCircles (user-drawn annotations)
+  // which the old path left behind.
+  clearBoardOverlays();
   clearLastMoveHighlight();
-  clearHintHighlights();
-  hideArrow();
 
   // Reset chess engine and board to original position
   gameEngine = new Chess(m.fenBefore);
@@ -15385,6 +15415,11 @@ function renderAttemptDots() {
 function clearBoard() {
   if (boardObj) boardObj.position('start', false);
   gameEngine = null;
+  // IMP-004: wipe every overlay from the prior position — previously this left
+  // selection dots, highlights, and arrows visible over the 'start' position.
+  clearBoardOverlays();
+  clearLastMoveHighlight();
+  clearPremove();
   document.getElementById('posInfoCard').style.display = 'none';
   document.getElementById('feedbackContainer').innerHTML = '';
   document.getElementById('contLineContainer').innerHTML = '';
@@ -15434,6 +15469,26 @@ function clearHighlights() {
     el.style.removeProperty('--hl-color');
   });
   clearSelection();
+}
+
+// IMP-004: single canonical "clear everything scoped to the previous position/mode"
+// helper. Call this at the top of any function that changes position or mode so
+// legal-move dots, hint highlights, best-move arrows, or user annotations can't
+// leak into the new context. Covers:
+//   • piece selection + legal-move dots (via clearHighlights → clearSelection)
+//   • .square-hl last-move highlights (via clearHighlights)
+//   • .square-hint + hintArrow (via clearHintHighlights)
+//   • bestMoveArrow, analysisArrow, moveClassBadge, ghost*, activeArrows/Circles,
+//     noteArrows/Circles, analysisPvArrows (via clearArrows — which also
+//     renderArrows()s the flushed state)
+// Does NOT touch: .square-lastmove (per-caller: many transitions repaint it for
+// the new position — clearing here would force repaints or cause flicker),
+// .square-premove (separate clearPremove), filterArrows (scoped to filter mode),
+// or any feedback/contLine DOM (not board overlays). Idempotent.
+function clearBoardOverlays() {
+  clearHighlights();
+  clearHintHighlights();
+  clearArrows();
 }
 
 // Clear the right-side feedback panels (feedback box, continuation line, pos info
@@ -17903,7 +17958,10 @@ function advanceRepContRetry() {
   // Replay the line up to just before the failed move (auto-play leading moves quickly)
   const replayChess = new Chess(repContLine.baseFen);
   boardObj.position(repContLine.baseFen, false);
-  clearHighlights();
+  // IMP-004: previous clearHighlights missed hint state and arrows from the
+  // failed attempt. Unified helper also wipes any selection the user left on
+  // the board after the wrong move.
+  clearBoardOverlays();
   clearLastMoveHighlight();
 
   // Auto-play all moves before the target position
@@ -18089,6 +18147,9 @@ function startRepertoireFromBeginning() {
   // Set board to starting position
   gameEngine = new Chess();
   boardObj.position('start', false);
+  // IMP-004: wipe overlays from the previous repertoire position (selection
+  // dots, arrows, hint state) so they don't persist over the start position.
+  clearBoardOverlays();
   clearLastMoveHighlight();
 
   // Show line display and update info
@@ -18118,6 +18179,9 @@ function replayRepertoireBeginning() {
   if (boardObj) boardObj.orientation(orientation);
   gameEngine = new Chess();
   boardObj.position('start', false);
+  // IMP-004: wipe overlays from the previous repertoire position (selection
+  // dots, arrows, hint state) so they don't persist over the start position.
+  clearBoardOverlays();
   clearLastMoveHighlight();
   renderRepLeadUpLine();
 
