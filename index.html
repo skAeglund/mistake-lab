@@ -1469,7 +1469,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Board-animation audit: 8 cross-position snap sites (retryPosition, clearBoard, exitOpeningFilter 3x, filter-reset, set-from-FEN, item-removed-empty) now pass animate=false for instant swap</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">BUG-006: Clear piece selection and legal-move dots when starting a game review (exitContLineReview handles review-state only, not board interaction state)</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -13988,6 +13988,12 @@ async function startContLineReview() {
   // exitContLineReview clears _reviewBestLine, _lastRetryResult, engineLine,
   // retryIdx, keyMoves. The new review re-enters review mode further down.
   exitContLineReview();
+
+  // BUG-006: if the user had tapped a piece during continuation practice (showing
+  // .square-selected + .square-legal-dot / .square-legal-capture), those board
+  // highlights persist into review mode because exitContLineReview only handles
+  // review-state, not board interaction state. Clear them explicitly.
+  clearSelection();
 
   // IMP-003: the game has ended — the "Current Position" card (Continuation
   // Practice / Your turn / Stop & Review / etc.) is stale and redundant next to
