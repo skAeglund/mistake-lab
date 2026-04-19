@@ -1469,7 +1469,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">IMP-004: Unify board overlay clearing on mode/position transitions via new clearBoardOverlays() helper applied to 16 entry points — legal-move dots, hint state, and arrows can no longer persist across position or mode changes</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">IMP-005: clearArrows() now also clears hintArrow — removes asymmetry where hintArrow was rendered by renderArrows() but not cleared by clearArrows(), forcing callers to call clearHintHighlights() separately</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -15688,6 +15688,12 @@ function clearArrows() {
   noteArrows = [];
   noteCircles = [];
   analysisPvArrows = [];
+  // Follow-up to IMP-004: hintArrow is rendered by renderArrows and listed in
+  // its visibility check alongside the other arrow types. Prior asymmetry
+  // (clearArrows didn't touch it, only clearHintHighlights did) was a code
+  // smell — a caller asking to "clear arrows" should not leave one behind.
+  // clearHintHighlights still clears it too; redundant set-to-null is safe.
+  hintArrow = null;
   renderArrows();
 }
 
