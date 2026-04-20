@@ -1596,7 +1596,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix tactic ↔ analysis return position, closes #1. Entering Analysis mid-tactic then clicking Exit reset gameEngine to m.fenBefore — the tactic's START — because exitAnalysisMode only had two branches (game-review snapshot restore, or fall through to fenBefore) and tactics fell into the second. Combined with enterAnalysisMode setting tacticMode=false, the solve couldn't resume: tacticStepIdx stayed at its pre-analysis value but gameEngine was at ply 0, so opponent auto-plays filled in all the moves the user had already played — the tactic "completed" after only one move. Fix: snapshot the tactic solve state in enterAnalysisMode alongside reviewSnapshot. Covers three states via a single tacticHasState condition: (a) actively solving (tacticMode true), (b) paused between main/alt lines (tacticMode false, tacticLine populated, tacticCompleted false), (c) fully completed (tacticCompleted true). Snapshot captures gameEngine.fen, currentSolveFen, tacticStepIdx / WrongAttempts / HintUsed / AltIdx / PrefixUserMoves / Completed, refs to tacticMoves / AltLines / SolvedLines, deep-cloned tacticLine, feedback HTML, board highlights, and progressive hint state (hintLevel, hintArrow, hintMove). pausedBetweenLines + completedAtEntry markers let exit restore tacticMode correctly — false for both paused and completed (moves blocked), true for active solve. In exitAnalysisMode, branch to a tacticSnapshot restore path before the fenBefore fallback: rebuild gameEngine from snap.fen, restore all scalars, re-render tactic line + progress counter, re-inject feedback HTML, re-apply board highlights, and re-apply .square-hint class + hintArrow (clearBoardOverlays wipes them via clearHintHighlights, so they need re-rendering from snapshot). Edge case: if analysis was entered during the 400ms gap between a correct user move and the scheduled tacticAutoPlayOpponent(), the timeout fires with tacticMode=false and early-returns, so after restore the opponent's reply never plays. Re-dispatch tacticAutoPlayOpponent() on restore when the next step is an opponent move and we're in active-solve state (not paused or completed).</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix fast-retry race in tactic engine line, closes #2. Clicking Try again while the async engine-line build was mid-flight in evaluateTacticMove's wrong-move path would let a stale buildEngineLine land on the already-reset board — the user would see the tactic position restored, then an ENGINE LINE panel materialize a moment later (with the gameEngine.undo() from the late handler corrupting state since tacticTryAgain had already undone the wrong move). The existing guards checked tacticMode / currentSolveFen / currentAttempts after the sfAnalyzeAdaptive await, but tacticTryAgain keeps all three stable — it undoes the wrong move on gameEngine without incrementing any tracked counter — so the guard passed and the late engine line landed. Fix: add tacticEngineLineSession counter; snapshot it when the async IIFE starts (via ++tacticEngineLineSession, so each build gets its own unique token), check it both inside the onUpdate callback (to suppress stale analysis arrows at intermediate depths) and after sfAnalyzeAdaptive resolves (to discard the final result). Bump the counter in tacticTryAgain; also clearAnalysisArrow() there so any arrow that slipped through before the token bump is wiped. Worker keeps searching until its own bestmove or the next move terminates it, but nothing lands on the board. Scanned other async SF + buildEngineLine sites for the same class of bug: mistake evaluateMove (line ~11904) also awaits SF, but its Try-again buttons are rendered inside handleEvalResult AFTER the await chain, so no race window — session guard not needed. contWrongMovePending path (~12247) and showTacticEngineLine (~15236) same reasoning: buttons only appear after the async work completes. The fix is scoped to the one place where the button is deliberately shown synchronously while SF runs in the background.</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2067,6 +2067,7 @@ let tacticCompleted = false;     // true after tactic fully solved (prevents mov
 let tacticAltIdx = -1;           // -1 = main line, 0+ = which alternative we're solving
 let tacticSolvedLines = [];      // completed lines (for skipping common prefixes in alt lines)
 let tacticPrefixUserMoves = 0;   // user moves auto-played in common prefix (for progress display)
+let tacticEngineLineSession = 0; // token bumped on tacticTryAgain — stale async engine-line builds check this after await
 
 // ─── Advantage capitalization state ───
 let advantageMode = false;              // true when drilling an advantage item
@@ -11086,15 +11087,22 @@ async function evaluateTacticMove(from, to, move) {
     const afterFen = gameEngine.fen();
     const snapshotSolveFen = currentSolveFen;
     const snapshotAttempts = currentAttempts;
+    const sessionToken = ++tacticEngineLineSession;
     (async () => {
       if (!sfReady) return;
       try {
         stopPreAnalysis();
         const afterResult = await sfAnalyzeAdaptive(afterFen, {
-          onUpdate: (d, uci) => { if (tacticMode && currentSolveFen === snapshotSolveFen) showAnalysisArrow(uci); }
+          onUpdate: (d, uci) => { if (tacticMode && sessionToken === tacticEngineLineSession && currentSolveFen === snapshotSolveFen) showAnalysisArrow(uci); }
         });
+        // Discard stale result if user retried mid-flight (tacticTryAgain bumps
+        // the session token) — tacticMode/solveFen/currentAttempts are all still
+        // stable after Retry, so the session token is the only signal that a
+        // reset happened. Without this the engine line would land on the
+        // already-cleared board and the undo() below would corrupt gameEngine.
+        if (sessionToken !== tacticEngineLineSession) return;
         clearAnalysisArrow();
-        // Check if user already retried or navigated away
+        // Check if user already navigated away or triggered another attempt
         if (!tacticMode || currentSolveFen !== snapshotSolveFen || currentAttempts !== snapshotAttempts) return;
         const contUci = afterResult?.pvs?.[0]?.moves || '';
         const afterCp = afterResult?.pvs?.[0]?.cp || 0;
@@ -11448,6 +11456,12 @@ function tacticLineStep(delta) {
 
 function tacticTryAgain() {
   if (!tacticMode || !gameEngine) return;
+  // Invalidate any in-flight async engine-line build from evaluateTacticMove's
+  // wrong-move path. The async IIFE snapshots this token before awaiting
+  // sfAnalyzeAdaptive and discards its result if the token has since been
+  // bumped — prevents a late buildEngineLine from landing on the reset board.
+  tacticEngineLineSession++;
+  clearAnalysisArrow();
   if (engineLine) {
     // Engine line loaded — exit it (restores gameEngine to pre-move state)
     exitEngineLine();
