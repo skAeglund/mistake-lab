@@ -1508,7 +1508,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Check &amp; checkmate visualization: Lichess-style red radial-gradient aura on the king's square whenever it's in check, using chessground's exact gradient stops (rgba(255,0,0,1) 0% → rgba(231,0,0,1) 25% → rgba(169,0,0,0) 89% → 100%). Checkmate uses the same aura plus a subtle 1.4s opacity pulse so the end-of-game signal is unmistakable. Implemented as .square-check::before / .square-checkmate::before, placed after existing square overlay rules so cascade order resolves in favour of check when the king sits on a lastmove/hl square. Instrumented at every board-position entry point (loadPosition, onDrop, onBoardClick, onSnapEnd, advanceContinuation, goToContLineMove, goToLineMove, handleEngineLineBranch, analysisGoToNode/OnDrop/OnSnapEnd, filter nav, voice execute, retry, resume, repertoire drill/continuation/lead-up, tactic solve, detected-tactic flow, review best-line &amp; refutation demos, reveal best move, advantage mode, premove execution) — ~50 sites total. clearCheckHighlight is folded into clearBoardOverlays so mode transitions wipe stale auras automatically. Also includes BUG-007 part 1 (suppress transient blue analysisArrow during all continuation practice).</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">BUG-009: Fix "From beginning" lead-up for practice-sourced repertoire deviations. Root cause: continuation-practice deviations are saved with only positionKey + fenBefore; buildRepertoireLeadUp's trie walk from the standard start can diverge when the user's trie has multiple branches (picking e.g. English instead of Benko), and the game-line fallback is skipped because the synthetic gameId '_manual_xxx' never matches a real game. Result: a line that leads to the wrong position, with the board "flipping" to the correct fenBefore only at the transition. Fix: (1) auto-saved practice deviations now capture contLine.baseFen as initialFen and contLine.moves.map(mv=>mv.uci) as leadUpMoves; (2) buildRepertoireLeadUp gains a three-strategy resolution order — replay saved practice moves first, then trie walk, then game fallback; (3) when all three fail to reach target, return [] instead of the wrong partial line, and startRepertoireFromBeginning/replayRepertoireBeginning surface a "Lead-up unavailable" message instead of silently doing nothing (matters for legacy practice deviations saved before this fix); (4) baseFen for the lead-up session is now m.initialFen || standard start so navigating to repLeadUpIdx=-1 shows the correct session start, not a forced standard start. customDev → allDevs merge preserves the new initialFen/leadUpMoves fields and the source label.</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -11404,9 +11404,23 @@ async function evaluateMove(from, to, move) {
           const alreadyDetected = repertoireDeviations.some(d => d.positionKey === posKey);
           if (!alreadyCustom && !alreadyDetected) {
             const turn = currentSolveFen.split(' ')[1];
+            // BUG-009: capture the practice-session move history so the
+            // "From beginning" lead-up can replay the exact path the user
+            // actually took, instead of relying on a trie walk that may
+            // diverge when the trie has multiple branches for the same
+            // opponent move. contLine.moves are the moves played since
+            // contLine.baseFen — at the moment of deviation detection the
+            // user's wrong move has NOT yet been pushed to contLine, so
+            // contLine.moves captures the correct lead-up context.
+            const leadUpMoves = (contLine && Array.isArray(contLine.moves))
+              ? contLine.moves.map(mv => mv.uci).filter(Boolean)
+              : [];
+            const initialFen = (contLine && contLine.baseFen) ? contLine.baseFen : null;
             gistData.repertoire.customDeviations.push({
               positionKey: posKey,
               fenBefore: currentSolveFen,
+              initialFen,
+              leadUpMoves,
               repertoireMove: { san: repMoveSan, uci: repMoveUci },
               playerColor: turn === 'w' ? 'white' : 'black',
               source: 'practice',
@@ -16836,10 +16850,14 @@ function detectRepertoireDeviations() {
       type: 'repertoire',
       positionKey: cd.positionKey,
       fenBefore: cd.fenBefore,
+      // BUG-009: forward practice-session replay data so buildRepertoireLeadUp
+      // can reconstruct the exact path for practice-sourced deviations
+      initialFen: cd.initialFen || null,
+      leadUpMoves: cd.leadUpMoves || null,
       repertoireMove: cd.repertoireMove,
       playerColor: cd.playerColor,
       opening: 'Manual',
-      source: 'manual',
+      source: cd.source || 'manual',
       games: [],
       gameCount: 0,
       gameId: '_manual_' + cd.positionKey.slice(0, 8),
@@ -18300,39 +18318,106 @@ function evaluateRepContRetryMove(source, target, move) {
 
 // ── Repertoire Lead-Up (Start from Beginning) ──
 
+// BUG-009: replay a sequence of UCI moves from a given start FEN and return
+// a line in the same shape as the trie/game walkers. Returns null if the
+// start FEN is invalid or any move fails to apply cleanly, so the caller
+// can try another strategy.
+function replayMovesAsLeadUp(startFen, uciMoves, playerColor) {
+  if (!uciMoves || uciMoves.length === 0) return null;
+  const chess = new Chess();
+  if (startFen) {
+    // chess.load returns false on invalid FEN; chess.js 0.10.3 silently
+    // falls back to the default start if you pass an invalid FEN to the
+    // constructor, so load() is the only reliable validity check.
+    if (!chess.load(startFen)) return null;
+  }
+  const line = [];
+  for (const uci of uciMoves) {
+    if (!uci || uci.length < 4) return null;
+    const from = uci.substring(0, 2);
+    const to = uci.substring(2, 4);
+    const promo = uci.length > 4 ? uci[4] : undefined;
+    const fenBefore = chess.fen();
+    const move = chess.move({ from, to, promotion: promo });
+    if (!move) return null;
+    const isUser = (playerColor === 'white' && move.color === 'w') ||
+                   (playerColor === 'black' && move.color === 'b');
+    line.push({
+      san: move.san,
+      uci: move.from + move.to + (move.promotion || ''),
+      fen: chess.fen(),
+      fenBefore,
+      isUser,
+      from: move.from,
+      to: move.to,
+    });
+  }
+  return line;
+}
+
 function buildRepertoireLeadUp(dev) {
-  // Try walking the trie from the starting position to the deviation position.
   const targetPosKey = dev.positionKey;
   const playerColor = dev.playerColor;
-  const line = buildLeadUpFromTrie(targetPosKey, playerColor);
 
-  // If trie walk reached the target, use it
+  // BUG-009: Strategy 1 — saved practice-session moves (most reliable when
+  // present). Practice-sourced deviations can live at positions the trie
+  // walk would never reach from the standard start, either because the
+  // session started from a filter FEN or because the trie has multiple
+  // branches and trieFirst/legalMoves iteration picks a different path.
+  if (dev.leadUpMoves && dev.leadUpMoves.length > 0) {
+    const replayed = replayMovesAsLeadUp(
+      dev.initialFen || null,
+      dev.leadUpMoves,
+      playerColor
+    );
+    if (replayed && replayed.length > 0 &&
+        fenPositionKey(replayed[replayed.length - 1].fen) === targetPosKey) {
+      return replayed;
+    }
+  }
+
+  // Strategy 2 — trie walk from the standard starting position
+  const line = buildLeadUpFromTrie(targetPosKey, playerColor);
   if (line.length > 0 && fenPositionKey(line[line.length - 1].fen) === targetPosKey) {
     return line;
   }
 
-  // Fallback: use the game's actual moves
+  // Strategy 3 — replay the originating game's actual moves
   const game = allGames.find(g => g.id === dev.gameId);
-  if (!game || !game.moves) return line.length > 0 ? line : [];
-  const moves = game.moves.split(' ');
-  const chess = game.initialFen ? new Chess(game.initialFen) : new Chess();
-  const gameLine = [];
-  const ply = dev.movePly; // 1-based
+  if (game && game.moves) {
+    const moves = game.moves.split(' ');
+    const chess = game.initialFen ? new Chess(game.initialFen) : new Chess();
+    const gameLine = [];
+    const ply = dev.movePly; // 1-based
 
-  for (let i = 0; i < ply - 1 && i < moves.length; i++) {
-    const fenBefore = chess.fen();
-    const move = chess.move(moves[i], { sloppy: true });
-    if (!move) break;
-    const isUser = (playerColor === 'white' && move.color === 'w') || (playerColor === 'black' && move.color === 'b');
-    gameLine.push({ san: move.san, uci: move.from + move.to + (move.promotion || ''), fen: chess.fen(), fenBefore, isUser, from: move.from, to: move.to });
+    for (let i = 0; i < ply - 1 && i < moves.length; i++) {
+      const fenBefore = chess.fen();
+      const move = chess.move(moves[i], { sloppy: true });
+      if (!move) break;
+      const isUser = (playerColor === 'white' && move.color === 'w') ||
+                     (playerColor === 'black' && move.color === 'b');
+      gameLine.push({
+        san: move.san,
+        uci: move.from + move.to + (move.promotion || ''),
+        fen: chess.fen(),
+        fenBefore,
+        isUser,
+        from: move.from,
+        to: move.to,
+      });
+    }
+
+    if (gameLine.length > 0 && fenPositionKey(chess.fen()) === targetPosKey) {
+      return gameLine;
+    }
   }
 
-  // Verify the game line reaches the target
-  if (gameLine.length > 0 && fenPositionKey(chess.fen()) === targetPosKey) {
-    return gameLine;
-  }
-
-  return line.length > 0 ? line : gameLine;
+  // BUG-009: All three strategies failed to reach the target. Previously we
+  // returned the trie-walk's partial line, which led the user through
+  // positions that don't actually connect to the deviation and then "flipped"
+  // the board at the end. Returning [] lets startRepertoireFromBeginning /
+  // replayRepertoireBeginning surface a helpful message instead.
+  return [];
 }
 
 function buildLeadUpFromTrie(targetPosKey, playerColor) {
@@ -18389,20 +18474,37 @@ function startRepertoireFromBeginning() {
   if (!m || m.type !== 'repertoire') return;
 
   const line = buildRepertoireLeadUp(m);
-  if (line.length === 0) return; // already at start or no path
+  if (line.length === 0) {
+    // BUG-009: couldn't reconstruct a lead-up. Most common cause is a
+    // legacy practice-sourced deviation saved before we recorded session
+    // move history. Tell the user instead of silently doing nothing.
+    const fb = document.getElementById('feedbackContainer');
+    if (fb) {
+      fb.innerHTML = `<div class="feedback-box" style="border-left:3px solid var(--text-muted);background:rgba(128,128,128,0.04);padding:10px 12px;">
+        <div class="feedback-title" style="color:var(--text-secondary);">Lead-up unavailable</div>
+        <div class="feedback-text" style="font-size:11px;color:var(--text-muted);">
+          Can't reconstruct the moves leading to this position. The deviation itself is fine — just use the board above.
+        </div>
+      </div>`;
+    }
+    return;
+  }
 
   if (repReplayTimer) { clearTimeout(repReplayTimer); repReplayTimer = null; }
+  // BUG-009: for practice-sourced deviations the "beginning" of the lead-up
+  // is the filter/session start FEN, not necessarily the standard start.
+  const baseFen = m.initialFen || 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
   repLeadUpActive = true;
   repLeadUpLine = {
-    baseFen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+    baseFen,
     moves: line,
     targetFen: m.fenBefore,
   };
   repLeadUpIdx = -1;
 
   // Set board to starting position
-  gameEngine = new Chess();
-  boardObj.position('start', false);
+  gameEngine = new Chess(baseFen);
+  boardObj.position(baseFen, false);
   // IMP-004: wipe overlays from the previous repertoire position (selection
   // dots, arrows, hint state) so they don't persist over the start position.
   clearBoardOverlays();
@@ -18419,14 +18521,27 @@ function replayRepertoireBeginning() {
   if (!m || m.type !== 'repertoire') return;
 
   const line = buildRepertoireLeadUp(m);
-  if (line.length === 0) return;
+  if (line.length === 0) {
+    const fb = document.getElementById('feedbackContainer');
+    if (fb) {
+      fb.innerHTML = `<div class="feedback-box" style="border-left:3px solid var(--text-muted);background:rgba(128,128,128,0.04);padding:10px 12px;">
+        <div class="feedback-title" style="color:var(--text-secondary);">Lead-up unavailable</div>
+        <div class="feedback-text" style="font-size:11px;color:var(--text-muted);">
+          Can't reconstruct the moves leading to this position. The deviation itself is fine — just use the board above.
+        </div>
+      </div>`;
+    }
+    return;
+  }
 
   // Cancel any existing replay
   if (repReplayTimer) { clearTimeout(repReplayTimer); repReplayTimer = null; }
 
+  // BUG-009: practice-sourced deviations may have a non-standard initialFen
+  const baseFen = m.initialFen || 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
   repLeadUpActive = true;
   repLeadUpLine = {
-    baseFen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+    baseFen,
     moves: line,
     targetFen: m.fenBefore,
   };
@@ -18434,8 +18549,8 @@ function replayRepertoireBeginning() {
 
   const orientation = m.playerColor === 'black' ? 'black' : 'white';
   if (boardObj) boardObj.orientation(orientation);
-  gameEngine = new Chess();
-  boardObj.position('start', false);
+  gameEngine = new Chess(baseFen);
+  boardObj.position(baseFen, false);
   // IMP-004: wipe overlays from the previous repertoire position (selection
   // dots, arrows, hint state) so they don't persist over the start position.
   clearBoardOverlays();
