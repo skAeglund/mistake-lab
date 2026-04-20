@@ -901,6 +901,45 @@
       linear-gradient(to top left, rgba(0, 0, 0, 0.25) 50%, transparent 50.5%) bottom right / 22% 22% no-repeat;
   }
 
+  /* Check / checkmate highlight on the king's square — matches Lichess's
+     chessground radial-gradient aura. Uses ::before like other square overlays
+     (lastmove, hl, hint, premove, selected); placed AFTER those rules in the
+     stylesheet so cascade order resolves check in favour of check when the king
+     is also on a last-move or hl square. z-index: -1 keeps it behind the piece
+     (pieces render at z-index: 2). */
+  .square-check::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(ellipse at center,
+      rgba(255, 0, 0, 1) 0%,
+      rgba(231, 0, 0, 1) 25%,
+      rgba(169, 0, 0, 0) 89%,
+      rgba(158, 0, 0, 0) 100%);
+    pointer-events: none;
+    z-index: -1;
+  }
+  /* Checkmate: same aura plus a slow pulse so the end-of-game signal is
+     unmistakable (Lichess uses the identical static aura; pulsing is a small
+     extension requested by users in Lichess feedback threads). */
+  .square-checkmate::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(ellipse at center,
+      rgba(255, 0, 0, 1) 0%,
+      rgba(231, 0, 0, 1) 25%,
+      rgba(169, 0, 0, 0) 89%,
+      rgba(158, 0, 0, 0) 100%);
+    pointer-events: none;
+    z-index: -1;
+    animation: checkmate-pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes checkmate-pulse {
+    0%, 100% { opacity: 0.9; }
+    50% { opacity: 1; }
+  }
+
   /* Override chessboard colors for dark theme */
   .board-b72b1z .white-1e1d7 { background-color: #b8c0d8; color: #3a3f52; }
   .board-b72b1z .black-3c85d { background-color: #5a6488; color: #b8c0d8; }
@@ -1469,7 +1508,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">BUG-008: Clear board overlays on in-line PGN navigation within a game review — piece selection, legal-move dots, and user-drawn annotations no longer persist when clicking a move in the move list (matches existing prevPosition/nextPosition behavior)</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Check &amp; checkmate visualization: Lichess-style red radial-gradient aura on the king's square whenever it's in check, using chessground's exact gradient stops (rgba(255,0,0,1) 0% → rgba(231,0,0,1) 25% → rgba(169,0,0,0) 89% → 100%). Checkmate uses the same aura plus a subtle 1.4s opacity pulse so the end-of-game signal is unmistakable. Implemented as .square-check::before / .square-checkmate::before, placed after existing square overlay rules so cascade order resolves in favour of check when the king sits on a lastmove/hl square. Instrumented at every board-position entry point (loadPosition, onDrop, onBoardClick, onSnapEnd, advanceContinuation, goToContLineMove, goToLineMove, handleEngineLineBranch, analysisGoToNode/OnDrop/OnSnapEnd, filter nav, voice execute, retry, resume, repertoire drill/continuation/lead-up, tactic solve, detected-tactic flow, review best-line &amp; refutation demos, reveal best move, advantage mode, premove execution) — ~50 sites total. clearCheckHighlight is folded into clearBoardOverlays so mode transitions wipe stale auras automatically. Also includes BUG-007 part 1 (suppress transient blue analysisArrow during all continuation practice).</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -4683,6 +4722,7 @@ function tryDetectedTactic(listIdx) {
   clearArrows();
   moveClassBadge = null;
   bestMoveArrow = null;
+  showCheckHighlight(gameEngine);
 
   // UI: close modal, hide scan banner, show tactic prompt
   closeDetectedTacticsModal();
@@ -4862,10 +4902,13 @@ function abandonDetectedTacticSolve() {
     // Restore contLine position (sets eval bar / graph cursor / note / line render)
     goToContLineMove(snap.contLineCurrentIdx);
     // Overpaint board if snapshot diverged from contLine's implied position
+    let overpainted = false;
     if (snap.boardFen && snap.boardFen !== gameEngine.fen()) {
       gameEngine.load(snap.boardFen);
       boardObj.position(snap.boardFen, false);
+      overpainted = true;
     }
+    if (overpainted) showCheckHighlight(gameEngine);
     if (snap.boardHighlights) applyBoardHighlights(snap.boardHighlights);
     moveClassBadge = snap.moveClassBadge || null;
     bestMoveArrow = snap.bestMoveArrow || null;
@@ -5935,6 +5978,7 @@ function enterAnalysisMode() {
   // the user had activated a hint before entering analysis, it persisted. Unified
   // helper covers selection, hint state, and all arrow/badge overlays.
   clearBoardOverlays();
+  try { showCheckHighlight(new Chess(analysisTreeCurrent.fen)); } catch (_) { clearCheckHighlight(); }
   // Highlight the selected move's from/to squares so the user can see which
   // position is current in the loaded game. Only relevant when the tree was
   // seeded with moves — in the empty-tree case we preserve whatever highlight
@@ -5981,6 +6025,7 @@ function exitAnalysisMode() {
       // IMP-004: previous clearHighlights + clearArrows missed hint state; the
       // unified helper covers selection, hint state, and all arrow/badge overlays.
       clearBoardOverlays();
+      showCheckHighlight(gameEngine);
       // Restart pre-analysis
       startPreAnalysis(m.fenBefore);
     }
@@ -6061,23 +6106,31 @@ function restoreReviewStateAfterAnalysis(rs) {
     // Phase 2: overpaint board FEN if the user was looking at a position that
     // diverged from contLine[currentIdx] (best-line/refutation view, or retry-result
     // card where gameEngine holds the retry move's post-position).
+    let overpainted = false;
     if (rs.reviewBestLineData) {
       const data = rs.reviewBestLineData;
       const idx = data.currentIdx ?? 0;
       if (idx < 0) {
         gameEngine.load(data.preFen);
         boardObj.position(data.preFen, false);
+        overpainted = true;
       } else {
         const lm = data.lineMoves[idx];
         if (lm) {
           gameEngine.load(lm.fen);
           boardObj.position(lm.fen, false);
+          overpainted = true;
         }
       }
     } else if (rs.boardFen && rs.boardFen !== gameEngine.fen()) {
       gameEngine.load(rs.boardFen);
       boardObj.position(rs.boardFen, false);
+      overpainted = true;
     }
+    // goToContLineMove above already applied the check highlight for the
+    // contLine position. If we overpainted above (best-line view / retry-result
+    // card / snapshot FEN), re-derive check state from the now-current gameEngine.
+    if (overpainted) showCheckHighlight(gameEngine);
 
     // Phase 3: overpaint highlights / badge / arrow from the snapshot.
     // Idempotent when snapshot matches goToContLineMove's output (key-move,
@@ -6107,6 +6160,9 @@ function openLichessAnalysisFromMode() {
 function analysisFlipBoard() {
   analysisOrientation = analysisOrientation === 'white' ? 'black' : 'white';
   boardObj.orientation(analysisOrientation);
+  // Orientation flip rebuilds chessboard.js's square DOM, wiping our custom
+  // classes — re-derive the check aura from the current analysis position.
+  if (analysisEngine) showCheckHighlight(analysisEngine);
   renderArrows();
 }
 
@@ -6470,13 +6526,14 @@ function analysisOnDrop(source, target) {
 
   clearHighlights();
   showLastMoveHighlight(source, target);
+  showCheckHighlight(analysisEngine);
   renderAnalysisTree();
   startAnalysisSearch(newFen);
   return undefined;
 }
 
 function analysisOnSnapEnd() {
-  if (analysisEngine) boardObj.position(analysisEngine.fen());
+  if (analysisEngine) { boardObj.position(analysisEngine.fen()); showCheckHighlight(analysisEngine); }
 }
 
 // ─── Analysis Tree Rendering ───
@@ -6574,6 +6631,7 @@ function analysisGoToNode(nodeId) {
     const to = node.uci.substring(2, 4);
     showLastMoveHighlight(from, to);
   }
+  showCheckHighlight(analysisEngine);
 
   renderAnalysisTree();
   startAnalysisSearch(node.fen);
@@ -7361,6 +7419,7 @@ function voiceExecuteMove(san) {
   if (!move) { voiceSpeak('Invalid move'); return; }
   boardObj.position(gameEngine.fen(), false);
   showLastMoveHighlight(move.from, move.to);
+  showCheckHighlight(gameEngine);
   clearArrows();
   // Route through the same path as onDrop
   currentAttempts++;
@@ -8613,6 +8672,9 @@ function enterOpeningFilter() {
   // Restore saved filter orientation, or default to white on first entry
   const filterOrientation = savedFilterOrientation || 'white';
   boardObj.orientation(filterOrientation);
+  // Check highlight MUST come AFTER orientation — chessboard.js rebuilds its
+  // square DOM on orientation change, wiping any classes we'd added before.
+  showCheckHighlight(filterChess);
   filters.color = new Set([filterOrientation]);
   document.querySelectorAll('.filter-chip[data-filter="color"]').forEach(c => {
     c.classList.toggle('active', filters.color.has(c.dataset.value));
@@ -8736,9 +8798,12 @@ function filterMakeMove(from, to, animate) {
   filterMoveHistory.push(filterChess.fen());
   filterMoveIdx = filterMoveHistory.length - 1;
 
-  boardObj.position(filterChess.fen(), animate !== false);
+  const willAnimate = animate !== false;
+  boardObj.position(filterChess.fen(), willAnimate);
   clearHighlights();
   highlightSquaresWithColor(from, to, 'var(--accent)');
+  if (willAnimate) showCheckHighlightDeferred(filterChess);
+  else showCheckHighlight(filterChess);
   applyOpeningFilterFromBoard();
   return move;
 }
@@ -8750,6 +8815,7 @@ function filterUndoMove() {
   filterChess.load(filterMoveHistory[filterMoveIdx]);
   boardObj.position(filterChess.fen());
   clearHighlights();
+  showCheckHighlightDeferred(filterChess);
   applyOpeningFilterFromBoard();
 }
 
@@ -8760,6 +8826,7 @@ function filterRedoMove() {
   filterChess.load(filterMoveHistory[filterMoveIdx]);
   boardObj.position(filterChess.fen());
   clearHighlights();
+  showCheckHighlightDeferred(filterChess);
   applyOpeningFilterFromBoard();
 }
 
@@ -8767,6 +8834,9 @@ function filterFlipBoard() {
   if (!boardObj) return;
   const newOrientation = boardObj.orientation() === 'white' ? 'black' : 'white';
   boardObj.orientation(newOrientation);
+  // Orientation flip rebuilds chessboard.js's square DOM, wiping our custom
+  // classes — re-derive the check aura from the current filter position.
+  if (filterChess) showCheckHighlight(filterChess);
   // Sync the color filter to match board perspective
   filters.color = new Set([newOrientation]);
   document.querySelectorAll('.filter-chip[data-filter="color"]').forEach(c => {
@@ -8787,6 +8857,7 @@ function filterReset() {
   filterMoveHistory = [filterChess.fen()];
   filterMoveIdx = 0;
   boardObj.position('start', false);
+  showCheckHighlight(filterChess);
   applyOpeningFilterFromBoard();
 }
 
@@ -8806,6 +8877,7 @@ function setFilterFromFen(fenStr) {
   filterMoveHistory = [filterChess.fen()];
   filterMoveIdx = 0;
   boardObj.position(filterChess.fen(), false);
+  showCheckHighlight(filterChess);
   applyOpeningFilterFromBoard();
 }
 
@@ -9036,6 +9108,7 @@ function navigateFilterLine(targetIdx) {
   filterChess.load(filterMoveHistory[filterMoveIdx]);
   boardObj.position(filterChess.fen());
   clearHighlights();
+  showCheckHighlightDeferred(filterChess);
   applyOpeningFilterFromBoard();
 }
 
@@ -9179,6 +9252,7 @@ function explorerPlayMove(uci) {
   boardObj.position(filterChess.fen());
   clearHighlights();
   highlightSquaresWithColor(from, to, 'var(--accent)');
+  showCheckHighlightDeferred(filterChess);
   applyOpeningFilterFromBoard();
 }
 
@@ -9354,6 +9428,7 @@ function showContResumeBanner(session) {
   if (!boardObj) { document.getElementById('board').offsetHeight; initBoard(); }
   boardObj.orientation(orientation);
   boardObj.position(session.currentSolveFen, false);
+  try { showCheckHighlight(new Chess(session.currentSolveFen)); } catch (_) { clearCheckHighlight(); }
 
   // Show resume prompt in posInfoCard
   const infoCard = document.getElementById('posInfoCard');
@@ -9867,6 +9942,7 @@ function onBoardClick(e) {
       clearArrows();
       boardObj.position(gameEngine.fen());
       showLastMoveHighlight(move.from, move.to);
+      showCheckHighlight(gameEngine);
 
       // Making a move while browsing the continuation line
       if (contLine && contLineBrowsing) {
@@ -9880,6 +9956,7 @@ function onBoardClick(e) {
         if (contLineReviewMode) {
           gameEngine.undo();
           boardObj.position(gameEngine.fen(), false);
+          showCheckHighlight(gameEngine);
           return;
         }
 
@@ -10214,6 +10291,14 @@ function loadPosition(globalIdx, skipAnimation = false) {
   const prevSq = getPrevMoveSquares(m);
   if (prevSq) showLastMoveHighlight(prevSq.from, prevSq.to);
 
+  // Check/checkmate aura on the king if the loaded position is in check.
+  // Rare for puzzle starts but possible (e.g. tactic sequences that begin with
+  // the opponent already in check, or fenBefore positions where the user is
+  // about to respond to a check). Deferred because loadPosition's boardObj.position
+  // call above uses !skipAnimation — which is usually animated, and chessboard.js
+  // wipes DOM classes on animation end.
+  showCheckHighlightDeferred(gameEngine);
+
   // Resize after layout settles (important on first load when container may have just become visible)
   requestAnimationFrame(() => { if (boardObj) { boardObj.resize(); renderArrows(); } });
 
@@ -10491,6 +10576,7 @@ function onDrop(source, target) {
 
   clearSelection();
   showLastMoveHighlight(source, target);
+  showCheckHighlight(gameEngine);
 
   // Making a move while browsing the continuation line — truncate and branch
   if (contLine && contLineBrowsing) {
@@ -10581,10 +10667,24 @@ function onDrop(source, target) {
 function onSnapEnd() {
   // Always use false (no animation) — onSnapEnd is a cleanup step after drag;
   // any intentional animation is handled explicitly by the move processing code.
-  if (analysisMode) { if (analysisEngine) boardObj.position(analysisEngine.fen(), false); return; }
-  if (openingFilterMode) { if (filterChess) boardObj.position(filterChess.fen(), false); return; }
-  if (browsingLine && engineLine) { const f = getEngineLineFen(); if (f) boardObj.position(f, false); return; }
-  if (gameEngine) boardObj.position(gameEngine.fen(), false);
+  if (analysisMode) {
+    if (analysisEngine) { boardObj.position(analysisEngine.fen(), false); showCheckHighlight(analysisEngine); }
+    return;
+  }
+  if (openingFilterMode) {
+    if (filterChess) { boardObj.position(filterChess.fen(), false); showCheckHighlight(filterChess); }
+    return;
+  }
+  if (browsingLine && engineLine) {
+    const f = getEngineLineFen();
+    if (f) {
+      boardObj.position(f, false);
+      // Engine line FEN isn't in a persistent chess.js instance; spin up a throwaway.
+      try { showCheckHighlight(new Chess(f)); } catch (_) { clearCheckHighlight(); }
+    }
+    return;
+  }
+  if (gameEngine) { boardObj.position(gameEngine.fen(), false); showCheckHighlight(gameEngine); }
 }
 
 // ─── Evaluate a move in tactic-solving mode ───
@@ -10738,6 +10838,7 @@ function tacticAutoPlayOpponent() {
   boardObj.position(gameEngine.fen(), true);
   clearHighlights();
   showLastMoveHighlightDeferred(oppMove.uci.substring(0, 2), oppMove.uci.substring(2, 4));
+  showCheckHighlightDeferred(gameEngine);
   highlightSquaresWithColor(oppMove.uci.substring(0, 2), oppMove.uci.substring(2, 4), 'var(--text-muted)');
 
   // Add opponent move to tactic line
@@ -10898,6 +10999,7 @@ function loadNextTacticAlt() {
 
   boardObj.position(gameEngine.fen(), false);
   currentSolveFen = gameEngine.fen();
+  showCheckHighlight(gameEngine);
 
   // Highlight the last common move
   if (commonLen > 0) {
@@ -11021,6 +11123,10 @@ function goToTacticLineMove(idx) {
     boardObj.position(tacticLine.moves[idx].fen, false);
   }
   clearHighlights();
+  // Check highlight for the navigated tactic position (throwaway Chess since
+  // tacticLine stores raw FENs without a persistent engine instance).
+  const tacFen = idx === -1 ? tacticLine.baseFen : tacticLine.moves[idx].fen;
+  try { showCheckHighlight(new Chess(tacFen)); } catch (_) { clearCheckHighlight(); }
 
   // Highlight the move's squares
   if (idx >= 0) {
@@ -11066,6 +11172,7 @@ function tacticTryAgain() {
   }
   // Restore board to current tactic position
   boardObj.position(gameEngine.fen(), true);
+  showCheckHighlightDeferred(gameEngine);
   browsingLine = false;
   // Clear feedback and engine line UI (but preserve tactic line)
   document.getElementById('feedbackContainer').innerHTML = '';
@@ -11248,6 +11355,7 @@ function confirmRemoveMistake() {
     currentMistakeIdx = -1;
     boardObj.position('start', false);
     clearLastMoveHighlight();
+    clearCheckHighlight();
     document.getElementById('emptyMsg').classList.remove('hidden');
     document.getElementById('posInfoCard').style.display = 'none';
   } else {
@@ -11274,6 +11382,7 @@ async function evaluateMove(from, to, move) {
         // Deviation from repertoire — undo and let user think / use hint
         gameEngine.undo();
         boardObj.position(gameEngine.fen(), false);
+        showCheckHighlight(gameEngine);
         currentAttempts--;
         clearLastMoveHighlight();
         clearHintHighlights();
@@ -11351,6 +11460,7 @@ async function evaluateMove(from, to, move) {
       showFeedback('info', 'Engine loading…', 'Stockfish is still initializing. Try again in a moment.');
       gameEngine.undo();
       boardObj.position(gameEngine.fen());
+      showCheckHighlightDeferred(gameEngine);
       currentAttempts--;
       return;
     }
@@ -11509,6 +11619,7 @@ async function evaluateMove(from, to, move) {
       showFeedback('info', 'Analysis error', 'Stockfish returned no result. Try again.');
       gameEngine.undo();
       boardObj.position(gameEngine.fen());
+      showCheckHighlightDeferred(gameEngine);
       return;
     }
 
@@ -11529,6 +11640,7 @@ async function evaluateMove(from, to, move) {
     showFeedback('info', 'Error', 'Analysis failed: ' + escHtml(err.message));
     gameEngine.undo();
     boardObj.position(gameEngine.fen());
+    showCheckHighlightDeferred(gameEngine);
   }
 }
 
@@ -11764,6 +11876,7 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
       }
       gameEngine.undo(); // undo the wrong move
       boardObj.position(gameEngine.fen(), false);
+      showCheckHighlight(gameEngine);
       finishAdvantage('collapse');
       return;
     } else if (continuationMode && silentContinuation) {
@@ -11840,6 +11953,7 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
     } else {
       gameEngine.undo();
       boardObj.position(gameEngine.fen(), false);
+      showCheckHighlight(gameEngine);
     }
   } else if (wpDrop <= 5) {
     // Good move in normal mode — show buttons instead of auto engine line
@@ -11868,6 +11982,7 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
         // No continuation to show — fall back to undo + retry from starting position
         gameEngine.undo();
         boardObj.position(gameEngine.fen());
+        showCheckHighlightDeferred(gameEngine);
       }
     }
   }
@@ -11902,6 +12017,7 @@ function onRevealBestMove(revealId) {
   exitEngineLine();
   gameEngine = new Chess(fen);
   boardObj.position(fen, false);
+  showCheckHighlight(gameEngine);
   if (bestMoveUci) {
     const fromSq = bestMoveUci.substring(0, 2);
     const toSq = bestMoveUci.substring(2, 4);
@@ -11917,6 +12033,7 @@ function revealBestMove(bestMoveUci, m) {
   exitEngineLine();
   gameEngine = new Chess(m.fenBefore);
   boardObj.position(m.fenBefore, false);
+  showCheckHighlight(gameEngine);
   const bestSan = uciToSan(m.fenBefore, bestMoveUci);
   const fromSq = bestMoveUci.substring(0, 2);
   const toSq = bestMoveUci.substring(2, 4);
@@ -12109,6 +12226,8 @@ async function handleEngineLineBranch(source, target) {
   // Show the move on the board without animation (piece is already there from the drop)
   boardObj.position(newFen, false);
   clearHighlights();
+  // 'chess' above already has the new branching move applied — reuse it.
+  showCheckHighlight(chess);
 
   // Determine if we're inside an alt (depth 1) and past its branch point
   // → replace continuation (depth limit = 2)
@@ -12454,6 +12573,16 @@ function goToLineMove(idx, animate = true) {
     clearLastMoveHighlight();
   }
 
+  // Check/checkmate aura at the navigated line position. Engine lines are raw
+  // FEN strings without a persistent chess.js instance, so spin up a throwaway.
+  // Deferred because boardObj.position above may have animated.
+  const checkFen = idx === -1 ? engineLine.baseFen : getEngineLineFen();
+  if (checkFen) {
+    try { showCheckHighlightDeferred(new Chess(checkFen)); } catch (_) { clearCheckHighlight(); }
+  } else {
+    clearCheckHighlight();
+  }
+
   // Re-render move list to update active highlights
   renderEngineLine();
 
@@ -12515,6 +12644,7 @@ function exitEngineLine() {
     const m = filteredMistakes[currentMistakeIdx];
     if (m && gameEngine) {
       boardObj.position(gameEngine.fen(), false);
+      showCheckHighlight(gameEngine);
     }
   }
 
@@ -12659,6 +12789,7 @@ function resumeContSession(session) {
   // the resumed session.
   clearBoardOverlays();
   clearLastMoveHighlight();
+  showCheckHighlight(gameEngine);
 
   // Restore contLine
   contLine = session.contLine;
@@ -12851,6 +12982,7 @@ function goToContLineMove(idx) {
   const fen = idx === -1 ? contLine.baseFen : contLine.moves[idx].fen;
   boardObj.position(fen, false);
   gameEngine.load(fen);
+  showCheckHighlight(gameEngine);
 
   // Previous-move highlight for current cont line move
   if (idx >= 0 && contLine.moves[idx].uci) {
@@ -13374,6 +13506,7 @@ function launchFilterPractice() {
   // selection, hint state) so they don't leak into practice mode.
   clearBoardOverlays();
   clearLastMoveHighlight();
+  showCheckHighlight(gameEngine);
   currentMistakeIdx = practiceIdx;
 
   // Hide review list, show practice state
@@ -13708,6 +13841,8 @@ function startAdvantageContinuation(m) {
   if (voiceSettings.enabled) voiceStart();
   if (!silentContinuation) showMaiaControls();
   updateEvalBar();
+  // Check highlight: peakFen may itself be a checking position.
+  showCheckHighlight(gameEngine);
   // peakFen is the position before the user's move — it's the user's turn.
   // Start pre-analysis and let the user play first; advanceContinuation will
   // fire after their good move to play the opponent's response.
@@ -14292,6 +14427,11 @@ async function showReviewBestLine(moveIdx) {
     gameEngine.move({ from: bestFrom, to: bestTo, promotion: bestPromo });
     boardObj.position(gameEngine.fen(), true);
     showLastMoveHighlightDeferred(bestFrom, bestTo);
+    showCheckHighlightDeferred(gameEngine);
+  } else {
+    // Board already at post-best — still refresh check state in case goToContLineMove
+    // left it in a different position before this function ran.
+    showCheckHighlight(gameEngine);
   }
   bestMoveArrow = null;
   moveClassBadge = null;
@@ -14366,6 +14506,7 @@ async function animateLinePreview(moveIdx, startIdx, endIdx) {
     if (lm.uci) {
       showLastMoveHighlight(lm.uci.substring(0, 2), lm.uci.substring(2, 4));
     }
+    showCheckHighlightDeferred(gameEngine);
     data.currentIdx = i;
 
     // Update active state in the move list
@@ -14387,6 +14528,7 @@ function goToReviewLine(moveIdx, lineIdx) {
   if (lm.uci) {
     showLastMoveHighlight(lm.uci.substring(0, 2), lm.uci.substring(2, 4));
   }
+  showCheckHighlight(gameEngine);
   bestMoveArrow = null;
   moveClassBadge = null;
   renderArrows();
@@ -14512,6 +14654,7 @@ async function showReviewRefutation(moveIdx, fromRetry = false) {
   if (fm) {
     boardObj.position(gameEngine.fen(), true);
     showLastMoveHighlightDeferred(firstMove.uci.substring(0, 2), firstMove.uci.substring(2, 4));
+    showCheckHighlightDeferred(gameEngine);
   }
   bestMoveArrow = null;
   moveClassBadge = null;
@@ -14578,6 +14721,7 @@ function restoreRetryResultView() {
   if (r.postFen) {
     gameEngine.load(r.postFen);
     boardObj.position(r.postFen, false);
+    showCheckHighlight(gameEngine);
   }
   handleReviewRetryResult(r.wpDrop, r.move, r.bestMoveSan, r.isExactBest);
   return true;
@@ -14781,6 +14925,10 @@ function startTacticContinuation() {
   continuationMode = true;
   showMaiaControls();
   updateEvalBar();
+  // Check highlight: the tactic may have delivered check — show it before the
+  // opponent's reply lands via advanceContinuation (which has its own deferred
+  // reapply after animation).
+  showCheckHighlight(gameEngine);
   document.getElementById('feedbackContainer').innerHTML = '';
   // gameEngine is at the final tactic position — let Maia/SF pick opponent's response
   advanceContinuation('');
@@ -14831,6 +14979,11 @@ function startContinuationMode() {
   // continuation. .square-lastmove from the user's good move is intentionally
   // preserved — clearBoardOverlays doesn't touch it.
   clearBoardOverlays();
+  // Check highlight: the user's move may have delivered check — reapply after
+  // clearBoardOverlays (which wipes the aura from the previous position) so it
+  // remains visible during the evaluation→continuation transition, before
+  // advanceContinuation's own deferred reapply takes over post-opponent-move.
+  showCheckHighlight(gameEngine);
 
   // Start voice mode if enabled
   if (voiceSettings.enabled) voiceStart();
@@ -15030,6 +15183,7 @@ async function advanceContinuation(contUci) {
   moveClassBadge = null; // clear user's move badge before opponent animates
   boardObj.position(gameEngine.fen(), true);
   showLastMoveHighlightDeferred(fromSq, toSq);
+  showCheckHighlightDeferred(gameEngine);
 
   // Record opponent's move in continuation line
   contLineSubtitle = `Opponent played ${escHtml(result.san)} (${moveSource})`;
@@ -15188,6 +15342,7 @@ async function advanceContinuation(contUci) {
         clearSelection();
         showLastMoveHighlight(pm.from, pm.to);
         boardObj.position(gameEngine.fen(), true);
+        showCheckHighlightDeferred(gameEngine);
         currentAttempts++;
         if (tacticMode) {
           evaluateTacticMove(pm.from, pm.to, testMove);
@@ -15315,6 +15470,7 @@ function retryPosition() {
 
     gameEngine = new Chess(m.fenBefore);
     boardObj.position(m.fenBefore, false);
+    showCheckHighlight(gameEngine);
     contLine = { baseFen: m.fenBefore, moves: [], currentIdx: -1 };
     continuationMode = true;
     silentContinuation = true;
@@ -15379,6 +15535,7 @@ function retryPosition() {
   gameEngine = new Chess(m.fenBefore);
   currentSolveFen = m.fenBefore;
   boardObj.position(m.fenBefore, false);
+  showCheckHighlight(gameEngine);
 
   // Reset info card (keep analysis status)
   document.getElementById('posInfoContent').innerHTML = `
@@ -15453,6 +15610,62 @@ function showLastMoveHighlightDeferred(from, to) {
   setTimeout(() => showLastMoveHighlight(from, to), 250);
 }
 
+/** Find the square of the king of the given color in a chess.js instance.
+ *  Returns 'e1'-style square string, or null if the king is missing (only
+ *  possible with custom/invalid positions). Uses chess.js 0.10.3's board()
+ *  which returns an 8×8 array of {type, color} | null from rank 8 down to rank 1.
+ */
+function findKingSquare(chess, color /* 'w' | 'b' */) {
+  if (!chess || typeof chess.board !== 'function') return null;
+  const grid = chess.board();
+  for (let r = 0; r < 8; r++) {
+    const row = grid[r];
+    if (!row) continue;
+    for (let f = 0; f < 8; f++) {
+      const p = row[f];
+      if (p && p.type === 'k' && p.color === color) {
+        const file = String.fromCharCode(97 + f); // 'a'..'h'
+        const rank = 8 - r;
+        return file + rank;
+      }
+    }
+  }
+  return null;
+}
+
+/** Lichess-style check/checkmate aura on the king's square. Reads state from
+ *  the supplied chess.js instance (chess.in_check / in_checkmate, turn() names
+ *  the side whose king is under attack). Clears previous check/checkmate
+ *  classes before applying so we never leave a stale red square behind.
+ *  Called wherever the board position is updated (loadPosition, goToContLineMove,
+ *  onSnapEnd, advanceContinuation, analysis nav, filter nav, etc.). Safe no-op
+ *  when chess is falsy. */
+function showCheckHighlight(chess) {
+  clearCheckHighlight();
+  if (!chess || typeof chess.in_check !== 'function') return;
+  if (!chess.in_check() && !chess.in_checkmate()) return;
+  const sq = findKingSquare(chess, chess.turn());
+  if (!sq) return;
+  const el = document.querySelector(`.square-${sq}`);
+  if (!el) return;
+  el.classList.add(chess.in_checkmate() ? 'square-checkmate' : 'square-check');
+}
+
+function clearCheckHighlight() {
+  document.querySelectorAll('.square-check, .square-checkmate').forEach(el => {
+    el.classList.remove('square-check', 'square-checkmate');
+  });
+}
+
+/** Apply check highlight now AND re-apply after board animation settles (250ms).
+ *  Mirrors showLastMoveHighlightDeferred — chessboard.js's animated position()
+ *  re-creates square DOM nodes on completion, wiping custom classes set before
+ *  the animation resolved. */
+function showCheckHighlightDeferred(chess) {
+  showCheckHighlight(chess);
+  setTimeout(() => showCheckHighlight(chess), 250);
+}
+
 /** Compute the previous move (opponent's move) that led to a mistake/tactic position */
 function getPrevMoveSquares(m) {
   const game = allGames.find(g => g.id === m.gameId);
@@ -15489,6 +15702,9 @@ function clearHighlights() {
 //   • bestMoveArrow, analysisArrow, moveClassBadge, ghost*, activeArrows/Circles,
 //     noteArrows/Circles, analysisPvArrows (via clearArrows — which also
 //     renderArrows()s the flushed state)
+//   • .square-check / .square-checkmate (Lichess-style king aura — scoped to
+//     the previous position; the new position's check state is computed and
+//     re-applied by callers via showCheckHighlight after boardObj.position)
 // Does NOT touch: .square-lastmove (per-caller: many transitions repaint it for
 // the new position — clearing here would force repaints or cause flicker),
 // .square-premove (separate clearPremove), filterArrows (scoped to filter mode),
@@ -15497,6 +15713,7 @@ function clearBoardOverlays() {
   clearHighlights();
   clearHintHighlights();
   clearArrows();
+  clearCheckHighlight();
 }
 
 // Clear the right-side feedback panels (feedback box, continuation line, pos info
@@ -15778,9 +15995,19 @@ function renderArrows() {
     // Hovered move arrow (blue, high opacity)
     if (hoverFilterArrow) drawOne(hoverFilterArrow.from, hoverFilterArrow.to, 'rgba(66, 133, 244, 0.8)', 1);
     // Best move arrow first (behind user arrows)
-    // Hide engine arrows during active advantage cap play (no visual hints)
+    // Hide engine arrows during active advantage cap play (no visual hints).
+    // BUG-007: the analysisArrow is separately suppressed during ANY continuation
+    // practice — the slow path in evaluateMove runs SF analysis on the user's
+    // after-move position while waiting for the opponent's reply, which briefly
+    // painted a blue arrow during gameplay. Continuation practice should feel
+    // like a game, not a puzzle. bestMoveArrow stays visible outside advantage
+    // mode because it's only ever set by review / repertoire / branching code —
+    // all contexts where the user is exploring, not playing live (verified by
+    // auditing every bestMoveArrow setter: goToContLineMove, showReviewBestArrow,
+    // showReviewRefutation, showRepertoireDeviation, revealRepertoireAnswer,
+    // repContShowAnswer, evaluateRepContRetryMove).
     const suppressEngineArrows = advantageMode && continuationMode;
-    if (analysisArrow && !suppressEngineArrows) drawOne(analysisArrow.from, analysisArrow.to, 'rgba(100, 160, 255, 0.5)', 1);
+    if (analysisArrow && !continuationMode) drawOne(analysisArrow.from, analysisArrow.to, 'rgba(100, 160, 255, 0.5)', 1);
     // Analysis mode: multi-PV arrows (draw weaker ones first so strongest is on top)
     if (analysisPvArrows.length > 0) {
       for (let i = analysisPvArrows.length - 1; i >= 0; i--) {
@@ -17069,6 +17296,7 @@ function onRepFenInput() {
     const turn = raw.split(' ')[1];
     boardObj.orientation(turn === 'b' ? 'black' : 'white');
     boardObj.position(raw, false);
+    showCheckHighlight(chess);
   }
 
   if (trieEntry) {
@@ -17192,6 +17420,7 @@ function showRepertoireDeviation(posKey) {
     const orientation = dev.playerColor === 'black' ? 'black' : 'white';
     boardObj.orientation(orientation);
     boardObj.position(dev.fenBefore, false);
+    try { showCheckHighlight(new Chess(dev.fenBefore)); } catch (_) { clearCheckHighlight(); }
   }
 
   // Show repertoire move arrow (green) and deviated moves (red)
@@ -17489,6 +17718,7 @@ function evaluateRepertoireMove(source, target, move) {
       // Wrong but still has attempts — undo and let them retry
       gameEngine.undo();
       boardObj.position(gameEngine.fen(), true);
+      showCheckHighlightDeferred(gameEngine);
 
       const remaining = 3 - currentAttempts;
       showColorFeedback('var(--yellow)', 'rgba(255,193,7,0.08)',
@@ -17519,6 +17749,7 @@ function revealRepertoireAnswer(m, expected, isLastItem) {
   bestMoveArrow = { from: expected.uci.slice(0, 2), to: expected.uci.slice(2, 4) };
   renderArrows();
   showLastMoveHighlight(expected.uci.slice(0, 2), expected.uci.slice(2, 4));
+  showCheckHighlightDeferred(gameEngine);
 
   const contAvailable = getRepertoireContinuations(gameEngine.fen()).length > 0;
   const contBtns = contAvailable
@@ -17674,6 +17905,7 @@ function advanceRepertoireContinuation() {
         }
         boardObj.position(gameEngine.fen(), true);
         showLastMoveHighlight(move.from, move.to);
+        showCheckHighlightDeferred(gameEngine);
         const branchesLeft = repContPendingBranches.filter(b => b.depth === branch.depth).length;
         showRepContPrompt(branch.repertoireMove, branchesLeft > 0 ? `(${branchesLeft + 1} lines remaining at this branch)` : '');
       }
@@ -17728,6 +17960,7 @@ function advanceRepertoireContinuation() {
   setTimeout(() => {
     showLastMoveHighlight(opMove.from, opMove.to);
   }, 250);
+  showCheckHighlightDeferred(gameEngine);
 
   const branchInfo = continuations.length > 1
     ? ` <span style="font-size:10px;color:var(--text-muted);">(${continuations.length} opponent responses)</span>`
@@ -17785,11 +18018,13 @@ function repContLineGoTo(idx) {
     gameEngine = new Chess(repContLine.baseFen);
     boardObj.position(repContLine.baseFen, false);
     clearLastMoveHighlight();
+    showCheckHighlight(gameEngine);
   } else {
     const mv = repContLine.moves[idx];
     gameEngine = new Chess(mv.fen);
     boardObj.position(mv.fen, false);
     showLastMoveHighlight(mv.from, mv.to);
+    showCheckHighlight(gameEngine);
   }
 
   repContBrowsing = idx < repContLine.moves.length - 1;
@@ -17851,6 +18086,7 @@ function evaluateRepertoireContinuationMove(source, target, move) {
     // Redo the move (board already shows the correct position from drag)
     gameEngine.move(move.san, { sloppy: true });
     showLastMoveHighlight(source, target);
+    showCheckHighlight(gameEngine);
 
     if (repContLine) {
       const uci = source + target + (move.promotion || '');
@@ -17869,6 +18105,8 @@ function evaluateRepertoireContinuationMove(source, target, move) {
   } else {
     // Wrong — show correct move, let them retry
     boardObj.position(gameEngine.fen(), false); // already undone
+    // Board reverted to pre-move FEN; refresh check state from that position.
+    showCheckHighlight(gameEngine);
 
     // Track this position as failed for continuation retry
     repContFailedFens.add(fenPositionKey(gameEngine.fen()));
@@ -17907,6 +18145,7 @@ function repContShowAnswer() {
   boardObj.position(gameEngine.fen(), true);
   bestMoveArrow = { from: expected.uci.slice(0, 2), to: expected.uci.slice(2, 4) };
   showLastMoveHighlight(move.from, move.to);
+  showCheckHighlightDeferred(gameEngine);
   renderArrows();
 
   showColorFeedback('var(--red)', 'rgba(239,83,80,0.08)',
@@ -17986,6 +18225,7 @@ function advanceRepContRetry() {
 
   gameEngine = new Chess(replayChess.fen());
   boardObj.position(gameEngine.fen(), false);
+  showCheckHighlight(gameEngine);
 
   // Show the last opponent move highlight if there was one
   if (next.moveIdx > 0) {
@@ -18019,6 +18259,7 @@ function evaluateRepContRetryMove(source, target, move) {
   if (isCorrect) {
     gameEngine.move(move.san, { sloppy: true });
     showLastMoveHighlight(source, target);
+    showCheckHighlight(gameEngine);
 
     // Remove from failed set — they got it right
     repContFailedFens.delete(beforePosKey);
@@ -18040,6 +18281,7 @@ function evaluateRepContRetryMove(source, target, move) {
       boardObj.position(gameEngine.fen(), true);
       bestMoveArrow = { from: expected.uci.slice(0, 2), to: expected.uci.slice(2, 4) };
       showLastMoveHighlight(correctMove.from, correctMove.to);
+      showCheckHighlightDeferred(gameEngine);
       renderArrows();
     }
 
@@ -18165,6 +18407,7 @@ function startRepertoireFromBeginning() {
   // dots, arrows, hint state) so they don't persist over the start position.
   clearBoardOverlays();
   clearLastMoveHighlight();
+  showCheckHighlight(gameEngine);
 
   // Show line display and update info
   renderRepLeadUpLine();
@@ -18197,6 +18440,7 @@ function replayRepertoireBeginning() {
   // dots, arrows, hint state) so they don't persist over the start position.
   clearBoardOverlays();
   clearLastMoveHighlight();
+  showCheckHighlight(gameEngine);
   renderRepLeadUpLine();
 
   // Auto-advance through moves with lerped timing (0.33s → 0.75s)
@@ -18215,6 +18459,8 @@ function replayRepertoireBeginning() {
       boardObj.position(mv.fen, true);
       repLeadUpIdx = idx;
       setTimeout(() => showLastMoveHighlight(mv.from, mv.to), 200);
+      // Check highlight on each replayed ply — animated, so use deferred.
+      showCheckHighlightDeferred(gameEngine);
       renderRepLeadUpLine();
       scheduleNext(idx + 1);
     }, delay);
@@ -18286,11 +18532,13 @@ function repLeadUpGoTo(idx) {
     gameEngine = new Chess(repLeadUpLine.baseFen);
     boardObj.position(repLeadUpLine.baseFen, false);
     clearLastMoveHighlight();
+    showCheckHighlight(gameEngine);
   } else {
     const mv = repLeadUpLine.moves[idx];
     gameEngine = new Chess(mv.fen);
     boardObj.position(mv.fen, false);
     showLastMoveHighlight(mv.from, mv.to);
+    showCheckHighlight(gameEngine);
   }
 
   renderRepLeadUpLine();
@@ -18321,6 +18569,7 @@ function repLeadUpPlayMove(source, target, move) {
     if (reMove) {
       boardObj.position(gameEngine.fen(), true);
       showLastMoveHighlight(source, target);
+      showCheckHighlightDeferred(gameEngine);
       currentAttempts++;
       evaluateRepertoireMove(source, target, reMove);
     }
@@ -18335,6 +18584,7 @@ function repLeadUpPlayMove(source, target, move) {
     repLeadUpIdx = nextIdx;
     boardObj.position(gameEngine.fen(), false);
     showLastMoveHighlight(source, target);
+    showCheckHighlight(gameEngine);
     renderRepLeadUpLine();
 
     // Auto-play opponent's response after a brief delay
@@ -18347,6 +18597,7 @@ function repLeadUpPlayMove(source, target, move) {
           repLeadUpIdx = nextIdx + 1;
           boardObj.position(gameEngine.fen(), true);
           setTimeout(() => showLastMoveHighlight(m.from, m.to), 250);
+          showCheckHighlightDeferred(gameEngine);
           renderRepLeadUpLine();
           updateRepLeadUpInfo();
           if (repLeadUpIdx >= repLeadUpLine.moves.length - 1) {
@@ -18364,6 +18615,7 @@ function repLeadUpPlayMove(source, target, move) {
     // Wrong context move — undo silently
     gameEngine.undo();
     boardObj.position(gameEngine.fen(), false);
+    showCheckHighlight(gameEngine);
   }
 }
 
@@ -18379,6 +18631,12 @@ function transitionFromLeadUpToDrill() {
   const targetFen = m.fenBefore.split(' ')[0];
   if (currentFen !== targetFen) {
     boardObj.position(m.fenBefore, false);
+    showCheckHighlight(gameEngine);
+  } else {
+    // Board already at the correct FEN but gameEngine was just freshly loaded —
+    // refresh check state in case the earlier repLeadUp animations left a stale
+    // square-check class from an intermediate position.
+    showCheckHighlight(gameEngine);
   }
 
   // Reset drill timer and attempts
