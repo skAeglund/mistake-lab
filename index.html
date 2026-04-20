@@ -167,6 +167,94 @@
   .note-panel textarea:focus { outline: none; border-color: var(--accent); }
   .note-panel .note-actions { display: flex; gap: 6px; margin-top: 8px; justify-content: flex-end; }
   .note-panel .note-hint { font-size: 10px; color: var(--text-muted); margin-top: 6px; }
+  .note-panel .note-toolbar { display: flex; gap: 4px; margin-top: 6px; }
+  .note-panel .note-toolbar .btn-inline { margin-left: 0; font-size: 10px; }
+  /* IMP-007: clickable variation lines inside rendered note view */
+  .note-variation {
+    display: inline;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    line-height: 1.6;
+  }
+  .note-move-num {
+    color: var(--text-muted);
+    font-size: 11px;
+    margin-right: 1px;
+  }
+  .note-move {
+    color: var(--text-primary);
+    padding: 0 3px;
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+  .note-move.clickable {
+    color: var(--blue);
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+  .note-move.clickable:hover {
+    background: rgba(91, 156, 240, 0.16);
+  }
+  .note-move.clickable.disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+  .note-move.clickable.disabled:hover {
+    background: transparent;
+  }
+  .note-move.illegal {
+    color: var(--text-secondary);
+    text-decoration: line-through;
+    text-decoration-color: var(--text-muted);
+    text-decoration-thickness: 1px;
+    opacity: 0.75;
+  }
+  .note-comment {
+    color: var(--text-muted);
+    font-style: italic;
+    font-size: 11px;
+    font-family: 'DM Sans', sans-serif;
+  }
+  .note-result {
+    color: var(--text-muted);
+    font-weight: 600;
+    font-size: 11px;
+  }
+  .note-variation-error {
+    color: var(--red);
+    font-size: 10px;
+    font-style: italic;
+    margin-left: 4px;
+  }
+  /* IMP-006: mobile drawing toggle + color palette inside the note edit panel */
+  .note-draw-toggle {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-top: 8px; padding: 6px 8px;
+    background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px;
+    font-size: 11px; color: var(--text-secondary);
+    cursor: pointer; user-select: none;
+  }
+  .note-draw-toggle.on {
+    background: rgba(76, 175, 80, 0.08); border-color: var(--green); color: var(--green);
+  }
+  .note-draw-palette {
+    display: flex; gap: 8px; align-items: center;
+    margin-top: 6px; padding: 6px 8px;
+    background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px;
+  }
+  .note-draw-swatch {
+    width: 22px; height: 22px; border-radius: 50%;
+    border: 2px solid transparent; cursor: pointer;
+    transition: transform 0.1s, border-color 0.1s;
+  }
+  .note-draw-swatch:active { transform: scale(0.92); }
+  .note-draw-swatch.green { background: #3ecc6f; }
+  .note-draw-swatch.red   { background: #e74c3c; }
+  .note-draw-swatch.blue  { background: #5b9cf0; }
+  .note-draw-swatch.selected { border-color: var(--text-primary); box-shadow: 0 0 0 2px var(--bg-primary) inset; }
+  .note-draw-palette .note-draw-hint {
+    flex: 1; font-size: 10px; color: var(--text-muted); line-height: 1.3;
+  }
   .btn-inline {
     background: none; border: 1px solid var(--border); color: var(--text-secondary);
     font-family: 'DM Sans', sans-serif; font-size: 10px; font-weight: 600;
@@ -1508,7 +1596,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">BUG-009: Fix "From beginning" lead-up for practice-sourced repertoire deviations. Root cause: continuation-practice deviations are saved with only positionKey + fenBefore; buildRepertoireLeadUp's trie walk from the standard start can diverge when the user's trie has multiple branches (picking e.g. English instead of Benko), and the game-line fallback is skipped because the synthetic gameId '_manual_xxx' never matches a real game. Result: a line that leads to the wrong position, with the board "flipping" to the correct fenBefore only at the transition. Fix: (1) auto-saved practice deviations now capture contLine.baseFen as initialFen and contLine.moves.map(mv=>mv.uci) as leadUpMoves; (2) buildRepertoireLeadUp gains a three-strategy resolution order — replay saved practice moves first, then trie walk, then game fallback; (3) when all three fail to reach target, return [] instead of the wrong partial line, and startRepertoireFromBeginning/replayRepertoireBeginning surface a "Lead-up unavailable" message instead of silently doing nothing (matters for legacy practice deviations saved before this fix); (4) baseFen for the lead-up session is now m.initialFen || standard start so navigating to repLeadUpIdx=-1 shows the correct session start, not a forced standard start. customDev → allDevs merge preserves the new initialFen/leadUpMoves fields and the source label.</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">IMP-006 + IMP-007: Position notes get mobile arrow drawing and clickable move lines. IMP-006 adds a ✎ Draw arrows toggle inside the note edit panel (rendered only when isMobileView()) with a green/red/blue palette that mirrors desktop's right-click + modifier-key semantics; touchstart/touchmove/touchend handlers wire through to the existing ghostCircle → ghostArrow flow so tap-tap draws an arrow, tap-same draws a circle, and re-tapping with the same color removes it. While mobileDrawMode is on, onBoardClick short-circuits before tap-to-clear / click-to-move and onDragStart returns false so pieces can't be picked up mid-draw. IMP-007 adds @@StartV@@ … @@EndV@@ move lines inside note text: in view mode the markers themselves are hidden and each SAN move is validated against chess.js from the note's anchor FEN (captured once when the panel opens). Legal-prefix moves render blue and clickable — clicking jumps the live board to that move's post-move FEN; first illegal move and everything after render struck-through and muted. {comments} render italic+muted, game-result tokens (1-0 / 0-1 / 1/2-1/2 / *) render muted. Clicks are disabled (visible but inert) during tacticMode / continuationMode / repertoireDrillMode. A new "+ Insert line" button in edit mode inserts markers at the caret. New noteAnchorFen state pins the panel to its opening position across view↔edit↔save transitions — enterNoteEditMode, saveNote, and deleteNote all key on noteAnchorFen || getCurrentNoteFen() so post-jump edits/saves/deletes still operate on the original note. New noteJumpedAway flag blocks piece drags and tap-to-move after a variation jump (so a drag on the jumped board can't flow into evaluateMove against stale mistake/drill state); reset in loadPosition and retryPosition alongside browsingLine; not raised during analysisMode or openingFilterMode since those modes route through their own engines. All note state (mobileDrawMode, noteAnchorFen) is force-reset by closeNotePanel / saveNote / deleteNote / showNoteViewMode so nothing leaks between sessions.</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1948,6 +2036,22 @@ let noteArrows = [];             // [{from, to, color}] arrows from saved note
 let noteCircles = [];            // [{square, color}] circles from saved note
 let notePanelOpen = false;       // true when note panel is visible
 let noteEditMode = false;        // true when note panel is in edit mode (vs read-only view)
+// IMP-007: snapshot of the FEN the note belongs to. Captured when the panel
+// opens and kept stable even if the user jumps around inside a clickable
+// variation — moves in @@StartV@@…@@EndV@@ blocks are parsed from here.
+let noteAnchorFen = null;
+// IMP-007: true after the user clicks a move inside a clickable variation.
+// Blocks piece interactions (drag, tap-to-move) until the user navigates
+// back to a drill position via Prev/Next/Retry, because gameEngine is
+// now at the jumped variation position and evaluating a move from here
+// against the still-active mistake context would produce nonsense.
+let noteJumpedAway = false;
+// IMP-006: mobile-only tap-to-draw mode for note-edit. Desktop uses
+// right-click drag which doesn't exist on touch devices, so note editing
+// on mobile previously couldn't attach arrows/circles at all.
+let mobileDrawMode = false;      // true when the in-note mobile drawing toggle is on
+let mobileDrawColor = 'green';   // 'green' | 'red' | 'blue' — selected palette color
+let mobileDrawStartSq = null;    // anchor square for the current touch sequence
 let reviewMode = false;          // true = show only due SRS positions
 let reviewQueue = [];            // positions due for review
 
@@ -9776,6 +9880,36 @@ function initBoard() {
   // Deselect on mouseup if the previous mousedown was on the already-selected square
   document.getElementById('board').addEventListener('mouseup', onBoardMouseUp, true);
   document.getElementById('board').addEventListener('touchend', onBoardMouseUp, true);
+
+  // IMP-006: touchmove/touchend hooks for mobile note-edit draw mode. These
+  // fire only while a draw sequence is in progress (mobileDrawStartSq set),
+  // so they don't interfere with normal board interaction.
+  document.getElementById('board').addEventListener('touchmove', (e) => {
+    if (!mobileDrawMode || !mobileDrawStartSq) return;
+    e.preventDefault();
+    const sq = getSquareFromEvent(e);
+    if (sq) mobileDrawTouchMove(sq);
+  }, { passive: false });
+  document.getElementById('board').addEventListener('touchend', (e) => {
+    if (!mobileDrawMode || !mobileDrawStartSq) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const sq = getSquareFromEvent(e);
+    mobileDrawTouchEnd(sq);
+  }, true);
+  document.getElementById('board').addEventListener('touchcancel', () => {
+    if (mobileDrawStartSq) {
+      // Restore any preview circle we stole and drop the in-progress draw.
+      if (ghostCircleWasColor && mobileDrawStartSq) {
+        activeCircles.set(mobileDrawStartSq, ghostCircleWasColor);
+      }
+      mobileDrawStartSq = null;
+      ghostArrow = null;
+      ghostCircle = null;
+      ghostCircleWasColor = null;
+      renderArrows();
+    }
+  }, true);
 }
     
 function onBoardClick(e) {
@@ -9784,6 +9918,20 @@ function onBoardClick(e) {
   // Guard: skip synthetic mousedown fired after a recent touch event
   if (!isTouch && Date.now() - lastTouchTime < 500) return;
   if (isTouch) lastTouchTime = Date.now();
+
+  // IMP-006: in mobile note-edit draw mode, reroute the touch to the
+  // draw handlers and suppress the usual tap-to-clear / click-to-move
+  // logic. We intercept BEFORE any selection/arrow clearing so the tap
+  // starts a draw instead of wiping the existing annotations.
+  if (isTouch && mobileDrawMode) {
+    const sq = getSquareFromEvent(e);
+    if (sq) {
+      e.preventDefault();
+      e.stopPropagation();
+      mobileDrawTouchStart(sq);
+    }
+    return;
+  }
 
   // Touch has no right-click — treat all touches as left click
   isRightClicking = !isTouch && (e.button === 2);
@@ -9898,6 +10046,9 @@ function onBoardClick(e) {
   }
 
   if (!gameEngine || browsingLine) return;
+  // IMP-007: same rationale as onDragStart — tap-to-move from a jumped
+  // variation position would be evaluated against stale mistake state.
+  if (noteJumpedAway) return;
 
   const m = filteredMistakes[currentMistakeIdx];
   if (!m) return;
@@ -10267,6 +10418,10 @@ function loadPosition(globalIdx, skipAnimation = false) {
   hideMaiaControls();
   engineLine = null;
   browsingLine = false;
+  // IMP-007: a fresh position load (Prev/Next/click from queue/retry) is
+  // the "return to drill" action that unblocks piece interactions after a
+  // variation jump. Keep this in lockstep with the browsingLine reset.
+  noteJumpedAway = false;
   contLine = null;
   clearContSession();
   contLineBrowsing = false;
@@ -10460,6 +10615,15 @@ function loadPosition(globalIdx, skipAnimation = false) {
 // ─── Board interaction ───
 function onDragStart(source, piece) {
   if (isRightClicking) return false;
+  // IMP-006: while mobile draw mode is active, the board is a drawing
+  // surface — blocking drags keeps a held touch from picking up a piece
+  // while the user is laying out an arrow.
+  if (mobileDrawMode) return false;
+  // IMP-007: after a click into a note's variation, the board is showing a
+  // variation position rather than the drill position; gameEngine has been
+  // reloaded to match. Any piece move here would flow into evaluateMove
+  // against the stale mistake/drill context, producing a bogus verdict.
+  if (noteJumpedAway) return false;
   // Analysis mode — allow any move for the side to move
   if (analysisMode && analysisEngine) {
     if (analysisEngine.game_over()) return false;
@@ -15534,6 +15698,10 @@ function retryPosition() {
   hintBtn2.style.color = '';
   engineLine = null;
   browsingLine = false;
+  // IMP-007: Retry from the anchor is a legitimate "back to drill"
+  // action — unblock piece interactions that were frozen by a prior
+  // variation jump.
+  noteJumpedAway = false;
   contLine = null;
   clearContSession();
   contLineBrowsing = false;
@@ -15900,6 +16068,35 @@ function getSquareFromMouseEvent(e) {
   const file = isWhite ? String.fromCharCode(97 + fileIdx) : String.fromCharCode(104 - fileIdx);
   const rank = isWhite ? (8 - rankIdx) : (1 + rankIdx);
 
+  return file + rank;
+}
+
+// IMP-006: touch-aware variant. Accepts mouse or touch events and returns
+// the square under the finger/cursor, or null if off-board. For touch
+// events falls back to the most-recent touch point so that touchmove works
+// (e.clientX is undefined on TouchEvents — coords live under .touches /
+// .changedTouches).
+function getSquareFromEvent(e) {
+  let clientX = e.clientX;
+  let clientY = e.clientY;
+  if (typeof clientX !== 'number') {
+    const t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]);
+    if (!t) return null;
+    clientX = t.clientX;
+    clientY = t.clientY;
+  }
+  const boardEl = document.querySelector('#board [class^="board-"]');
+  if (!boardEl) return null;
+  const rect = boardEl.getBoundingClientRect();
+  const x = clientX - rect.left;
+  const y = clientY - rect.top;
+  if (x < 0 || y < 0 || x > rect.width || y > rect.height) return null;
+  const sqSize = rect.width / 8;
+  const fileIdx = Math.floor(x / sqSize);
+  const rankIdx = Math.floor(y / sqSize);
+  const isWhite = boardObj.orientation() === 'white';
+  const file = isWhite ? String.fromCharCode(97 + fileIdx) : String.fromCharCode(104 - fileIdx);
+  const rank = isWhite ? (8 - rankIdx) : (1 + rankIdx);
   return file + rank;
 }
 
@@ -18860,6 +19057,213 @@ function toggleNotePanel() {
   }
 }
 
+// ─── IMP-007: Clickable variation lines in rendered notes ───
+//
+// A note can contain zero or more @@StartV@@ … @@EndV@@ blocks. Inside a
+// block we tokenize PGN-style move text (SAN moves, move numbers, {comments})
+// and validate each move against chess.js starting from the note's anchor
+// FEN. Moves that parse cleanly become clickable blue spans that jump the
+// live board to the post-move position. The first un-parseable move (and
+// everything after it, since the chess state is ambiguous past that point)
+// renders as plain struck-through text. Markers themselves are not shown
+// in view mode.
+
+const NOTE_VAR_START = '@@StartV@@';
+const NOTE_VAR_END = '@@EndV@@';
+
+function parseNoteText(text, anchorFen) {
+  // Split into alternating plain-text and variation segments.
+  const segments = [];
+  if (!text) return segments;
+  let idx = 0;
+  while (idx < text.length) {
+    const startPos = text.indexOf(NOTE_VAR_START, idx);
+    if (startPos === -1) {
+      if (idx < text.length) segments.push({ type: 'plain', text: text.substring(idx) });
+      break;
+    }
+    if (startPos > idx) {
+      segments.push({ type: 'plain', text: text.substring(idx, startPos) });
+    }
+    const endPos = text.indexOf(NOTE_VAR_END, startPos + NOTE_VAR_START.length);
+    if (endPos === -1) {
+      // Malformed (no closing marker) — surface remainder as plain text so
+      // the user can see what they typed and fix it.
+      segments.push({ type: 'plain', text: text.substring(startPos) });
+      break;
+    }
+    const inner = text.substring(startPos + NOTE_VAR_START.length, endPos);
+    segments.push({ type: 'variation', tokens: tokenizeVariation(inner, anchorFen) });
+    idx = endPos + NOTE_VAR_END.length;
+  }
+  return segments;
+}
+
+function tokenizeVariation(text, anchorFen) {
+  const tokens = [];
+  const chess = new Chess();
+  // If anchorFen fails to load, fall through with default start position —
+  // downstream moves will simply be flagged illegal.
+  if (anchorFen) chess.load(anchorFen);
+
+  // Once we hit an illegal move we can't keep tracking chess state reliably,
+  // so everything after is marked non-clickable.
+  let blocked = false;
+
+  // Matches (in priority order): {comment}, move-number (1. or 2...), game
+  // result token, or a non-whitespace run (candidate move).
+  const re = /\{([^}]*)\}|(\d+\.+)|(1-0|0-1|1\/2-1\/2|\*)|([^\s{}]+)/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m[1] !== undefined) {
+      tokens.push({ type: 'comment', text: m[1].trim() });
+      continue;
+    }
+    if (m[2]) {
+      tokens.push({ type: 'moveNum', text: m[2] });
+      continue;
+    }
+    if (m[3]) {
+      tokens.push({ type: 'result', text: m[3] });
+      continue;
+    }
+    const rawSan = m[4];
+    // Strip common NAG-ish trailing annotations so chess.js 0.10.3 doesn't
+    // reject the move (e4!, Nc6?!, etc.).
+    const cleanSan = rawSan.replace(/[!?]+$/, '');
+    if (blocked) {
+      tokens.push({ type: 'move', san: rawSan, clickable: false });
+      continue;
+    }
+    let moveObj = null;
+    try {
+      moveObj = chess.move(cleanSan, { sloppy: true });
+    } catch { moveObj = null; }
+    if (moveObj) {
+      tokens.push({
+        type: 'move',
+        san: rawSan,
+        from: moveObj.from,
+        to: moveObj.to,
+        fen: chess.fen(),
+        clickable: true,
+      });
+    } else {
+      blocked = true;
+      tokens.push({ type: 'move', san: rawSan, clickable: false });
+    }
+  }
+  return tokens;
+}
+
+// Escape a value for safe use inside an HTML attribute (single/double
+// quotes, ampersands, angle brackets).
+function escAttr(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function renderNoteBody(text, anchorFen) {
+  if (!text) return '';
+  const segments = parseNoteText(text, anchorFen);
+  let html = '';
+  for (const seg of segments) {
+    if (seg.type === 'plain') {
+      html += escHtml(seg.text).replace(/\n/g, '<br>');
+    } else {
+      html += renderVariationTokens(seg.tokens);
+    }
+  }
+  return html;
+}
+
+function renderVariationTokens(tokens) {
+  const drillActive = tacticMode || continuationMode || repertoireDrillMode;
+  const pieces = [];
+  for (const tok of tokens) {
+    if (tok.type === 'moveNum') {
+      pieces.push(`<span class="note-move-num">${escHtml(tok.text)}</span>`);
+    } else if (tok.type === 'move') {
+      if (tok.clickable) {
+        const cls = drillActive ? 'note-move clickable disabled' : 'note-move clickable';
+        const clickAttr = drillActive ? '' : ' onclick="jumpToNoteMove(this)"';
+        pieces.push(
+          `<span class="${cls}" data-fen="${escAttr(tok.fen)}" data-from="${escAttr(tok.from)}" data-to="${escAttr(tok.to)}"${clickAttr}>${escHtml(tok.san)}</span>`
+        );
+      } else {
+        pieces.push(`<span class="note-move illegal">${escHtml(tok.san)}</span>`);
+      }
+    } else if (tok.type === 'comment') {
+      pieces.push(`<span class="note-comment">${escHtml(tok.text)}</span>`);
+    } else if (tok.type === 'result') {
+      pieces.push(`<span class="note-result">${escHtml(tok.text)}</span>`);
+    }
+  }
+  return `<span class="note-variation">${pieces.join(' ')}</span>`;
+}
+
+// Invoked from onclick on a .note-move.clickable span. Jumps the live board
+// to the post-move FEN stored on the element. Blocked during drill modes —
+// jumping would disturb an in-progress tactic / continuation / repertoire
+// drill where the user is expected to find a specific move.
+function jumpToNoteMove(el) {
+  if (!el || !el.dataset) return;
+  if (tacticMode || continuationMode || repertoireDrillMode) return;
+  const fen = el.dataset.fen;
+  if (!fen || !boardObj) return;
+  try {
+    const probe = new Chess();
+    if (!probe.load(fen)) return;
+    gameEngine = probe;
+    boardObj.position(fen, false);
+    if (el.dataset.from && el.dataset.to) {
+      showLastMoveHighlight(el.dataset.from, el.dataset.to);
+    } else {
+      clearLastMoveHighlight();
+    }
+    showCheckHighlight(gameEngine);
+    // Note arrows/circles are attached to the anchor position and become
+    // meaningless (or misleading) once we've jumped into a variation — hide
+    // them until the user closes and reopens the note from the anchor.
+    hideNoteArrows();
+    // Block piece interactions until the user navigates back to a real
+    // drill position via Prev/Next/Retry. Otherwise a drag or tap-to-move
+    // from the jumped FEN would be evaluated against the still-loaded
+    // mistake context and produce a bogus verdict. Modes that have their
+    // own engine (analysis, opening-filter) don't need this block — they
+    // route through their own drag/click handlers before reaching the
+    // drill evaluation path.
+    if (!analysisMode && !openingFilterMode) {
+      noteJumpedAway = true;
+    }
+  } catch (err) {
+    console.warn('[Note] jump failed:', err);
+  }
+}
+
+// Insert @@StartV@@  @@EndV@@ at the textarea cursor (or wrapping the
+// current selection) and place the caret between the markers, ready to
+// type moves.
+function insertVariationMarkers() {
+  const ta = document.getElementById('noteText');
+  if (!ta) return;
+  const start = ta.selectionStart;
+  const end = ta.selectionEnd;
+  const before = ta.value.substring(0, start);
+  const selected = ta.value.substring(start, end);
+  const after = ta.value.substring(end);
+  const lead = NOTE_VAR_START + ' ';
+  const trail = ' ' + NOTE_VAR_END;
+  ta.value = before + lead + selected + trail + after;
+  const caret = start + lead.length + selected.length;
+  ta.focus();
+  ta.setSelectionRange(caret, caret);
+}
+
 function openNotePanel() {
   const panel = document.getElementById('notePanel');
   if (!panel) return;
@@ -18870,6 +19274,10 @@ function openNotePanel() {
 
   notePanelOpen = true;
   noteEditMode = false;
+  // IMP-007: anchor the panel to the position where it opens. Stays stable
+  // across view↔edit↔save transitions even if the user jumps into a
+  // variation in between; closeNotePanel clears it for the next session.
+  noteAnchorFen = fen;
 
   if (note) {
     // Show read-only view
@@ -18910,6 +19318,13 @@ function reparentNotePanelForViewport() {
 
 function showNoteViewMode(panel, note) {
   noteEditMode = false;
+  // IMP-006: view mode is non-interactive; drop any lingering draw state
+  mobileDrawMode = false;
+  mobileDrawStartSq = null;
+  // IMP-007: Do NOT reset noteAnchorFen here — this function is also called
+  // after saveNote, at which point gameEngine may be at a jumped position
+  // rather than the original anchor. openNotePanel is the single place
+  // that captures the anchor for the panel session.
   reparentNotePanelForViewport();
   // Show note arrows as overlay
   showNoteArrows(note);
@@ -18922,7 +19337,7 @@ function showNoteViewMode(panel, note) {
       <button class="btn btn-ghost btn-sm" onclick="enterNoteEditMode()" style="font-size:10px;padding:2px 8px;">✏ Edit</button>
       <button class="btn btn-ghost btn-sm" onclick="closeNotePanel()" style="font-size:10px;padding:2px 8px;">✕</button>
     </span></h4>
-    ${hasText ? `<div class="note-view-text">${escHtml(note.text)}</div>` : ''}
+    ${hasText ? `<div class="note-view-text">${renderNoteBody(note.text, noteAnchorFen)}</div>` : ''}
   `;
 }
 
@@ -18930,7 +19345,11 @@ function enterNoteEditMode() {
   const panel = document.getElementById('notePanel');
   if (!panel) return;
 
-  const fen = getCurrentNoteFen();
+  // IMP-007: prefer the anchor captured by openNotePanel. If the user
+  // clicked a variation move and then hit Edit, getCurrentNoteFen() would
+  // return the jumped position (wrong note, or no note at all); the anchor
+  // stays pinned to the position the panel was opened at.
+  const fen = noteAnchorFen || getCurrentNoteFen();
   if (!fen) return;
   const note = getNoteForFen(fen);
 
@@ -18954,11 +19373,33 @@ function enterNoteEditMode() {
   noteCircles = [];
   renderArrows();
 
+  // IMP-006: reset draw mode whenever we (re)enter edit. It's a mobile-only
+  // opt-in affordance; desktop users keep their right-click drag.
+  mobileDrawMode = false;
+  mobileDrawStartSq = null;
+  const showMobileDraw = isMobileView();
+  const drawToggleHtml = showMobileDraw ? `
+    <div id="noteDrawToggle" class="note-draw-toggle" onclick="toggleMobileDrawMode()">
+      <span>✎ Draw arrows on board</span>
+      <span id="noteDrawToggleState" style="font-size:10px;color:var(--text-muted);">Off</span>
+    </div>
+    <div id="noteDrawPalette" class="note-draw-palette hidden">
+      <div class="note-draw-swatch green selected" onclick="setMobileDrawColor('green')" data-color="green"></div>
+      <div class="note-draw-swatch red" onclick="setMobileDrawColor('red')" data-color="red"></div>
+      <div class="note-draw-swatch blue" onclick="setMobileDrawColor('blue')" data-color="blue"></div>
+      <div class="note-draw-hint">Tap two squares for an arrow, same square for a circle. Same color again to remove.</div>
+    </div>
+  ` : '';
+
   panel.style.display = 'block';
   panel.innerHTML = `
     <h4>${note ? '📝 Edit Note' : '📝 New Note'} <button class="btn btn-ghost btn-sm" onclick="closeNotePanel()" style="font-size:10px;padding:2px 8px;">✕</button></h4>
     <textarea id="noteText" maxlength="500" placeholder="Write a note about this position… (arrows on the board will be saved too)">${note?.text ? escHtml(note.text) : ''}</textarea>
+    <div class="note-toolbar">
+      <button type="button" class="btn-inline" onclick="insertVariationMarkers()" title="Insert a clickable move line">+ Insert line</button>
+    </div>
     <div class="note-hint">Arrows and circles drawn on the board will be saved with this note.</div>
+    ${drawToggleHtml}
     <div class="note-actions">
       ${note ? '<button class="btn btn-ghost btn-sm" onclick="deleteNote()" style="color:var(--red);border-color:var(--red)">🗑 Delete</button>' : ''}
       <button class="btn btn-ghost btn-sm" onclick="closeNotePanel()">Cancel</button>
@@ -18970,10 +19411,109 @@ function enterNoteEditMode() {
   if (ta) ta.focus();
 }
 
+// ─── IMP-006: mobile-only tap-to-draw arrows/circles in note edit mode ───
+
+function toggleMobileDrawMode() {
+  if (!noteEditMode) return;
+  mobileDrawMode = !mobileDrawMode;
+  mobileDrawStartSq = null;
+  ghostArrow = null;
+  ghostCircle = null;
+  ghostCircleWasColor = null;
+  const toggleEl = document.getElementById('noteDrawToggle');
+  const stateEl = document.getElementById('noteDrawToggleState');
+  const paletteEl = document.getElementById('noteDrawPalette');
+  if (toggleEl) toggleEl.classList.toggle('on', mobileDrawMode);
+  if (stateEl) stateEl.textContent = mobileDrawMode ? 'On' : 'Off';
+  if (paletteEl) paletteEl.classList.toggle('hidden', !mobileDrawMode);
+  renderArrows();
+}
+
+function setMobileDrawColor(color) {
+  if (color !== 'green' && color !== 'red' && color !== 'blue') return;
+  mobileDrawColor = color;
+  const swatches = document.querySelectorAll('#noteDrawPalette .note-draw-swatch');
+  swatches.forEach(sw => {
+    sw.classList.toggle('selected', sw.dataset.color === color);
+  });
+}
+
+// Called from onBoardClick on touchstart when mobileDrawMode is active.
+// Anchors a draw sequence on the tapped square (mirrors the desktop
+// right-click-mousedown branch).
+function mobileDrawTouchStart(sq) {
+  if (!sq) return;
+  mobileDrawStartSq = sq;
+  ghostArrow = null;
+  // Preview circle at the start square; remember any existing circle so that
+  // a same-color tap becomes a delete rather than a duplicate add.
+  ghostCircleWasColor = activeCircles.has(sq) ? activeCircles.get(sq) : null;
+  if (ghostCircleWasColor) activeCircles.delete(sq);
+  ghostCircle = sq;
+  currentDrawColor = mobileDrawColor;
+  renderArrows();
+}
+
+// Called from a board-level touchmove while a draw is in progress.
+// Same logic as the desktop mousemove handler, but indexed by touch coords.
+function mobileDrawTouchMove(sq) {
+  if (!mobileDrawStartSq || !sq) return;
+  if (sq !== mobileDrawStartSq) {
+    // Dragging to a different square — switch ghost circle → ghost arrow
+    if (ghostCircle) {
+      ghostCircle = null;
+      if (ghostCircleWasColor) activeCircles.set(mobileDrawStartSq, ghostCircleWasColor);
+    }
+    ghostArrow = { from: mobileDrawStartSq, to: sq };
+    renderArrows();
+  } else if (ghostArrow) {
+    // Dragged back to start — revert to circle preview
+    ghostArrow = null;
+    if (ghostCircleWasColor) activeCircles.delete(mobileDrawStartSq);
+    ghostCircle = mobileDrawStartSq;
+    renderArrows();
+  }
+}
+
+// Called from a board-level touchend. Commits arrow/circle with the selected
+// draw color; tapping the same color twice toggles removal (parity with
+// desktop right-click behavior).
+function mobileDrawTouchEnd(sq) {
+  if (!mobileDrawStartSq) return;
+  const startSq = mobileDrawStartSq;
+  const endSq = sq || startSq;
+  if (endSq !== startSq) {
+    const arrowKey = `${startSq}${endSq}`;
+    if (activeArrows.has(arrowKey) && activeArrows.get(arrowKey) === mobileDrawColor) {
+      activeArrows.delete(arrowKey);
+    } else {
+      activeArrows.set(arrowKey, mobileDrawColor);
+    }
+  } else {
+    // Same square — toggle circle
+    if (ghostCircleWasColor && ghostCircleWasColor === mobileDrawColor) {
+      // Same-color tap on existing circle → leave removed
+    } else {
+      activeCircles.set(endSq, mobileDrawColor);
+    }
+  }
+  mobileDrawStartSq = null;
+  ghostArrow = null;
+  ghostCircle = null;
+  ghostCircleWasColor = null;
+  renderArrows();
+}
+
 function closeNotePanel() {
   const wasEditing = noteEditMode;
   notePanelOpen = false;
   noteEditMode = false;
+  // IMP-006: exiting the panel must clear mobile draw state or the next
+  // tap on the board would incorrectly begin a draw.
+  mobileDrawMode = false;
+  mobileDrawStartSq = null;
+  // IMP-007: drop the anchor so the next openNotePanel captures fresh.
+  noteAnchorFen = null;
   const panel = document.getElementById('notePanel');
   if (panel) { panel.style.display = 'none'; panel.innerHTML = ''; }
   // Clear user-drawn arrows if we were editing
@@ -18992,7 +19532,11 @@ function closeNotePanel() {
 }
 
 function saveNote() {
-  const fen = getCurrentNoteFen();
+  // IMP-007: write to the anchor's position key, not wherever gameEngine
+  // happens to be. If the user clicked a variation move and then edited
+  // the note, the live fen is the jumped position — saving there would
+  // both stash the note at the wrong positionKey and lose the original.
+  const fen = noteAnchorFen || getCurrentNoteFen();
   if (!fen) return;
   const key = fenPositionKey(fen);
   const ta = document.getElementById('noteText');
@@ -19035,6 +19579,9 @@ function saveNote() {
 
   // Switch to view mode with the saved note
   noteEditMode = false;
+  // IMP-006: a saved note hands off to view mode; drop draw state.
+  mobileDrawMode = false;
+  mobileDrawStartSq = null;
   activeArrows.clear();
   activeCircles.clear();
   showNoteViewMode(document.getElementById('notePanel'), gistData.notes[key]);
@@ -19043,7 +19590,10 @@ function saveNote() {
 }
 
 function deleteNote() {
-  const fen = getCurrentNoteFen();
+  // IMP-007: delete the note at the anchor, not at a potentially-jumped
+  // live position — delete from the Edit panel after a variation click
+  // would otherwise target the wrong positionKey or silently no-op.
+  const fen = noteAnchorFen || getCurrentNoteFen();
   if (!fen || !gistData?.notes) return;
   const key = fenPositionKey(fen);
   if (!gistData.notes[key]) { closeNotePanel(); return; }
@@ -19058,6 +19608,12 @@ function deleteNote() {
 
   notePanelOpen = false;
   noteEditMode = false;
+  // IMP-006: drop draw state alongside edit state so the next board tap
+  // isn't interpreted as a draw.
+  mobileDrawMode = false;
+  mobileDrawStartSq = null;
+  // IMP-007: drop anchor for consistency with closeNotePanel.
+  noteAnchorFen = null;
   const panel = document.getElementById('notePanel');
   if (panel) { panel.style.display = 'none'; panel.innerHTML = ''; }
   activeArrows.clear();
