@@ -1596,7 +1596,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">IMP-006 + IMP-007: Position notes get mobile arrow drawing and clickable move lines. IMP-006 adds a ✎ Draw arrows toggle inside the note edit panel (rendered only when isMobileView()) with a green/red/blue palette that mirrors desktop's right-click + modifier-key semantics; touchstart/touchmove/touchend handlers wire through to the existing ghostCircle → ghostArrow flow so tap-tap draws an arrow, tap-same draws a circle, and re-tapping with the same color removes it. While mobileDrawMode is on, onBoardClick short-circuits before tap-to-clear / click-to-move and onDragStart returns false so pieces can't be picked up mid-draw. IMP-007 adds @@StartV@@ … @@EndV@@ move lines inside note text: in view mode the markers themselves are hidden and each SAN move is validated against chess.js from the note's anchor FEN (captured once when the panel opens). Legal-prefix moves render blue and clickable — clicking jumps the live board to that move's post-move FEN; first illegal move and everything after render struck-through and muted. {comments} render italic+muted, game-result tokens (1-0 / 0-1 / 1/2-1/2 / *) render muted. Clicks are disabled (visible but inert) during tacticMode / continuationMode / repertoireDrillMode. A new "+ Insert line" button in edit mode inserts markers at the caret. New noteAnchorFen state pins the panel to its opening position across view↔edit↔save transitions — enterNoteEditMode, saveNote, and deleteNote all key on noteAnchorFen || getCurrentNoteFen() so post-jump edits/saves/deletes still operate on the original note. New noteJumpedAway flag blocks piece drags and tap-to-move after a variation jump (so a drag on the jumped board can't flow into evaluateMove against stale mistake/drill state); reset in loadPosition and retryPosition alongside browsingLine; not raised during analysisMode or openingFilterMode since those modes route through their own engines. All note state (mobileDrawMode, noteAnchorFen) is force-reset by closeNotePanel / saveNote / deleteNote / showNoteViewMode so nothing leaks between sessions.</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix tactic ↔ analysis return position, closes #1. Entering Analysis mid-tactic then clicking Exit reset gameEngine to m.fenBefore — the tactic's START — because exitAnalysisMode only had two branches (game-review snapshot restore, or fall through to fenBefore) and tactics fell into the second. Combined with enterAnalysisMode setting tacticMode=false, the solve couldn't resume: tacticStepIdx stayed at its pre-analysis value but gameEngine was at ply 0, so opponent auto-plays filled in all the moves the user had already played — the tactic "completed" after only one move. Fix: snapshot the tactic solve state in enterAnalysisMode alongside reviewSnapshot. Covers three states via a single tacticHasState condition: (a) actively solving (tacticMode true), (b) paused between main/alt lines (tacticMode false, tacticLine populated, tacticCompleted false), (c) fully completed (tacticCompleted true). Snapshot captures gameEngine.fen, currentSolveFen, tacticStepIdx / WrongAttempts / HintUsed / AltIdx / PrefixUserMoves / Completed, refs to tacticMoves / AltLines / SolvedLines, deep-cloned tacticLine, feedback HTML, board highlights, and progressive hint state (hintLevel, hintArrow, hintMove). pausedBetweenLines + completedAtEntry markers let exit restore tacticMode correctly — false for both paused and completed (moves blocked), true for active solve. In exitAnalysisMode, branch to a tacticSnapshot restore path before the fenBefore fallback: rebuild gameEngine from snap.fen, restore all scalars, re-render tactic line + progress counter, re-inject feedback HTML, re-apply board highlights, and re-apply .square-hint class + hintArrow (clearBoardOverlays wipes them via clearHintHighlights, so they need re-rendering from snapshot). Edge case: if analysis was entered during the 400ms gap between a correct user move and the scheduled tacticAutoPlayOpponent(), the timeout fires with tacticMode=false and early-returns, so after restore the opponent's reply never plays. Re-dispatch tacticAutoPlayOpponent() on restore when the next step is an opponent move and we're in active-solve state (not paused or completed).</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -5984,6 +5984,61 @@ function enterAnalysisMode() {
     };
   }
 
+  // Snapshot mid-tactic solve state (parallel to reviewSnapshot). Without
+  // this, exitAnalysisMode resets gameEngine to m.fenBefore — i.e. the
+  // tactic START — and since enterAnalysisMode clears tacticMode below,
+  // the solve can't resume. User perceives "tactic returned to the
+  // beginning and finished after one move" (opponent auto-plays fill in
+  // all the moves they'd already played). See issue #1.
+  //
+  // Three states are captured:
+  //   (a) actively-solving: tacticMode true
+  //   (b) paused between main/alt lines: tacticMode false, tacticLine
+  //       populated, tacticCompleted false — feedback card shows
+  //       "▶ Next line" buttons
+  //   (c) fully completed: tacticMode false, tacticCompleted true —
+  //       feedback card shows "Tactic solved!" + continuation buttons
+  // The pausedBetweenLines / completedAtEntry markers let exit restore
+  // the correct tacticMode.
+  let tacticSnapshot = null;
+  const tacticHasState = m.type === 'tactic' &&
+                         (tacticMode ||
+                          (tacticLine && tacticLine.moves.length > 0) ||
+                          tacticCompleted);
+  if (tacticHasState) {
+    const inTacticPaused = !tacticMode && !tacticCompleted &&
+                           tacticLine && tacticLine.moves.length > 0;
+    tacticSnapshot = {
+      fen: gameEngine ? gameEngine.fen() : m.fenBefore,
+      currentSolveFen,
+      stepIdx: tacticStepIdx,
+      wrongAttempts: tacticWrongAttempts,
+      hintUsed: tacticHintUsed,
+      altIdx: tacticAltIdx,
+      prefixUserMoves: tacticPrefixUserMoves,
+      completed: tacticCompleted,
+      pausedBetweenLines: inTacticPaused,
+      completedAtEntry: tacticCompleted,
+      // tacticMoves / tacticAltLines / tacticSolvedLines are never mutated
+      // in place during solve (grep-confirmed), so ref capture is safe.
+      moves: tacticMoves,
+      altLines: tacticAltLines,
+      solvedLines: tacticSolvedLines,
+      // Deep-clone tacticLine — we push to .moves and mutate .currentIdx on
+      // each opponent auto-play, so sharing the ref would let analysis
+      // navigation leak changes back into the live tactic state.
+      line: tacticLine ? JSON.parse(JSON.stringify(tacticLine)) : null,
+      feedbackHtml: document.getElementById('feedbackContainer').innerHTML,
+      boardHighlights: captureBoardHighlights(),
+      // Hint state: clearBoardOverlays() during restore wipes .square-hint
+      // and hintArrow. Capture hintLevel / hintArrow / hintMove so the
+      // progressive hint (piece-highlight → arrow) survives analysis.
+      hintLevel,
+      hintArrow: hintArrow ? { ...hintArrow } : null,
+      hintMove,
+    };
+  }
+
   // Save review state
   analysisSavedState = {
     mistakeIdx: currentMistakeIdx,
@@ -5991,6 +6046,7 @@ function enterAnalysisMode() {
     engineLineState: engineLine,
     browsingLineState: browsingLine,
     reviewSnapshot,
+    tacticSnapshot,
   };
 
   // Determine the current position on the board
@@ -6116,9 +6172,74 @@ function exitAnalysisMode() {
   const qp = document.getElementById('queuePanel');
   if (qp) qp.style.display = '';
 
-  // Restore review state (if we came from game review) OR the standard mistake state
+  // Restore review state (if we came from game review), tactic solve state
+  // (if mid-tactic), OR the standard mistake state.
   if (analysisSavedState?.reviewSnapshot) {
     restoreReviewStateAfterAnalysis(analysisSavedState.reviewSnapshot);
+  } else if (analysisSavedState?.tacticSnapshot) {
+    // Issue #1: resume mid-tactic instead of resetting to fenBefore.
+    const m = filteredMistakes[analysisSavedState.mistakeIdx];
+    const snap = analysisSavedState.tacticSnapshot;
+    if (m && m.type === 'tactic') {
+      gameEngine = new Chess(snap.fen);
+      boardObj.orientation(m.playerColor || 'white');
+      boardObj.position(snap.fen, false);
+      currentSolveFen = snap.currentSolveFen || snap.fen;
+      clearBoardOverlays();
+      // Restore all tactic-mode scalar state. tacticMode must stay false
+      // for both paused-between-lines (card waits for "▶ Next line" click)
+      // and completed (tacticCompleted=true blocks moves via onDragStart
+      // guard). Otherwise user is actively solving → tacticMode true.
+      tacticMode = !snap.pausedBetweenLines && !snap.completedAtEntry;
+      tacticStepIdx = snap.stepIdx;
+      tacticWrongAttempts = snap.wrongAttempts;
+      tacticHintUsed = snap.hintUsed;
+      tacticAltIdx = snap.altIdx;
+      tacticPrefixUserMoves = snap.prefixUserMoves;
+      tacticCompleted = snap.completed;
+      tacticMoves = snap.moves;
+      tacticAltLines = snap.altLines;
+      tacticSolvedLines = snap.solvedLines;
+      tacticLine = snap.line;
+      // Rebuild UI: tactic line list, progress counter, feedback card,
+      // last-move highlights. Keep the posInfoContent as-is — it was set
+      // by the original loadPosition and doesn't change per-move.
+      renderTacticLine();
+      const userMovesSoFar = tacticMoves.slice(0, tacticStepIdx).filter(tm => tm.isUser).length;
+      const totalUserMoves = tacticMoves.filter(tm => tm.isUser).length;
+      updateTacticProgress(
+        userMovesSoFar - tacticPrefixUserMoves,
+        totalUserMoves - tacticPrefixUserMoves
+      );
+      const fb = document.getElementById('feedbackContainer');
+      if (fb && snap.feedbackHtml != null) fb.innerHTML = snap.feedbackHtml;
+      if (snap.boardHighlights) applyBoardHighlights(snap.boardHighlights);
+      showCheckHighlight(gameEngine);
+      // Restore progressive hint state. clearBoardOverlays above wiped
+      // both .square-hint and hintArrow — re-apply from the snapshot so
+      // the user doesn't lose their hint progress across analysis.
+      hintLevel = snap.hintLevel || 0;
+      hintMove = snap.hintMove || null;
+      hintArrow = snap.hintArrow ? { ...snap.hintArrow } : null;
+      if (hintLevel >= 1 && snap.hintMove) {
+        const fromSq = snap.hintMove.substring(0, 2);
+        const fromEl = document.querySelector(`.square-${fromSq}`);
+        if (fromEl) fromEl.classList.add('square-hint');
+      }
+      if (hintArrow) renderArrows();
+      // If the snapshot landed in the 400ms window between the user's
+      // correct move and the scheduled tacticAutoPlayOpponent(), that
+      // timeout fired while tacticMode was false and early-returned.
+      // Re-schedule so the opponent's reply still plays. Guard on
+      // tacticMode (false during pausedBetweenLines / completed states)
+      // and on the next step being an opponent move.
+      if (tacticMode &&
+          tacticStepIdx < tacticMoves.length &&
+          tacticMoves[tacticStepIdx] &&
+          !tacticMoves[tacticStepIdx].isUser) {
+        setTimeout(() => tacticAutoPlayOpponent(), 400);
+      }
+    }
   } else if (analysisSavedState) {
     const m = filteredMistakes[analysisSavedState.mistakeIdx];
     if (m) {
