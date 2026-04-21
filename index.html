@@ -1596,7 +1596,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Normalize non-pseudo-legal en passant in fenPositionKey. Strips EP when no capture is legal so transposed positions share a key. Fixes silent deviation-check misses, opening-explorer grouping, notes, practice scoreboard, and eval-cache fragmentation. REPERTOIRE_CACHE_VERSION 4→5. migrateLegacyPosKeys rewrites existing gistData keys.</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Continuation &amp; Advantage Capitalization: scan-pass fixes. Fixes stale post-move timer on nav; resume using orientation instead of playerColor; silent-eval queue corruption on branch/nav; opponent −0cp sign flip; advantage collapse losing its last move; engine-failure exits skipping SRS; explorer-failure notice hidden in non-silent mode; branching clobbering advantage UI.</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -4032,8 +4032,25 @@ function evalWorkerAnalyzePosition(fen, depth, multiPv) {
 }
 
 function queueSilentEval(moveIdx, preFen, postFen, userUci) {
-  silentEvalQueue.push({ moveIdx, preFen, postFen, userUci });
+  // BUG-D: stash both the contLine object reference AND the expected post-FEN
+  // at enqueue time. Two failure modes to defend against:
+  // 1. loadPosition nulls contLine and a new continuation creates a fresh
+  //    contLine object — contLineRef identity check catches this.
+  // 2. User branches mid-line: contLine.moves is sliced and refilled, so
+  //    the same index can now point to a DIFFERENT move. contLine object
+  //    identity is unchanged, but moves[moveIdx].fen differs — postFen
+  //    check catches this.
+  silentEvalQueue.push({ moveIdx, preFen, postFen, userUci, contLineRef: contLine });
   if (!silentEvalProcessing) processSilentEvalQueue();
+}
+
+// BUG-D: validate a queue item is still pointing at the move it was enqueued for
+function silentEvalItemStillValid(item) {
+  if (!contLine || item.contLineRef !== contLine) return false;
+  const mv = contLine.moves[item.moveIdx];
+  if (!mv) return false;
+  if (mv.fen !== item.postFen) return false;
+  return true;
 }
 
 async function processSilentEvalQueue() {
@@ -4042,12 +4059,12 @@ async function processSilentEvalQueue() {
 
   while (silentEvalQueue.length > 0) {
     const item = silentEvalQueue.shift();
-    if (!contLine || !contLine.moves[item.moveIdx]) continue;
+    if (!silentEvalItemStillValid(item)) continue;
 
     try {
       // Analyze pre-move position at high depth with MultiPV 3
       const preResult = await evalWorkerAnalyzePosition(item.preFen, SILENT_EVAL_DEPTH, 3);
-      if (!preResult || !contLine || !contLine.moves[item.moveIdx]) continue;
+      if (!preResult || !silentEvalItemStillValid(item)) continue;
 
       const bestCp = preResult.pvs[0]?.cp ?? 0;
 
@@ -4059,7 +4076,7 @@ async function processSilentEvalQueue() {
       } else {
         // Slow path: analyze post-move position
         const postResult = await evalWorkerAnalyzePosition(item.postFen, SILENT_EVAL_DEPTH, 1);
-        if (!postResult || !contLine || !contLine.moves[item.moveIdx]) continue;
+        if (!postResult || !silentEvalItemStillValid(item)) continue;
         const afterCp = -(postResult.pvs[0]?.cp ?? 0);
         cpLoss = bestCp - afterCp;
       }
@@ -4075,7 +4092,10 @@ async function processSilentEvalQueue() {
 
 /** Shared: apply deep eval classification to a contLine move. */
 function applySilentEvalToMove(item, preResult, cpLoss) {
-  if (!contLine || !contLine.moves[item.moveIdx]) return;
+  // BUG-D: final identity check — between the last still-valid guard and
+  // now, applySilentEvalToMove can be called directly or via the main-worker
+  // path, so verify once more before mutating.
+  if (!silentEvalItemStillValid(item)) return;
   const bestCp = preResult.pvs[0]?.cp ?? 0;
   const bestMoveSan = uciToSan(item.preFen, preResult.bestMove || '');
   const wpBefore = cpToWinPct(bestCp);
@@ -4113,7 +4133,16 @@ function applySilentEvalToMove(item, preResult, cpLoss) {
   if (item.moveIdx > 0) {
     const prevMv = contLine.moves[item.moveIdx - 1];
     if (prevMv && !prevMv.isUser && prevMv._prevUserAfterCp != null) {
-      const oppCpLoss = prevMv._prevUserAfterCp - bestCp;
+      // BUG-E: oppCpLoss is "how much did the opponent lose (from their
+      // perspective)". Opp-perspective eval went from -_prevUserAfterCp (before
+      // their move) to -bestCp (after). Their loss = before - after (opp-pers)
+      //   = -_prevUserAfterCp - (-bestCp) = bestCp - _prevUserAfterCp.
+      // Previous formula had the sign flipped — every opponent blunder came
+      // out negative, got clamped to 0 by Math.max, and review displayed
+      // "Lost X% winning chances (−0cp)" for every blunder. wpDrop was fine
+      // because the cpToWinPct-of-opp-perspective conversion happens to give
+      // a consistent positive delta.
+      const oppCpLoss = bestCp - prevMv._prevUserAfterCp;
       const oppWpBefore = cpToWinPct(-prevMv._prevUserAfterCp);
       const oppWpAfter = cpToWinPct(-bestCp);
       const oppWpDrop = oppWpBefore - oppWpAfter;
@@ -5144,7 +5173,11 @@ async function processQueueOnMainWorker() {
 
   while (silentEvalQueue.length > 0 && sfReady && !sfSearchActive && contLine) {
     const item = silentEvalQueue.shift();
-    if (!contLine || !contLine.moves[item.moveIdx]) continue;
+    // BUG-D: identity-validate before and after every await — an in-flight
+    // sfAnalyze can resolve after the user navigated or branched, in which
+    // case silentEvalQueue will already have been cleared (loadPosition) or
+    // the move at moveIdx is a different move (branching truncation).
+    if (!silentEvalItemStillValid(item)) continue;
 
     try {
       // Race sfAnalyze against worker termination or 10s timeout
@@ -5163,7 +5196,7 @@ async function processQueueOnMainWorker() {
         });
       });
 
-      if (!preResult || !contLine || !contLine.moves[item.moveIdx]) break;
+      if (!preResult || !silentEvalItemStillValid(item)) break;
 
       const bestCp = preResult.pvs[0]?.cp ?? 0;
       const matchedPv = preResult.pvs.find(pv => pv.firstMove === item.userUci);
@@ -5186,7 +5219,7 @@ async function processQueueOnMainWorker() {
             if (!done) { done = true; resolve(r); }
           });
         });
-        if (!postResult || !contLine || !contLine.moves[item.moveIdx]) break;
+        if (!postResult || !silentEvalItemStillValid(item)) break;
         const afterCp = -(postResult.pvs[0]?.cp ?? 0);
         applySilentEvalToMove(item, preResult, bestCp - afterCp);
       }
@@ -10646,7 +10679,9 @@ function onBoardClick(e) {
           renderContLine();
           currentAttempts++;
           continuationMode = true;
-          showMaiaControls();
+          // BUG-I: showMaiaControls only makes sense when the user can see
+          // Maia config — silent/advantage modes keep the controls hidden.
+          if (!silentContinuation) showMaiaControls();
           currentSolveFen = contLine.moves[contLine.currentIdx]?.fen || contLine.baseFen;
           evaluateMove(move.from, move.to, move);
         } else {
@@ -10654,14 +10689,15 @@ function onBoardClick(e) {
           addContLineMove(move.san, uci, gameEngine.fen(), false);
           contLineBrowsing = false;
           continuationMode = true;
-          showMaiaControls();
+          // BUG-I: same gate as above.
+          if (!silentContinuation) showMaiaControls();
           currentSolveFen = gameEngine.fen();
           currentAttempts = 0;
           hintLevel = 0;
           hintMove = null;
           clearHintHighlights();
           const hintBtnBranch = document.getElementById('btnHint');
-          if (hintBtnBranch) { hintBtnBranch.classList.remove('hidden'); hintBtnBranch.disabled = false; hintBtnBranch.textContent = '💡 Hint'; hintBtnBranch.style.borderColor = ''; hintBtnBranch.style.color = ''; }
+          if (hintBtnBranch && !silentContinuation) { hintBtnBranch.classList.remove('hidden'); hintBtnBranch.disabled = false; hintBtnBranch.textContent = '💡 Hint'; hintBtnBranch.style.borderColor = ''; hintBtnBranch.style.color = ''; }
           document.getElementById('btnRetry').classList.add('hidden');
           startPreAnalysis(currentSolveFen);
 
@@ -10669,14 +10705,22 @@ function onBoardClick(e) {
           renderContLine();
           const infoCard = document.getElementById('posInfoCard');
           infoCard.style.display = '';
-          document.getElementById('posInfoContent').innerHTML = `
-            <div style="font-size:13px;line-height:1.7">
-              <div style="color:var(--blue);font-weight:600;">Continuation Practice</div>
-              <div>Opponent played <code class="mono">${escHtml(move.san)}</code> <span style="font-size:10px;color:var(--text-muted)">(Manual)</span></div>
-              <div>Find the best move!</div>
-              <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
-            </div>
-          `;
+          // BUG-I: in silent/advantage mode, leave the existing info panel
+          // intact — it was set up by the mode's entry point (the "Convert
+          // the Advantage" or "Move N · Your turn" card) and overwriting it
+          // with generic "Continuation Practice" text misrepresents the
+          // mode. In non-silent mode, refresh the panel with the manual
+          // opponent move.
+          if (!silentContinuation) {
+            document.getElementById('posInfoContent').innerHTML = `
+              <div style="font-size:13px;line-height:1.7">
+                <div style="color:var(--blue);font-weight:600;">Continuation Practice</div>
+                <div>Opponent played <code class="mono">${escHtml(move.san)}</code> <span style="font-size:10px;color:var(--text-muted)">(Manual)</span></div>
+                <div>Find the best move!</div>
+                <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
+              </div>
+            `;
+          }
         }
         return;
       }
@@ -11310,7 +11354,8 @@ function onDrop(source, target) {
       renderContLine();
       currentAttempts++;
       continuationMode = true;
-      showMaiaControls();
+      // BUG-I: silent/advantage keeps Maia controls hidden.
+      if (!silentContinuation) showMaiaControls();
       currentSolveFen = contLine.moves[contLine.currentIdx]?.fen || contLine.baseFen;
       evaluateMove(source, target, move);
     } else {
@@ -11319,14 +11364,15 @@ function onDrop(source, target) {
       contLineBrowsing = false;
       // User changed opponent's move — now it's the user's turn
       continuationMode = true;
-      showMaiaControls();
+      // BUG-I: same gate.
+      if (!silentContinuation) showMaiaControls();
       currentSolveFen = gameEngine.fen();
       currentAttempts = 0;
       hintLevel = 0;
       hintMove = null;
       clearHintHighlights();
       const hintBtnBranch = document.getElementById('btnHint');
-      if (hintBtnBranch) { hintBtnBranch.classList.remove('hidden'); hintBtnBranch.disabled = false; hintBtnBranch.textContent = '💡 Hint'; hintBtnBranch.style.borderColor = ''; hintBtnBranch.style.color = ''; }
+      if (hintBtnBranch && !silentContinuation) { hintBtnBranch.classList.remove('hidden'); hintBtnBranch.disabled = false; hintBtnBranch.textContent = '💡 Hint'; hintBtnBranch.style.borderColor = ''; hintBtnBranch.style.color = ''; }
       document.getElementById('btnRetry').classList.add('hidden');
       startPreAnalysis(currentSolveFen);
 
@@ -11335,14 +11381,19 @@ function onDrop(source, target) {
       renderContLine();
       const infoCard = document.getElementById('posInfoCard');
       infoCard.style.display = '';
-      document.getElementById('posInfoContent').innerHTML = `
-        <div style="font-size:13px;line-height:1.7">
-          <div style="color:var(--blue);font-weight:600;">Continuation Practice</div>
-          <div>Opponent played <code class="mono">${escHtml(move.san)}</code> <span style="font-size:10px;color:var(--text-muted)">(Manual)</span></div>
-          <div>Find the best move!</div>
-          <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
-        </div>
-      `;
+      // BUG-I: leave silent/advantage panel intact (the mode-specific card
+      // set up at entry). Overwriting with generic "Continuation Practice"
+      // text misrepresents the current mode.
+      if (!silentContinuation) {
+        document.getElementById('posInfoContent').innerHTML = `
+          <div style="font-size:13px;line-height:1.7">
+            <div style="color:var(--blue);font-weight:600;">Continuation Practice</div>
+            <div>Opponent played <code class="mono">${escHtml(move.san)}</code> <span style="font-size:10px;color:var(--text-muted)">(Manual)</span></div>
+            <div>Find the best move!</div>
+            <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
+          </div>
+        `;
+      }
     }
     return undefined;
   }
@@ -12469,9 +12520,12 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
       // Find the last opponent move in contLine
       for (let ri = contLine.moves.length - 1; ri >= 0; ri--) {
         if (!contLine.moves[ri].isUser && contLine.moves[ri].classification === undefined) {
-          // Opponent's eval change: from user's perspective, bestCp is eval AFTER opponent moved
-          // lastContUserAfterCp is eval AFTER the previous user move (= before opponent moved)
-          const oppCpLoss = lastContUserAfterCp - bestCp; // positive = opponent lost eval
+          // BUG-E: opp loss (opp-pers) = (eval before opp moved, opp-pers) -
+          // (eval after opp moved, opp-pers) = -lastContUserAfterCp - (-bestCp)
+          // = bestCp - lastContUserAfterCp. Previous "lastContUserAfterCp - bestCp"
+          // had the sign flipped, so every opponent blunder stored cpLoss=0
+          // (Math.max clamp) and reviews showed "Lost X% winning chances (−0cp)".
+          const oppCpLoss = bestCp - lastContUserAfterCp;
           const oppWpBefore = cpToWinPct(-lastContUserAfterCp); // from opponent's perspective
           const oppWpAfter = cpToWinPct(-bestCp);
           const oppWpDrop = oppWpBefore - oppWpAfter;
@@ -12650,12 +12704,13 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
     // In silent mode: ALL moves advance (game continues like a real game)
     const shouldAdvance = wpDrop <= 10 || silentContinuation;
     if (shouldAdvance) {
-      // Advantage mode: track eval progression
-      if (advantageMode && (wpDrop <= 10 || silentContinuation)) {
-        updateAdvantageTracking(afterCpPlayer, wpDrop);
-        if (!advantageMode) return; // finishAdvantage was called (collapse)
-      }
-      // Record user's move in the continuation line (with eval data if in silent mode)
+      // BUG-F: record the move in contLine FIRST, then run advantage tracking.
+      // Previous order was the reverse — if updateAdvantageTracking called
+      // finishAdvantage('collapse'), the early return skipped addContLineMove
+      // entirely, so the killing move never appeared in contLine and the
+      // post-drill review ended one move short (showing the pre-collapse
+      // position as the final move). Deep-eval queueing also follows, so
+      // queueSilentEval records an entry for a move that's actually in contLine.
       const evalData = window._pendingContEvalData || undefined;
       window._pendingContEvalData = null;
       const userUci = from + to + (move.promotion || '');
@@ -12667,7 +12722,22 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
         queueSilentEval(moveIdx, currentSolveFen, gameEngine.fen(), userUci);
       }
 
-      setTimeout(() => advanceContinuation(contUci), 500);
+      // Advantage mode: track eval progression (may fire finishAdvantage on collapse)
+      if (advantageMode && (wpDrop <= 10 || silentContinuation)) {
+        updateAdvantageTracking(afterCpPlayer, wpDrop);
+        if (!advantageMode) return; // finishAdvantage was called (collapse)
+      }
+
+      // BUG-A: snapshot currentMistakeIdx and continuationMode so a rapid
+      // Prev/Next/Retry/Skip during the 500ms delay doesn't fire
+      // advanceContinuation against a different position (which would corrupt
+      // the new position's gameEngine / contLine / UI).
+      const snapshotMistakeIdx = currentMistakeIdx;
+      setTimeout(() => {
+        if (currentMistakeIdx !== snapshotMistakeIdx) return; // user navigated away
+        if (!continuationMode) return; // continuation canceled (retry, exit, etc.)
+        advanceContinuation(contUci);
+      }, 500);
     }
   } else if (contWrongMovePending) {
     // Continuation wrong move — show engine line with refutation and allow branching
@@ -13541,9 +13611,15 @@ function resumeContSession(session) {
   }
 
   // Determine whose turn it is
+  // BUG-C: use session.playerColor as the source of truth, NOT boardObj.orientation.
+  // The user can flip the board via F / flip button during play — after that,
+  // orientation diverges from playerColor. Using orientation here would pick the
+  // wrong turn-char on resume and fire advanceContinuation at the wrong time
+  // (opponent move played on user-to-move position, or pre-analysis started on
+  // opponent-to-move position).
   const fenTurn = resumeFen.split(' ')[1];
-  const userTurnChar = orientation === 'white' ? 'w' : 'b';
-  const isUserTurn = fenTurn === userTurnChar;
+  const playerColorChar = (session.playerColor || 'white') === 'white' ? 'w' : 'b';
+  const isUserTurn = fenTurn === playerColorChar;
 
   // UI: show position info and hint button
   const infoCard = document.getElementById('posInfoCard');
@@ -13559,14 +13635,24 @@ function resumeContSession(session) {
     if (silentContinuation) {
       if (hintBtn) hintBtn.classList.add('hidden');
       const moveCount = contLine.moves.filter(mv => mv.isUser).length;
+      // BUG-B: Stop & Review must not appear in advantage mode — it bypasses
+      // finishAdvantage, so the SRS card for the advantage item never gets
+      // updated. Mirror the live renderContLine / silent info-panel guards
+      // (both already gate on !advantageMode).
+      const headerHtml = advantageMode
+        ? `<div style="color:#4caf50;font-weight:600;">${ICON_ADVANTAGE} Convert the Advantage (resumed)</div>`
+        : `<div style="color:var(--blue);font-weight:600;">Resumed Game</div>`;
+      const stopReviewBtn = !advantageMode
+        ? `<div id="contStopReviewWrap" style="margin-top:6px;">
+            <button class="btn btn-ghost btn-sm" style="font-size:11px;border-color:var(--accent);color:var(--accent);" onclick="stopAndReviewContinuation()">📋 Stop & Review</button>
+          </div>`
+        : '';
       document.getElementById('posInfoContent').innerHTML = `
         <div style="font-size:13px;line-height:1.7">
-          <div style="color:var(--blue);font-weight:600;">Resumed Game</div>
+          ${headerHtml}
           <div>Move ${moveCount + 1} · Your turn</div>
           <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
-          <div id="contStopReviewWrap" style="margin-top:6px;">
-            <button class="btn btn-ghost btn-sm" style="font-size:11px;border-color:var(--accent);color:var(--accent);" onclick="stopAndReviewContinuation()">📋 Stop & Review</button>
-          </div>
+          ${stopReviewBtn}
         </div>`;
     } else {
       if (hintBtn) { hintBtn.classList.remove('hidden'); hintBtn.disabled = false; hintBtn.textContent = '💡 Hint'; }
@@ -14623,7 +14709,8 @@ function claimAdvantageVictory() {
 }
 
 function finishAdvantage(outcome) {
-  // outcome: 'victory' (claim or checkmate), 'collapse' (eval ≤ 100cp), 'draw'
+  // outcome: 'victory' (claim or checkmate), 'collapse' (eval ≤ 100cp), 'draw',
+  //          'interrupted' (engine/explorer failure — NO SRS grade recorded)
   if (!advantageMode) return;
   if (voiceMode) voiceStop();
   advantageMode = false;
@@ -14661,6 +14748,14 @@ function finishAdvantage(outcome) {
     gradeLabel = 'Again';
     title = ICON_ADVANTAGE + ' Draw — advantage lost';
     body = 'The position ended in a draw. You needed to push harder to convert the win.';
+  } else if (outcome === 'interrupted') {
+    // BUG-G: engine or explorer couldn't provide an opponent move — not the
+    // user's fault, so no SRS grade. The drill just terminates with a retry
+    // prompt.
+    grade = null;
+    gradeLabel = null;
+    title = ICON_ADVANTAGE + ' Drill interrupted';
+    body = 'Couldn\'t determine the opponent\'s response (engine or database unavailable). Try again.';
   } else {
     // collapse
     grade = FSRS_GRADE.again;
@@ -14670,7 +14765,7 @@ function finishAdvantage(outcome) {
   }
 
   let srsInfo = '';
-  if (!srsRecorded) {
+  if (grade !== null && !srsRecorded) {
     const srsCard = recordReview(pid, grade);
     srsRecorded = true;
     srsInfo = srsTag(gradeLabel, srsCard);
@@ -14689,8 +14784,12 @@ function finishAdvantage(outcome) {
     : '';
 
   showColorFeedback(
-    outcome === 'victory' ? '#4caf50' : '#ef5f5f',
-    outcome === 'victory' ? 'rgba(76,175,80,0.08)' : 'rgba(239,95,95,0.08)',
+    outcome === 'victory' ? '#4caf50'
+      : outcome === 'interrupted' ? 'var(--accent)'
+      : '#ef5f5f',
+    outcome === 'victory' ? 'rgba(76,175,80,0.08)'
+      : outcome === 'interrupted' ? 'rgba(66,133,244,0.08)'
+      : 'rgba(239,95,95,0.08)',
     title, body + srsInfo + reviewBtn + invalidateBtn
   );
 
@@ -15840,6 +15939,10 @@ async function advanceContinuation(contUci) {
       stopPreAnalysis();
       const result = await sfAnalyze(gameEngine.fen(), 16, 1);
       if (!result || !result.bestMove) {
+        // BUG-G: advantage items need finishAdvantage — otherwise the SRS
+        // card never updates and the drill effectively vanishes. Use
+        // 'interrupted' so the user isn't penalized for an engine failure.
+        if (advantageMode) { finishAdvantage('interrupted'); return; }
         recordPracticeResult(evalToResult(afterMoveCpWhite), afterMoveCpWhite);
         continuationMode = false;
         silentContinuation = false;
@@ -15895,6 +15998,9 @@ async function advanceContinuation(contUci) {
     else console.warn(`[advanceContinuation] Move failed: ${opponentUci} in FEN: ${gameEngine.fen()}`);
   }
   if (!result) {
+    // BUG-G: see sfAnalyze-failure branch above — advantage drills need
+    // finishAdvantage or the SRS card never updates.
+    if (advantageMode) { finishAdvantage('interrupted'); return; }
     recordPracticeResult(evalToResult(afterMoveCpWhite), afterMoveCpWhite);
     continuationMode = false;
     silentContinuation = false;
@@ -15966,6 +16072,9 @@ async function advanceContinuation(contUci) {
   const userTurn = (m.playerColor === 'white' && gameEngine.turn() === 'w') ||
                    (m.playerColor === 'black' && gameEngine.turn() === 'b');
   if (!userTurn) {
+    // BUG-G: see sfAnalyze-failure branch above — advantage drills need
+    // finishAdvantage or the SRS card never updates.
+    if (advantageMode) { finishAdvantage('interrupted'); return; }
     recordPracticeResult(evalToResult(afterMoveCpWhite), afterMoveCpWhite);
     const wasSilent3 = silentContinuation;
     continuationMode = false;
@@ -16032,6 +16141,20 @@ async function advanceContinuation(contUci) {
     document.getElementById('feedbackContainer').innerHTML = '';
     const infoCard = document.getElementById('posInfoCard');
     infoCard.style.display = '';
+
+    // BUG-H: the explorerApiFailed notice used to only render in the silent
+    // branch above, so users with Instant Feedback on never saw it — they
+    // just silently got a Maia move with no explanation for why the DB
+    // indicator was missing. Build the notice here and interpolate it into
+    // whichever of the two info-panel templates below is chosen.
+    let explorerNoticeNs = '';
+    if (switchedToMaia && explorerNotifyMaia) {
+      explorerNoticeNs = '<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">📊→🧠 Database exhausted — switched to Maia</div>';
+    } else if (explorerApiFailed && !explorerApiNotified) {
+      explorerApiNotified = true;
+      explorerNoticeNs = '<div style="font-size:11px;color:var(--text-warning,#e6a117);margin-top:2px;">📊 Database unavailable — using Maia</div>';
+    }
+
     if (advantageMode) {
       const om = filteredMistakes[currentMistakeIdx];
       const evalDisplay = om?.peakCp ? (om.peakCp / 100).toFixed(1) : '?';
@@ -16039,7 +16162,7 @@ async function advanceContinuation(contUci) {
         <div style="font-size:13px;line-height:1.7">
           <div style="color:#4caf50;font-weight:600;">${ICON_ADVANTAGE} Convert the Advantage (+${evalDisplay})</div>
           <div>Opponent played <code class="mono">${escHtml(result.san)}</code> <span style="font-size:10px;color:var(--text-muted)">(${moveSource})</span></div>
-          ${switchedToMaia && explorerNotifyMaia ? '<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">📊→🧠 Database exhausted — switched to Maia</div>' : ''}
+          ${explorerNoticeNs}
           <div>Find the best move!</div>
           <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
         </div>
@@ -16051,7 +16174,7 @@ async function advanceContinuation(contUci) {
         <div style="font-size:13px;line-height:1.7">
           <div style="color:var(--blue);font-weight:600;">Continuation Practice</div>
           <div>Opponent played <code class="mono">${escHtml(result.san)}</code> <span style="font-size:10px;color:var(--text-muted)">(${moveSource})</span></div>
-          ${switchedToMaia && explorerNotifyMaia ? '<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">📊→🧠 Database exhausted — switched to Maia</div>' : ''}
+          ${explorerNoticeNs}
           <div>Find the best move!</div>
           <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)">⟳ Analyzing…</div>
         </div>
