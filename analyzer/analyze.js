@@ -549,6 +549,11 @@ function normalizeChesscomGame(g, username) {
     id: gameId,
     moves: history.join(' '),
     analysis: null, // will be filled by analyzer
+    rated: !!g.rated, // chess.com API returns a boolean; propagate so the
+                      // browser's rated/casual filter can actually distinguish
+                      // them. Without this field the runtime default
+                      // (rated !== false → true) misclassifies casual chess.com
+                      // games as rated.
     players: {
       white: { user: { name: headers.White || 'Unknown', id: (headers.White || 'unknown').toLowerCase() } },
       black: { user: { name: headers.Black || 'Unknown', id: (headers.Black || 'unknown').toLowerCase() } },
