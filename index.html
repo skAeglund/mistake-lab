@@ -1596,7 +1596,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix fast-retry race in tactic engine line, closes #2. Clicking Try again while the async engine-line build was mid-flight in evaluateTacticMove's wrong-move path would let a stale buildEngineLine land on the already-reset board — the user would see the tactic position restored, then an ENGINE LINE panel materialize a moment later (with the gameEngine.undo() from the late handler corrupting state since tacticTryAgain had already undone the wrong move). The existing guards checked tacticMode / currentSolveFen / currentAttempts after the sfAnalyzeAdaptive await, but tacticTryAgain keeps all three stable — it undoes the wrong move on gameEngine without incrementing any tracked counter — so the guard passed and the late engine line landed. Fix: add tacticEngineLineSession counter; snapshot it when the async IIFE starts (via ++tacticEngineLineSession, so each build gets its own unique token), check it both inside the onUpdate callback (to suppress stale analysis arrows at intermediate depths) and after sfAnalyzeAdaptive resolves (to discard the final result). Bump the counter in tacticTryAgain; also clearAnalysisArrow() there so any arrow that slipped through before the token bump is wiped. Worker keeps searching until its own bestmove or the next move terminates it, but nothing lands on the board. Scanned other async SF + buildEngineLine sites for the same class of bug: mistake evaluateMove (line ~11904) also awaits SF, but its Try-again buttons are rendered inside handleEvalResult AFTER the await chain, so no race window — session guard not needed. contWrongMovePending path (~12247) and showTacticEngineLine (~15236) same reasoning: buttons only appear after the async work completes. The fix is scoped to the one place where the button is deliberately shown synchronously while SF runs in the background.</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Opening filter/explorer + filter subsystem: scan-pass fixes. Multi-fix pass across the filtering code. Opening filter scan: renderGameList's type-filter threshold was &lt; 2 (leftover from a 2-chip era) while applyFilters was already &lt; 3 — bumped renderGameList to match. applyFilters' type check gates only mistake/tactic/advantage; repertoire and practice items now pass through (they're synthetic and chip-less, previously got dropped as soon as any type chip was deselected). exploreRepertoireGap was reconstructing a full FEN as positionKey + ' 0 1' — the fullmove '1' then poisoned launchFilterPractice's move-number extraction for positions deep in openings; now uses gap.fen which already has real counters. buildOpeningIndex's batched build had no try/catch — a single malformed game threw mid-batch, left pmiBuilding/fenIndexBuilding stuck at true, and the explorer showed "Loading games…" forever; added inner per-game catch (skip bad game, keep going) and outer whole-batch catch (reset flags, null partial indices, show error state). extractAllMistakes had fenIndexGameCount = allGames.length unconditionally, which on re-extraction (e.g. after loadRepertoireTrie trimmed more mistakes) made a stale index appear fresh — replaced with conditional invalidation that zeros the counters if indices were previously built, respecting the in-progress-build concurrency contract. logout now resets the full opening filter + explorer state (openingFilterMode/Fen, filterChess, filterMoveHistory, savedBoardState, gameFenIndex, positionMoveIndex, fenDataCache + preload promise, filterArrows, hoverFilterArrow, pmiBuilding/fenIndexBuilding flags, and a new openingBuildSession token) plus closes any open promotion picker. activatePanelTab cleans up practiceContItem on tab transitions so a filter-practice session doesn't leak into the review queue via buildReviewQueue. loadPosition previously silently loaded the wrong item when globalIdx === pIdx of the spliced practice item; now detects wasPractice, clears the board, shows emptyMsg, re-renders the list. Filter mode gets a proper promotion picker — filterMakeMove accepts an optional promotion piece; showFilterPromoPicker renders a file-aligned column of cburnett Q/R/B/N icons extending from the destination square toward the board center (screen-geometry based, orientation-independent), with mouse + touch handlers and outside-click dismiss. Added openingBuildSession monotonic token to guard the completion paths of an in-flight build when logout fires mid-build: captured at doBuildOpeningIndex start, checked at top of each processBatch iteration (abandons cleanly) and before both success-publish and error-handler mutations (doesn't touch globals/flags owned by the new session). Filter subsystem: normalizeSpeed maps chess.com 'daily' and lichess 'ultraBullet'/'correspondence' into the four chipped buckets — without it, these games vanished whenever any speed chip was deselected (the Classical chip's time-daily.svg icon confirms daily+classical were meant as one bucket). gamePassesGameFilters is now the single source of truth for platform/color/speed/rated/opening; applyFilters (for mistakes via m.game) and renderGameList (for games directly) both call it, eliminating the four near-duplicate branches that already had drifted. toggleFilter's last-chip behavior on 3+ option filters (speed, type) used to be a silent no-op that looked like a broken button; now re-activates all chips in the group, giving the click a visible effect and a one-tap reset.</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2173,6 +2173,10 @@ let savedBoardState = null;      // { fen, orientation, mistakeIdx } to restore 
 let positionMoveIndex = null;    // Map<positionKey, Map<moveSAN, MoveStats>> for opening explorer
 let pmiBuilding = false;         // true while async PMI build is in progress
 let pmiGameCount = 0;            // allGames.length when PMI was built
+// Monotonic session token. Incremented on logout so an in-flight buildOpeningIndex
+// doesn't write its old-user result into the global indices (or flip the build
+// flags back to false) after a new user has logged in.
+let openingBuildSession = 0;
 // Fen data cache: per-game { moveStats: [{posKey, moveUci, moveSan}], finalFen } — used to
 // build gameFenIndex/PMI without replaying games through chess.js. Stored in IndexedDB
 // (localStorage has ~5MB quota that's easily exceeded on mobile with games/eval caches).
@@ -7799,6 +7803,34 @@ function logout() {
   localStorage.removeItem('mistakelab_username');
   allGames = []; allMistakes = []; filteredMistakes = [];
   currentMistakeIdx = -1; activeGameId = null;
+  // Reset opening filter / explorer state — a different user may log in next and
+  // would otherwise inherit the previous user's filter chip, game-fen index, and
+  // PMI (which holds opponent names and ratings from the previous user's games).
+  closeFilterPromoPicker(); // orphan DOM element if open
+  openingFilterMode = false;
+  openingFilterFen = null;
+  filterChess = null;
+  filterMoveHistory = [];
+  filterMoveIdx = -1;
+  savedFilterOrientation = null;
+  savedBoardState = null;
+  gameFenIndex = null;
+  positionMoveIndex = null;
+  fenIndexGameCount = 0;
+  pmiGameCount = 0;
+  // Build flags: if a build is in flight it will still run to completion (captured
+  // its own allGames.slice at start), but it must not flip the flags back to false
+  // after we've cleared state for the next user. A session token guards against
+  // this — see buildOpeningIndex.
+  openingBuildSession = (openingBuildSession | 0) + 1;
+  pmiBuilding = false;
+  fenIndexBuilding = false;
+  fenDataCache = null;
+  fenDataCacheLoaded = false;
+  fenDataPreloadPromise = null;
+  pendingFenData = {};
+  filterArrows = [];
+  hoverFilterArrow = null;
   document.getElementById('mainApp').classList.add('hidden');
   document.getElementById('loginScreen').classList.remove('hidden');
   document.getElementById('sessionProgress').classList.add('hidden');
@@ -8539,8 +8571,22 @@ function extractAllMistakes() {
   const gamesWithPositions = new Set(allMistakes.map(m => m.gameId));
   allGames = allGames.filter(g => gamesWithPositions.has(g.id));
 
-  // Finalize FEN index count after allGames is settled
-  fenIndexGameCount = allGames.length;
+  // Lazy-index invalidation. If indices were previously built (re-extraction path —
+  // e.g. after loadRepertoireTrie() filters more mistakes out), their contents match
+  // the OLD allGames set, not the one we just finalized. Zero the size counters so
+  // the readiness check in buildOpeningIndex fails and the next explorer access rebuilds.
+  //
+  // We deliberately DO NOT null gameFenIndex / positionMoveIndex here: a concurrent
+  // in-progress build has references to them (via lines ~8702-8703). Nulling mid-build
+  // would corrupt partial data still being written. The build flags (pmiBuilding /
+  // fenIndexBuilding) guard concurrency; zeroing the counters is enough to force a
+  // rebuild on the next access after the current build completes.
+  //
+  // On first extraction gameFenIndex / positionMoveIndex are null, so both branches
+  // are no-ops — the counters stay at 0, and the first buildOpeningIndex call builds
+  // from scratch as usual.
+  if (gameFenIndex) fenIndexGameCount = 0;
+  if (positionMoveIndex) pmiGameCount = 0;
 }
 
 function evalToCp(evalObj, perspective) {
@@ -8563,9 +8609,10 @@ function toggleFilter(el) {
   const filterSet = filters[filterType];
   if (filterSet.has(value)) {
     if (filterSet.size <= 1) {
-      // For 2-option filters: swap to the other option
+      // Last active chip clicked.
       const allChips = document.querySelectorAll(`.filter-chip[data-filter="${filterType}"]`);
       if (allChips.length === 2) {
+        // 2-option filter: swap to the other option (familiar toggle semantics)
         const other = [...allChips].find(c => c.dataset.value !== value);
         if (other) {
           filterSet.delete(value);
@@ -8573,9 +8620,15 @@ function toggleFilter(el) {
           filterSet.add(other.dataset.value);
           other.classList.add('active');
         }
+      } else {
+        // 3+ option filter: instead of a silent no-op (looks like a broken button),
+        // re-activate every chip. This gives the click a visible effect and
+        // provides a one-tap way to reset after narrow filtering.
+        allChips.forEach(c => {
+          filterSet.add(c.dataset.value);
+          c.classList.add('active');
+        });
       }
-      // For 3+ option filters: do nothing (keep at least one)
-      else return;
     } else {
       filterSet.delete(value);
       el.classList.remove('active');
@@ -8695,6 +8748,10 @@ function buildOpeningIndex() {
 
 function doBuildOpeningIndex() {
   const t0 = performance.now();
+  // Snapshot the session token at build start. If logout fires mid-build, the
+  // global token increments and our completion path becomes a no-op — we must
+  // not overwrite the new user's (null) indices or flip the build flags back.
+  const buildSession = openingBuildSession;
   const fenData = fenDataCacheLoaded ? (fenDataCache || {}) : {};
   const newFenIndex = new Map();
   const pmi = new Map();
@@ -8712,108 +8769,146 @@ function doBuildOpeningIndex() {
   const RENDER_THROTTLE_MS = 250;
 
   function processBatch() {
-    const batchT0 = performance.now();
-    const end = Math.min(i + BATCH, games.length);
-    const batchStart = i;
-    for (; i < end; i++) {
-      const game = games[i];
-      const moves = game.moves ? game.moves.split(' ') : [];
-      const gameFens = new Set();
+    // Session-token check: if logout incremented openingBuildSession while this
+    // build was in flight, abandon silently. Don't touch globals, don't flip
+    // flags, don't render — logout already reset state for the next user and a
+    // late arrival from this build would overwrite their work.
+    if (buildSession !== openingBuildSession) return;
+    try {
+      const batchT0 = performance.now();
+      const end = Math.min(i + BATCH, games.length);
+      const batchStart = i;
+      for (; i < end; i++) {
+        try {
+          const game = games[i];
+          const moves = game.moves ? game.moves.split(' ') : [];
+          const gameFens = new Set();
 
-      // Obtain moveStats — from cache or via chess.js replay. (We always read live
-      // fenDataCache rather than a snapshot, so any concurrent saves from another
-      // path are picked up on subsequent games.)
-      const cached = (fenDataCacheLoaded && fenDataCache) ? fenDataCache[game.id] : fenData[game.id];
-      let moveStats, finalFen;
-      if (cached && cached.moveStats) {
-        moveStats = cached.moveStats;
-        finalFen = cached.finalFen || null;
-        cacheHits++;
-      } else if (moves.length > 0) {
-        const chess = new Chess(game.initialFen || undefined);
-        moveStats = [];
-        finalFen = fenPositionKey(chess.fen());
-        for (const san of moves) {
-          const posKey = fenPositionKey(chess.fen());
-          const m = chess.move(san, { sloppy: true });
-          if (!m) break;
-          moveStats.push({ posKey, moveUci: m.from + m.to + (m.promotion || ''), moveSan: m.san });
-          finalFen = fenPositionKey(chess.fen());
+          // Obtain moveStats — from cache or via chess.js replay. (We always read live
+          // fenDataCache rather than a snapshot, so any concurrent saves from another
+          // path are picked up on subsequent games.)
+          const cached = (fenDataCacheLoaded && fenDataCache) ? fenDataCache[game.id] : fenData[game.id];
+          let moveStats, finalFen;
+          if (cached && cached.moveStats) {
+            moveStats = cached.moveStats;
+            finalFen = cached.finalFen || null;
+            cacheHits++;
+          } else if (moves.length > 0) {
+            const chess = new Chess(game.initialFen || undefined);
+            moveStats = [];
+            finalFen = fenPositionKey(chess.fen());
+            for (const san of moves) {
+              const posKey = fenPositionKey(chess.fen());
+              const m = chess.move(san, { sloppy: true });
+              if (!m) break;
+              moveStats.push({ posKey, moveUci: m.from + m.to + (m.promotion || ''), moveSan: m.san });
+              finalFen = fenPositionKey(chess.fen());
+            }
+            dirtyGames[game.id] = { moveStats, finalFen };
+            cacheMisses++;
+          } else {
+            moveStats = [];
+            finalFen = null;
+          }
+
+          // Populate gameFenIndex from moveStats position keys
+          for (const ms of moveStats) gameFens.add(ms.posKey);
+          if (finalFen) gameFens.add(finalFen);
+          newFenIndex.set(game.id, gameFens);
+
+          // Populate positionMoveIndex (needs game-level metadata)
+          if (moves.length === 0) continue;
+          const playerColor = detectPlayerColor(game);
+          const { winner, whiteRating, blackRating } = getGameResultInfo(game);
+          const opponentColor = playerColor === 'white' ? 'black' : 'white';
+          const opponentName = game.players?.[opponentColor]?.user?.name || 'Unknown';
+          const opponentRating = (opponentColor === 'white' ? whiteRating : blackRating) || null;
+          const userRating = (playerColor === 'white' ? whiteRating : blackRating) || null;
+          const result = winner === playerColor ? 'win' : winner === opponentColor ? 'loss' : 'draw';
+
+          for (const ms of moveStats) {
+            if (!pmi.has(ms.posKey)) pmi.set(ms.posKey, new Map());
+            const posMap = pmi.get(ms.posKey);
+            if (!posMap.has(ms.moveSan)) {
+              posMap.set(ms.moveSan, { san: ms.moveSan, uci: ms.moveUci, count: 0, whiteWins: 0, blackWins: 0, draws: 0, games: [] });
+            }
+            const entry = posMap.get(ms.moveSan);
+            entry.count++;
+            if (winner === 'white') entry.whiteWins++;
+            else if (winner === 'black') entry.blackWins++;
+            else entry.draws++;
+            entry.games.push({ gameId: game.id, userColor: playerColor, opponentName, opponentRating, userRating, result, source: game._source || 'lichess' });
+          }
+        } catch (gameErr) {
+          // One malformed game (unexpected player shape, bad SAN, etc.) shouldn't kill
+          // the whole build. Skip it and keep going — its entries simply won't appear
+          // in the explorer until the next successful rebuild after data is repaired.
+          console.warn(`[OpeningIndex] Skipping game ${games[i]?.id || '?'}:`, gameErr.message);
         }
-        dirtyGames[game.id] = { moveStats, finalFen };
-        cacheMisses++;
+      }
+      const batchWorkMs = performance.now() - batchT0;
+      if (i < games.length) {
+        // Progressive render: throttled so layout/paint doesn't dominate batch time
+        let renderMs = 0;
+        const now = performance.now();
+        if (openingFilterMode && (now - lastRenderT) >= RENDER_THROTTLE_MS) {
+          const tRenderStart = performance.now();
+          renderExplorerStats();
+          updateFilterArrows();
+          renderMs = performance.now() - tRenderStart;
+          lastRenderT = performance.now();
+        }
+        if (batchWorkMs > 50 || renderMs > 50) {
+          console.log(`[OpeningIndex batch ${batchStart}-${end}] work=${batchWorkMs.toFixed(0)}ms render=${renderMs.toFixed(0)}ms (hits=${cacheHits} misses=${cacheMisses})`);
+        }
+        setTimeout(processBatch, 0);
       } else {
-        moveStats = [];
-        finalFen = null;
-      }
-
-      // Populate gameFenIndex from moveStats position keys
-      for (const ms of moveStats) gameFens.add(ms.posKey);
-      if (finalFen) gameFens.add(finalFen);
-      newFenIndex.set(game.id, gameFens);
-
-      // Populate positionMoveIndex (needs game-level metadata)
-      if (moves.length === 0) continue;
-      const playerColor = detectPlayerColor(game);
-      const { winner, whiteRating, blackRating } = getGameResultInfo(game);
-      const opponentColor = playerColor === 'white' ? 'black' : 'white';
-      const opponentName = game.players?.[opponentColor]?.user?.name || 'Unknown';
-      const opponentRating = (opponentColor === 'white' ? whiteRating : blackRating) || null;
-      const userRating = (playerColor === 'white' ? whiteRating : blackRating) || null;
-      const result = winner === playerColor ? 'win' : winner === opponentColor ? 'loss' : 'draw';
-
-      for (const ms of moveStats) {
-        if (!pmi.has(ms.posKey)) pmi.set(ms.posKey, new Map());
-        const posMap = pmi.get(ms.posKey);
-        if (!posMap.has(ms.moveSan)) {
-          posMap.set(ms.moveSan, { san: ms.moveSan, uci: ms.moveUci, count: 0, whiteWins: 0, blackWins: 0, draws: 0, games: [] });
+        // Re-check the session token right before publishing — logout could have
+        // fired between the last iteration and now, and flipping building=false
+        // (or overwriting freshly-reset indices) would corrupt the new user's state.
+        if (buildSession !== openingBuildSession) return;
+        fenIndexGameCount = games.length;
+        pmiGameCount = games.length;
+        fenIndexBuilding = false;
+        pmiBuilding = false;
+        // Persist chess.js-replayed games back to cache (only the dirty ones, not the whole map)
+        const dirtyCount = Object.keys(dirtyGames).length;
+        if (dirtyCount > 0) {
+          // Always update in-memory cache (initialize if needed) so a late-arriving
+          // preload can merge these entries rather than overwrite them. Subsequent
+          // builds this session also skip the replay for these games.
+          if (!fenDataCache) fenDataCache = {};
+          for (const gid in dirtyGames) fenDataCache[gid] = dirtyGames[gid];
+          saveFenDataCache(dirtyGames);  // async IDB patch-put
         }
-        const entry = posMap.get(ms.moveSan);
-        entry.count++;
-        if (winner === 'white') entry.whiteWins++;
-        else if (winner === 'black') entry.blackWins++;
-        else entry.draws++;
-        entry.games.push({ gameId: game.id, userColor: playerColor, opponentName, opponentRating, userRating, result, source: game._source || 'lichess' });
+        console.log(`[OpeningIndex] Built ${pmi.size} positions from ${games.length} games in ${(performance.now()-t0).toFixed(0)}ms (cache hits: ${cacheHits}, misses: ${cacheMisses})`);
+        // Final render with complete data
+        if (openingFilterMode) {
+          renderExplorerStats();
+          updateFilterArrows();
+        }
+        if (openingFilterMode || openingFilterFen) applyOpeningFilterFromBoard();
       }
-    }
-    const batchWorkMs = performance.now() - batchT0;
-    if (i < games.length) {
-      // Progressive render: throttled so layout/paint doesn't dominate batch time
-      let renderMs = 0;
-      const now = performance.now();
-      if (openingFilterMode && (now - lastRenderT) >= RENDER_THROTTLE_MS) {
-        const tRenderStart = performance.now();
-        renderExplorerStats();
-        updateFilterArrows();
-        renderMs = performance.now() - tRenderStart;
-        lastRenderT = performance.now();
-      }
-      if (batchWorkMs > 50 || renderMs > 50) {
-        console.log(`[OpeningIndex batch ${batchStart}-${end}] work=${batchWorkMs.toFixed(0)}ms render=${renderMs.toFixed(0)}ms (hits=${cacheHits} misses=${cacheMisses})`);
-      }
-      setTimeout(processBatch, 0);
-    } else {
-      fenIndexGameCount = games.length;
-      pmiGameCount = games.length;
+    } catch (batchErr) {
+      // Whole-batch failure (e.g. render / DOM error, not a per-game issue). Reset the
+      // in-progress flags so the guards at the top of buildOpeningIndex let a subsequent
+      // call retry. Null the partial Maps and zero the counters — they contain incomplete
+      // data that would otherwise pass the readiness check on next access.
+      console.error('[OpeningIndex] Build failed:', batchErr);
+      // Same session-token guard as the success branch — if logout fired, don't
+      // touch globals or flip flags that the new user's session now owns.
+      if (buildSession !== openingBuildSession) return;
       fenIndexBuilding = false;
       pmiBuilding = false;
-      // Persist chess.js-replayed games back to cache (only the dirty ones, not the whole map)
-      const dirtyCount = Object.keys(dirtyGames).length;
-      if (dirtyCount > 0) {
-        // Always update in-memory cache (initialize if needed) so a late-arriving
-        // preload can merge these entries rather than overwrite them. Subsequent
-        // builds this session also skip the replay for these games.
-        if (!fenDataCache) fenDataCache = {};
-        for (const gid in dirtyGames) fenDataCache[gid] = dirtyGames[gid];
-        saveFenDataCache(dirtyGames);  // async IDB patch-put
-      }
-      console.log(`[OpeningIndex] Built ${pmi.size} positions from ${games.length} games in ${(performance.now()-t0).toFixed(0)}ms (cache hits: ${cacheHits}, misses: ${cacheMisses})`);
-      // Final render with complete data
+      gameFenIndex = null;
+      positionMoveIndex = null;
+      fenIndexGameCount = 0;
+      pmiGameCount = 0;
+      // Show the empty state in the explorer if it's open
       if (openingFilterMode) {
-        renderExplorerStats();
-        updateFilterArrows();
+        const c = document.getElementById('explorerStatsContainer');
+        if (c) c.innerHTML = '<div class="explorer-no-data">Build failed — open the console for details.</div>';
       }
-      if (openingFilterMode || openingFilterFen) applyOpeningFilterFromBoard();
     }
   }
   processBatch();
@@ -8915,6 +9010,7 @@ function enterOpeningFilter() {
 }
 
 function exitOpeningFilter(clearFilter) {
+  closeFilterPromoPicker();
   openingFilterMode = false;
 
   // IMP-004: clear any overlays the filter board may have accumulated (user
@@ -9013,10 +9109,26 @@ function applyOpeningFilterFromBoard() {
   updateOpeningFilterUI();
 }
 
-function filterMakeMove(from, to, animate) {
+function filterMakeMove(from, to, animate, promotion) {
   if (!filterChess) return null;
+  // Detect a pending promotion that needs user input. Show the picker and let the
+  // user pick; the picker's onclick will recall filterMakeMove with a concrete piece.
+  // Guard with a legality check — a pawn sliding sideways to rank 1/8 isn't a
+  // promotion and shouldn't trigger the picker.
+  if (!promotion) {
+    const piece = filterChess.get(from);
+    const lastRank = to[1];
+    if (piece && piece.type === 'p' && (lastRank === '8' || lastRank === '1')) {
+      const legalMoves = filterChess.moves({ square: from, verbose: true });
+      const isPromotion = legalMoves.some(mv => mv.to === to && mv.flags && mv.flags.indexOf('p') !== -1);
+      if (isPromotion) {
+        showFilterPromoPicker(from, to);
+        return null;
+      }
+    }
+  }
   window._scoreboardShowAll = false;
-  const move = filterChess.move({ from, to, promotion: 'q' });
+  const move = filterChess.move({ from, to, promotion: promotion || 'q' });
   if (!move) return null;
 
   // Truncate any redo history
@@ -9034,8 +9146,99 @@ function filterMakeMove(from, to, animate) {
   return move;
 }
 
+// Inline promotion picker for filter mode. Shows a column of 4 piece icons
+// (Q, R, B, N) aligned with the destination file. The picker extends outward
+// from the destination square toward the center of the board, mirroring the
+// standard lichess/chess.com UX.
+let _filterPromoCancelHandler = null;
+function closeFilterPromoPicker() {
+  const el = document.getElementById('filterPromoPicker');
+  if (el) el.remove();
+  if (_filterPromoCancelHandler) {
+    document.removeEventListener('mousedown', _filterPromoCancelHandler, true);
+    _filterPromoCancelHandler = null;
+  }
+}
+function showFilterPromoPicker(from, to) {
+  closeFilterPromoPicker();
+  if (!filterChess || !boardObj) return;
+  const container = document.getElementById('boardContainer');
+  const sqEl = document.querySelector(`[data-square="${to}"]`);
+  if (!container || !sqEl) return;
+  const sqRect = sqEl.getBoundingClientRect();
+  const contRect = container.getBoundingClientRect();
+  const sqSize = sqRect.width;
+  if (sqSize < 1) return;
+  const color = filterChess.turn(); // 'w' or 'b' — whose pawn is promoting
+
+  // Determine extension direction. If the destination square is near the top of
+  // the board (in screen space), the picker extends downward; near the bottom,
+  // upward. This is independent of board orientation — we just use screen
+  // geometry so flipped boards work.
+  const relTop = sqRect.top - contRect.top;
+  const extendsDown = relTop < contRect.height * 0.5;
+
+  const picker = document.createElement('div');
+  picker.id = 'filterPromoPicker';
+  picker.style.cssText =
+    'position:absolute;z-index:100;display:flex;flex-direction:column;' +
+    'background:var(--bg-panel, #14171e);border:2px solid var(--accent);' +
+    'border-radius:4px;overflow:hidden;' +
+    'box-shadow:0 4px 12px rgba(0,0,0,0.5);';
+  picker.style.left = (sqRect.left - contRect.left) + 'px';
+  picker.style.width = sqSize + 'px';
+  picker.style.height = (sqSize * 4) + 'px';
+  if (extendsDown) {
+    picker.style.top = relTop + 'px';
+  } else {
+    picker.style.top = (sqRect.bottom - contRect.top - sqSize * 4) + 'px';
+  }
+
+  // Pieces ordered so Q is closest to the destination square (standard UX).
+  const pieces = extendsDown ? ['q', 'r', 'b', 'n'] : ['n', 'b', 'r', 'q'];
+  const colorPrefix = color === 'w' ? 'w' : 'b';
+  for (const p of pieces) {
+    const btn = document.createElement('div');
+    btn.style.cssText =
+      'cursor:pointer;flex:1;width:100%;' +
+      'background-image:url(https://lichess1.org/assets/piece/cburnett/' + colorPrefix + p.toUpperCase() + '.svg);' +
+      'background-size:80% 80%;background-repeat:no-repeat;background-position:center;' +
+      'background-color:var(--bg-card, #1a1e28);' +
+      'transition:background-color 0.1s;';
+    btn.onmouseenter = () => { btn.style.backgroundColor = 'var(--accent-glow, rgba(124,108,240,0.25))'; };
+    btn.onmouseleave = () => { btn.style.backgroundColor = 'var(--bg-card, #1a1e28)'; };
+    btn.addEventListener('mousedown', (e) => {
+      // Use mousedown so we fire BEFORE the document-level cancel handler (capture phase)
+      // sees the click and dismisses the picker.
+      e.stopPropagation();
+      e.preventDefault();
+      closeFilterPromoPicker();
+      filterMakeMove(from, to, true, p);
+    });
+    btn.addEventListener('touchstart', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      closeFilterPromoPicker();
+      filterMakeMove(from, to, true, p);
+    }, { passive: false });
+    picker.appendChild(btn);
+  }
+  container.appendChild(picker);
+
+  // Dismiss on click outside. Schedule on next tick so the mousedown that opened
+  // the picker doesn't immediately close it.
+  setTimeout(() => {
+    const handler = (e) => {
+      if (!picker.contains(e.target)) closeFilterPromoPicker();
+    };
+    document.addEventListener('mousedown', handler, true);
+    _filterPromoCancelHandler = handler;
+  }, 0);
+}
+
 function filterUndoMove() {
   if (!filterChess || filterMoveIdx <= 0) return;
+  closeFilterPromoPicker();
   window._scoreboardShowAll = false;
   filterMoveIdx--;
   filterChess.load(filterMoveHistory[filterMoveIdx]);
@@ -9047,6 +9250,7 @@ function filterUndoMove() {
 
 function filterRedoMove() {
   if (!filterChess || filterMoveIdx >= filterMoveHistory.length - 1) return;
+  closeFilterPromoPicker();
   window._scoreboardShowAll = false;
   filterMoveIdx++;
   filterChess.load(filterMoveHistory[filterMoveIdx]);
@@ -9058,6 +9262,7 @@ function filterRedoMove() {
 
 function filterFlipBoard() {
   if (!boardObj) return;
+  closeFilterPromoPicker();
   const newOrientation = boardObj.orientation() === 'white' ? 'black' : 'white';
   boardObj.orientation(newOrientation);
   // Orientation flip rebuilds chessboard.js's square DOM, wiping our custom
@@ -9078,6 +9283,7 @@ function filterFlipBoard() {
 
 function filterReset() {
   if (!filterChess) return;
+  closeFilterPromoPicker();
   window._scoreboardShowAll = false;
   filterChess.reset();
   filterMoveHistory = [filterChess.fen()];
@@ -9089,6 +9295,7 @@ function filterReset() {
 
 function setFilterFromFen(fenStr) {
   if (!fenStr || !fenStr.trim()) return;
+  closeFilterPromoPicker();
   fenStr = fenStr.trim();
   // Validate FEN by trying to load it
   const testChess = new Chess();
@@ -9329,6 +9536,7 @@ function buildPracticeScoreboardHtml(scores) {
 // Navigate to a specific half-move in the filter line
 function navigateFilterLine(targetIdx) {
   if (!filterChess || targetIdx < 0 || targetIdx >= filterMoveHistory.length) return;
+  closeFilterPromoPicker();
   window._scoreboardShowAll = false;
   filterMoveIdx = targetIdx;
   filterChess.load(filterMoveHistory[filterMoveIdx]);
@@ -9467,6 +9675,7 @@ function renderExplorerStats() {
 // Play a move from the explorer stats table
 function explorerPlayMove(uci) {
   if (!filterChess) return;
+  closeFilterPromoPicker();
   const from = uci.substring(0, 2);
   const to = uci.substring(2, 4);
   const promo = uci.length > 4 ? uci[4] : undefined;
@@ -9530,9 +9739,57 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+// Map backend speed labels to our 4 chipped buckets. Without this, chess.com's
+// 'daily' (returned verbatim by the Chess.com API as time_class) and lichess's
+// 'ultraBullet' / 'correspondence' never match any chip — when all 4 chips are
+// active (size === 4) the filter is bypassed and these games show up, but the
+// moment the user deselects one chip, size drops to 3 and all unknown-speed
+// games silently vanish. The Classical chip already displays the 'time-daily.svg'
+// icon, confirming daily+classical were intended as one bucket.
+function normalizeSpeed(speed) {
+  if (!speed) return speed;
+  if (speed === 'daily' || speed === 'correspondence') return 'classical';
+  if (speed === 'ultraBullet') return 'bullet';
+  return speed;
+}
+
+// Single source of truth for game-level filter logic. Used by both applyFilters
+// (on mistakes via m.game) and renderGameList (on games directly) so the two
+// can't drift — previously they had four near-duplicate branches that already
+// disagreed in places, and a whole earlier fix (type-filter threshold) existed
+// precisely because of that drift.
+function gamePassesGameFilters(game) {
+  if (!game) return true; // defensive — missing game reference shouldn't hide items
+  if (filters.platform.size < 2) {
+    const isChesscom = game._source === 'chesscom' || (game.id && game.id.startsWith('chesscom_'));
+    if (isChesscom && !filters.platform.has('chesscom')) return false;
+    if (!isChesscom && !filters.platform.has('lichess')) return false;
+  }
+  if (filters.color.size < 2) {
+    const color = detectPlayerColor(game);
+    if (!filters.color.has(color)) return false;
+  }
+  if (filters.speed.size < 4) {
+    const speed = normalizeSpeed(game.speed || '');
+    if (!filters.speed.has(speed)) return false;
+  }
+  if (filters.rated.size < 2) {
+    // Only explicit `false` counts as casual. Missing / undefined data defaults
+    // to rated — this matches Lichess (which always supplies the field) and the
+    // corrected analyzer for Chess.com. Practice / resumed synthetic items set
+    // rated:false explicitly, so they correctly classify as casual.
+    const isRated = game.rated !== false;
+    if (isRated && !filters.rated.has('rated')) return false;
+    if (!isRated && !filters.rated.has('casual')) return false;
+  }
+  if (openingFilterFen && !gameMatchesOpeningFen(game.id)) return false;
+  return true;
+}
+
 function applyFilters() {
   filteredMistakes = allMistakes.filter(m => {
     const isPractice = m.gameId?.startsWith('_practice');
+    // ── Item-level filters (apply to every mistake regardless of source) ──
     if (filters.color.size < 2 && !filters.color.has(m.playerColor)) return false;
     if (filters.severity.size < 2 && m.type !== 'tactic' && m.type !== 'advantage') {
       const isBlunder = m.wpDrop >= 15;
@@ -9541,27 +9798,23 @@ function applyFilters() {
     }
     if (filters.type.size < 3) {
       const itemType = m.type || 'mistake';
-      if (!filters.type.has(itemType)) return false;
-    }
-    if (!isPractice) {
-      if (filters.platform.size < 2) {
-        const isChesscom = m.game?._source === 'chesscom' || m.gameId.startsWith('chesscom_');
-        if (isChesscom && !filters.platform.has('chesscom')) return false;
-        if (!isChesscom && !filters.platform.has('lichess')) return false;
+      // Only the three chipped types are subject to this filter.
+      // Repertoire items live on the Repertoire tab and practice items are
+      // synthetic — neither should be dropped when the user hides a chip.
+      if (itemType === 'mistake' || itemType === 'tactic' || itemType === 'advantage') {
+        if (!filters.type.has(itemType)) return false;
       }
-      if (filters.speed.size < 4) {
-        const speed = m.game?.speed || '';
-        if (!filters.speed.has(speed)) return false;
-      }
-      if (filters.rated.size < 2) {
-        const isRated = m.game?.rated !== false;
-        if (isRated && !filters.rated.has('rated')) return false;
-        if (!isRated && !filters.rated.has('casual')) return false;
-      }
-      if (openingFilterFen && !gameMatchesOpeningFen(m.gameId)) return false;
     }
     if (hideTimeTrouble && m.type === 'mistake' && m.timeTrouble) return false;
-    return true;
+    // ── Game-level filters (platform / speed / rated / opening) ──
+    // Practice items carry a synthetic .game with no real players/speed/rated, so
+    // they skip this block entirely. The color filter above still gates them via
+    // m.playerColor (set from board orientation at launch).
+    // gamePassesGameFilters re-checks color against detectPlayerColor(game) — it
+    // should agree with m.playerColor for real games since both derive from the
+    // same extraction pass; treated as a defense-in-depth safety net.
+    if (isPractice) return true;
+    return gamePassesGameFilters(m.game);
   });
 }
 
@@ -9720,31 +9973,17 @@ function renderGameList() {
   // Group mistakes by game
   const gameMap = new Map();
   for (const g of allGames) {
-    // Platform filter
-    if (filters.platform.size < 2) {
-      const isChesscom = g._source === 'chesscom' || g.id.startsWith('chesscom_');
-      if (isChesscom && !filters.platform.has('chesscom')) continue;
-      if (!isChesscom && !filters.platform.has('lichess')) continue;
-    }
-    let color = detectPlayerColor(g);
-    if (filters.color.size < 2 && !filters.color.has(color)) continue;
-    // Speed filter
-    if (filters.speed.size < 4) {
-      const speed = g.speed || '';
-      if (!filters.speed.has(speed)) continue;
-    }
-    // Rated filter
-    if (filters.rated.size < 2) {
-      const isRated = g.rated !== false;
-      if (isRated && !filters.rated.has('rated')) continue;
-      if (!isRated && !filters.rated.has('casual')) continue;
-    }
-    // Opening filter
-    if (openingFilterFen && !gameMatchesOpeningFen(g.id)) continue;
+    // Shared game-level filter logic (platform / color / speed / rated / opening).
+    // Matches the applyFilters path verbatim — see gamePassesGameFilters.
+    if (!gamePassesGameFilters(g)) continue;
 
     const mistakes = filteredMistakes.filter(m => m.gameId === g.id);
-    // Skip games with no matching positions when filtering by type
-    if (filters.type.size < 2 && mistakes.length === 0) continue;
+    // Skip games with no matching positions when filtering by type.
+    // filters.type has 3 chips (mistake/tactic/advantage); any deselection means
+    // "hide games without matching positions" — a game with zero matching positions
+    // should be hidden when at least one type chip is off.
+    if (filters.type.size < 3 && mistakes.length === 0) continue;
+    const color = detectPlayerColor(g);
     gameMap.set(g.id, { game: g, mistakes, color });
   }
 
@@ -9831,6 +10070,17 @@ function activatePanelTab(tab) {
   // the user re-taps the already-active tab.
   const currentTab = reviewMode ? 'review' : (repertoireMode ? 'repertoire' : 'games');
   if (currentTab !== tab) {
+    // Filter practice doesn't have its own tab — it lives inside the "games" context
+    // with openingFilterMode toggled off (see launchFilterPractice). A tab switch
+    // implicitly ends the practice session; without this, practiceContItem lingers
+    // in filteredMistakes and contaminates the review queue via buildReviewQueue.
+    if (practiceContItem) {
+      continuationMode = false;
+      silentContinuation = false;
+      contLine = null;
+      clearContSession();
+      cleanupPracticeCont();
+    }
     clearFeedbackAndOverlays();
   }
   if (tab === 'games') {
@@ -10429,13 +10679,30 @@ function renderQueue() {
 function loadPosition(globalIdx, skipAnimation = false) {
   if (voiceMode) voiceStop();
   cancelRepertoireAutoNext();
-  // Clean up any synthetic practice item from filter continuation
+  // Clean up any synthetic practice item from filter continuation.
+  // Note: after splice, an index that pointed AT the practice item now points to
+  // the next item. Silently proceeding would load the wrong position — so when the
+  // caller meant to load the practice item itself, abort with the empty state.
   if (practiceContItem) {
     const pIdx = filteredMistakes.indexOf(practiceContItem);
     if (pIdx >= 0) {
+      const wasPractice = (globalIdx === pIdx);
       filteredMistakes.splice(pIdx, 1);
-      // Adjust target index if it was after the removed item
       if (globalIdx > pIdx) globalIdx--;
+      else if (wasPractice) {
+        // The practice item the caller targeted is gone. Don't load the shifted-in
+        // neighbor. Clear the board, hide stale UI, re-render the list, and show
+        // the "select a game" hint so the user knows training is inactive.
+        practiceContItem = null;
+        currentMistakeIdx = -1;
+        activeGameId = null;
+        clearBoard();
+        const emptyMsg = document.getElementById('emptyMsg');
+        if (emptyMsg) emptyMsg.classList.remove('hidden');
+        if (reviewMode) renderReviewList();
+        else renderGameList();
+        return;
+      }
     }
     practiceContItem = null;
   }
@@ -19105,10 +19372,12 @@ function exploreRepertoireGap(gapIdx) {
   if (repertoireDrillMode) exitRepertoireDrill();
   if (repertoireMode) toggleRepertoireMode();
 
-  // Set up filter state so enterOpeningFilter picks it up
-  const fullFen = gap.positionKey + ' 0 1';
+  // Set up filter state so enterOpeningFilter picks it up.
+  // Use gap.fen (full FEN with correct move counters) rather than reconstructing
+  // from positionKey + '0 1' — launchFilterPractice reads fullmove counter from
+  // the FEN, and a bogus '1' corrupts practice move numbering.
   openingFilterFen = gap.positionKey;
-  filterChess = new Chess(fullFen);
+  filterChess = new Chess(gap.fen);
   filterMoveHistory = [filterChess.fen()];
   filterMoveIdx = 0;
 
