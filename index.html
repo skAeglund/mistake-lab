@@ -1596,7 +1596,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Opening filter/explorer + filter subsystem: scan-pass fixes. Multi-fix pass across the filtering code. Opening filter scan: renderGameList's type-filter threshold was &lt; 2 (leftover from a 2-chip era) while applyFilters was already &lt; 3 — bumped renderGameList to match. applyFilters' type check gates only mistake/tactic/advantage; repertoire and practice items now pass through (they're synthetic and chip-less, previously got dropped as soon as any type chip was deselected). exploreRepertoireGap was reconstructing a full FEN as positionKey + ' 0 1' — the fullmove '1' then poisoned launchFilterPractice's move-number extraction for positions deep in openings; now uses gap.fen which already has real counters. buildOpeningIndex's batched build had no try/catch — a single malformed game threw mid-batch, left pmiBuilding/fenIndexBuilding stuck at true, and the explorer showed "Loading games…" forever; added inner per-game catch (skip bad game, keep going) and outer whole-batch catch (reset flags, null partial indices, show error state). extractAllMistakes had fenIndexGameCount = allGames.length unconditionally, which on re-extraction (e.g. after loadRepertoireTrie trimmed more mistakes) made a stale index appear fresh — replaced with conditional invalidation that zeros the counters if indices were previously built, respecting the in-progress-build concurrency contract. logout now resets the full opening filter + explorer state (openingFilterMode/Fen, filterChess, filterMoveHistory, savedBoardState, gameFenIndex, positionMoveIndex, fenDataCache + preload promise, filterArrows, hoverFilterArrow, pmiBuilding/fenIndexBuilding flags, and a new openingBuildSession token) plus closes any open promotion picker. activatePanelTab cleans up practiceContItem on tab transitions so a filter-practice session doesn't leak into the review queue via buildReviewQueue. loadPosition previously silently loaded the wrong item when globalIdx === pIdx of the spliced practice item; now detects wasPractice, clears the board, shows emptyMsg, re-renders the list. Filter mode gets a proper promotion picker — filterMakeMove accepts an optional promotion piece; showFilterPromoPicker renders a file-aligned column of cburnett Q/R/B/N icons extending from the destination square toward the board center (screen-geometry based, orientation-independent), with mouse + touch handlers and outside-click dismiss. Added openingBuildSession monotonic token to guard the completion paths of an in-flight build when logout fires mid-build: captured at doBuildOpeningIndex start, checked at top of each processBatch iteration (abandons cleanly) and before both success-publish and error-handler mutations (doesn't touch globals/flags owned by the new session). Filter subsystem: normalizeSpeed maps chess.com 'daily' and lichess 'ultraBullet'/'correspondence' into the four chipped buckets — without it, these games vanished whenever any speed chip was deselected (the Classical chip's time-daily.svg icon confirms daily+classical were meant as one bucket). gamePassesGameFilters is now the single source of truth for platform/color/speed/rated/opening; applyFilters (for mistakes via m.game) and renderGameList (for games directly) both call it, eliminating the four near-duplicate branches that already had drifted. toggleFilter's last-chip behavior on 3+ option filters (speed, type) used to be a silent no-op that looked like a broken button; now re-activates all chips in the group, giving the click a visible effect and a one-tap reset.</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Normalize non-pseudo-legal en passant in fenPositionKey. Strips EP when no capture is legal so transposed positions share a key. Fixes silent deviation-check misses, opening-explorer grouping, notes, practice scoreboard, and eval-cache fragmentation. REPERTOIRE_CACHE_VERSION 4→5. migrateLegacyPosKeys rewrites existing gistData keys.</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2217,7 +2217,7 @@ let repReplayTimer = null;        // setTimeout id for auto-replay
 let savedFilteredMistakes = null; // original filteredMistakes, restored when exiting drill
 let repertoireStudyCache = null; // localStorage cached: {studies:[{id,color,name,pgnHash,trie:{}}], lastUpdated}
 const REPERTOIRE_CACHE_KEY = 'mistakelab_repertoire';
-const REPERTOIRE_CACHE_VERSION = 4; // v4: multi-study trie arrays, retry fetch
+const REPERTOIRE_CACHE_VERSION = 5; // v5: fenPositionKey now normalizes EP (strip if not pseudo-legal) — invalidates cached tries built under the v4 key format
 const LICHESS_CLIENT_ID = 'mistakelab';
 const LICHESS_REDIRECT_URI = location.origin + location.pathname;
 let lichessToken = localStorage.getItem('mistakelab_lichess_token') || null;
@@ -2561,6 +2561,93 @@ function migrateInvalidationsToGist() {
   if (dirty) debounceSyncToGist();
 }
 
+// One-time migration: fenPositionKey used to keep the en passant square verbatim
+// from chess.js (which sets EP on every double push, even when no capture is
+// legal). That made transposition-reached positions key differently from
+// direct-order positions, so existing notes / scoreboard / customDeviations /
+// dismissed entries saved under "junk EP" keys become unreachable once
+// fenPositionKey starts normalizing. Walk gistData and rewrite any such keys
+// to their normalized form. Idempotent — normalized keys are fixed points.
+function migrateLegacyPosKeys() {
+  if (!gistData) return;
+  let dirty = false;
+
+  const normalize = (k) => (typeof k === 'string' && k) ? fenPositionKey(k) : k;
+
+  // ── notes: keyed object ──
+  if (gistData.notes && typeof gistData.notes === 'object') {
+    const out = {};
+    for (const [key, note] of Object.entries(gistData.notes)) {
+      const nk = normalize(key);
+      if (nk !== key) dirty = true;
+      if (!out[nk]) {
+        out[nk] = note;
+      } else {
+        // Collision: merge into existing (prefer existing text; concat arrows/circles)
+        const ex = out[nk];
+        if (note && typeof note === 'object') {
+          if (note.text && ex.text && !ex.text.includes(note.text)) {
+            ex.text = ex.text + '\n\n' + note.text;
+          } else if (note.text && !ex.text) {
+            ex.text = note.text;
+          }
+          if (Array.isArray(note.arrows)) ex.arrows = [...(ex.arrows || []), ...note.arrows];
+          if (Array.isArray(note.circles)) ex.circles = [...(ex.circles || []), ...note.circles];
+        }
+      }
+    }
+    gistData.notes = out;
+  }
+
+  // ── practiceScoreboard: keyed object of arrays ──
+  if (gistData.practiceScoreboard && typeof gistData.practiceScoreboard === 'object') {
+    const out = {};
+    for (const [key, entries] of Object.entries(gistData.practiceScoreboard)) {
+      const nk = normalize(key);
+      if (nk !== key) dirty = true;
+      if (!out[nk]) out[nk] = entries;
+      else if (Array.isArray(entries) && Array.isArray(out[nk])) out[nk] = out[nk].concat(entries);
+    }
+    gistData.practiceScoreboard = out;
+  }
+
+  // ── repertoire.customDeviations: array of {positionKey, ...} ──
+  if (gistData.repertoire?.customDeviations && Array.isArray(gistData.repertoire.customDeviations)) {
+    const seen = new Set();
+    const out = [];
+    for (const d of gistData.repertoire.customDeviations) {
+      if (!d || typeof d !== 'object') continue;
+      const nk = normalize(d.positionKey);
+      if (nk !== d.positionKey) { d.positionKey = nk; dirty = true; }
+      if (seen.has(nk)) continue; // drop duplicates
+      seen.add(nk);
+      out.push(d);
+    }
+    if (out.length !== gistData.repertoire.customDeviations.length) dirty = true;
+    gistData.repertoire.customDeviations = out;
+  }
+
+  // ── repertoire.dismissed: array of position keys ──
+  if (gistData.repertoire?.dismissed && Array.isArray(gistData.repertoire.dismissed)) {
+    const seen = new Set();
+    const out = [];
+    for (const k of gistData.repertoire.dismissed) {
+      const nk = normalize(k);
+      if (nk !== k) dirty = true;
+      if (seen.has(nk)) continue;
+      seen.add(nk);
+      out.push(nk);
+    }
+    if (out.length !== gistData.repertoire.dismissed.length) dirty = true;
+    gistData.repertoire.dismissed = out;
+  }
+
+  if (dirty) {
+    console.log('[Migration] Normalized legacy position keys in gistData');
+    debounceSyncToGist();
+  }
+}
+
 // ─── Invalidated Tactic Lines ───
 function lineFingerprint(moves) {
   return moves.map(m => m.uci).join(',');
@@ -2718,6 +2805,7 @@ async function loadFromGist() {
       if (cached) {
         gistData = JSON.parse(cached);
         migrateInvalidationsToGist();
+        migrateLegacyPosKeys();
         return true;
       }
     } catch (_) {}
@@ -2729,6 +2817,8 @@ async function loadFromGist() {
     gistData = await gistRead();
     // Migrate invalidated tactics/mistakes from localStorage to gistData
     migrateInvalidationsToGist();
+    // Normalize any pos keys stored under the pre-EP-normalization format
+    migrateLegacyPosKeys();
     // Merge into localStorage
     if (gistData?.positions && currentUsername) {
       const s = getCompletedSet();
@@ -2769,8 +2859,15 @@ function isGistConfigured() { return !!(gistToken && gistId); }
 
 // ─── Evaluation Cache ───
 function evalCacheKey(fen) {
-  // First 4 FEN fields: position, turn, castling, en-passant (strip move clocks for transposition hits)
-  return fen.split(' ').slice(0, 4).join(' ');
+  // Delegate to fenPositionKey — same transposition-aware shape (first 4 FEN
+  // fields, strip move clocks, strip non-pseudo-legal EP). Before this, the
+  // first 4 fields were taken verbatim: chess.js sets the EP square on every
+  // double push even when no pawn can capture, so the same position reached
+  // via different move orders missed each other's cache entries and caused
+  // Stockfish to re-analyze from scratch. Stripping EP is only safe when no
+  // pseudo-legal EP capture exists — in that case the move tree (and thus
+  // the eval) is identical to the no-EP version, so the merge is lossless.
+  return fenPositionKey(fen);
 }
 
 function evalCacheGet(fen, minDepth, minMultiPv = 1) {
@@ -8665,8 +8762,60 @@ function toggleAdvancedFilters() {
 
 // ─── Opening filter ───
 
+// Cheap pseudo-legal en passant check without spinning up chess.js.
+// EP is pseudo-legal iff a pawn of the side-to-move sits adjacent to the
+// ghost pawn (i.e. on the rank the EP target implies, on an adjacent file).
+// Matches the lichess / Shredder-FEN convention — which is what we want for
+// a transposition-aware position key.
+function isEnPassantPseudoLegal(boardField, sideToMove, epSquare) {
+  if (!epSquare || epSquare === '-' || epSquare.length !== 2) return false;
+  const file = epSquare.charCodeAt(0) - 97; // 'a'=0 … 'h'=7
+  const rank = +epSquare[1];
+  if (file < 0 || file > 7) return false;
+  // Target rank must be 6 (black just moved) for white to move, 3 (white just
+  // moved) for black to move. The capturing pawn sits on rank 5 / 4 respectively.
+  let pawnChar, pawnRank;
+  if (sideToMove === 'w') {
+    if (rank !== 6) return false;
+    pawnChar = 'P'; pawnRank = 5;
+  } else if (sideToMove === 'b') {
+    if (rank !== 3) return false;
+    pawnChar = 'p'; pawnRank = 4;
+  } else return false;
+  const ranks = boardField.split('/');
+  if (ranks.length !== 8) return false;
+  // FEN ranks are listed 8..1 top-to-bottom.
+  const rankStr = ranks[8 - pawnRank];
+  // Expand run-length file description into a per-file array.
+  const files = new Array(8).fill('');
+  let fi = 0;
+  for (let i = 0; i < rankStr.length && fi < 8; i++) {
+    const ch = rankStr[i];
+    if (ch >= '1' && ch <= '8') fi += +ch;
+    else { files[fi] = ch; fi++; }
+  }
+  if (file - 1 >= 0 && files[file - 1] === pawnChar) return true;
+  if (file + 1 <= 7 && files[file + 1] === pawnChar) return true;
+  return false;
+}
+
+// Transposition-aware position key.
+// Chess.js sets the EP square on every double pawn push — even when no pawn
+// can actually capture there. That made the same board position reachable
+// via different move orders produce different keys (e.g. 1.e4 c5 2.Nf3 vs
+// 1.Nf3 c5 2.e4 — identical board, but path B keeps EP "e3"). Fix: strip the
+// EP square when no EP capture is pseudo-legal, so transpositions collapse
+// to the same key. Critical for repertoire deviation detection, opening
+// explorer transposition grouping, position notes across transposed paths,
+// and the custom-deviation / practice-scoreboard lookups.
 function fenPositionKey(fen) {
-  return fen.split(' ').slice(0, 4).join(' ');
+  if (!fen) return '';
+  const parts = fen.split(' ');
+  if (parts.length < 4) return parts.slice(0, 4).join(' ');
+  if (parts[3] !== '-' && !isEnPassantPseudoLegal(parts[0], parts[1], parts[3])) {
+    parts[3] = '-';
+  }
+  return parts.slice(0, 4).join(' ');
 }
 
 // Detect which color the current user played in a game
