@@ -1607,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">RepertoireCheck reveal: show the move the user actually attempted instead of the '?' placeholder that custom deviations store as m.playedMove.san. Reveal now accepts an optional userPlayedSan passed from the third-attempt fail path; the "Show answer" button path still has no attempted move to display and the "You played" line is suppressed entirely rather than rendering "You played ?".</div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Preserve under-promotion piece in RepertoireCheck lead-up deviation attempts. repLeadUpPlayMove's end-of-lead-up branch re-played the user's move with { promotion: 'q' } hardcoded — if the user deliberately underpromoted to rook/bishop/knight, the reconstructed move silently became a queen promotion, leading to a correctness check against the wrong move. Now uses move.promotion || 'q' so the re-play matches what the user actually played.</div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -20241,8 +20241,10 @@ function repLeadUpPlayMove(source, target, move) {
     // At the end — this is the deviation move, transition to drill
     gameEngine.undo();
     transitionFromLeadUpToDrill();
-    // Re-make the move via the normal drill system
-    const reMove = gameEngine.move({ from: source, to: target, promotion: 'q' });
+    // Re-make the move via the normal drill system. Preserve the promotion
+    // piece the user actually chose; defaulting to 'q' would silently convert
+    // under-promotions to queens.
+    const reMove = gameEngine.move({ from: source, to: target, promotion: move.promotion || 'q' });
     if (reMove) {
       boardObj.position(gameEngine.fen(), true);
       showLastMoveHighlight(source, target);
