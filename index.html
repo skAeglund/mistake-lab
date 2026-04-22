@@ -1607,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Clear contWrongMovePending on continuation teardown. The flag is set (line 12980) when a user plays a wrong move in a live non-silent continuation — the refutation engine line is shown and the flag gates the "Try again" flow, voice system behavior (7824, 7888), and the continuation advance fallback branch (13063). tryAgainFromContinuationLine and retryPosition both clear it, but stopAndReviewContinuation and exitContLineReview didn't, so the flag could leak across sessions when the user navigated via paths that bypass loadPosition (which also clears it). enterOpeningFilter calls exitContLineReview unconditionally, so a wrong-move-pending state from a prior live continuation could survive into the opening filter and cause voice gating or advance-logic misbehavior later. Fix is defensive cleanup in both places.</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Keep the eval bar updating during Review Complete state. goToContLineMove's eval-bar refresh was gated on `contLineReviewMode && idx >= 0`, but showReviewComplete sets contLineReviewMode=false while leaving contLineReviewKeyMoves populated — the user can still step through all moves via ← → after finishing review, and the eval bar stays frozen on the last reviewed position. Widen the gate to `contLineReviewMode || contLineReviewKeyMoves.length > 0` (the same "in review context" predicate used by the priority-1 universal review guard).</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -14191,8 +14191,13 @@ function goToContLineMove(idx) {
 
   renderContLine();
 
-  // Update eval bar with contLine move eval data (game review)
-  if (contLineReviewMode && idx >= 0) {
+  // Update eval bar with contLine move eval data (game review).
+  // Finding #11: also update during the Review Complete state (where
+  // contLineReviewMode is false but contLineReviewKeyMoves is still populated
+  // — the user is stepping through all moves via ← → after finishing review).
+  const inReviewContext = contLineReviewMode ||
+    (contLineReviewKeyMoves && contLineReviewKeyMoves.length > 0);
+  if (inReviewContext && idx >= 0) {
     const mv = contLine.moves[idx];
     const m = filteredMistakes[currentMistakeIdx];
     if (mv && m) {
@@ -14208,7 +14213,7 @@ function goToContLineMove(idx) {
         afterMoveCpWhite = m.playerColor === 'white' ? cpPlayer : -cpPlayer;
       }
     }
-  } else if (contLineReviewMode && idx === -1) {
+  } else if (inReviewContext && idx === -1) {
     // At starting position — use the first move's bestCp if available
     const m = filteredMistakes[currentMistakeIdx];
     const firstMove = contLine.moves.length > 0 ? contLine.moves[0] : null;
