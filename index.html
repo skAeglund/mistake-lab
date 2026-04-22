@@ -1607,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix custom RepertoireCheck deviation marking correct moves as wrong, closes #8. evaluateRepertoireMove used trieMatchesMove(m.positionKey, ...) which only consults repertoireTrie — but custom deviations added via addCustomDeviation/addCustomDeviationFromInput live on the item (gistData.repertoire.customDeviations), not in the trie, so any position not covered by the loaded studies was an automatic false-negative. New isRepertoireCorrectForItem(m, san, uci) helper checks the item's stored repertoireMove first, then falls back to trieMatchesMove so trie-sourced items with multiple valid continuations still grade correctly.</div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">RepertoireCheck reveal: show the move the user actually attempted instead of the '?' placeholder that custom deviations store as m.playedMove.san. Reveal now accepts an optional userPlayedSan passed from the third-attempt fail path; the "Show answer" button path still has no attempted move to display and the "You played" line is suppressed entirely rather than rendering "You played ?".</div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -19286,7 +19286,7 @@ function evaluateRepertoireMove(source, target, move) {
     if (currentAttempts >= 3) {
       repertoireDrillWrong++;
       if (!repertoireDrillFailed.includes(m.positionKey)) repertoireDrillFailed.push(m.positionKey);
-      revealRepertoireAnswer(m, expected, isLastItem);
+      revealRepertoireAnswer(m, expected, isLastItem, move.san);
     } else {
       // Wrong but still has attempts — undo and let them retry
       gameEngine.undo();
@@ -19302,7 +19302,7 @@ function evaluateRepertoireMove(source, target, move) {
   }
 }
 
-function revealRepertoireAnswer(m, expected, isLastItem) {
+function revealRepertoireAnswer(m, expected, isLastItem, userPlayedSan) {
   const pid = posId(m);
   let srsInfo = '';
   if (!srsRecorded) {
@@ -19338,9 +19338,16 @@ function revealRepertoireAnswer(m, expected, isLastItem) {
 
   const repNote = getNoteForFen(m.fenBefore);
 
+  // Prefer the move the user actually played during this drill attempt. For
+  // trie-sourced items m.playedMove.san is the historical game move; for
+  // custom deviations it's a '?' placeholder. Suppress the "You played" line
+  // entirely when there's no meaningful attempt to show.
+  const displayPlayedSan = userPlayedSan || (m.playedMove?.san && m.playedMove.san !== '?' ? m.playedMove.san : '');
+  const playedLine = displayPlayedSan ? `You played <code>${escHtml(displayPlayedSan)}</code>. ` : '';
+
   showColorFeedback('var(--red)', 'rgba(239,83,80,0.08)',
     `♟ The repertoire move is <code>${escHtml(expected.san)}</code>`,
-    `You played <code>${escHtml(m.playedMove.san)}</code>.${srsInfo}${contBtns}${chessableBtn(m)}${lichessStudyBtn(m)}${nextBtn}`);
+    `${playedLine}${srsInfo}${contBtns}${chessableBtn(m)}${lichessStudyBtn(m)}${nextBtn}`);
   if (repNote && !repertoireAutoNext) openNotePanel();
   updateSessionProgress();
   renderQueue();
