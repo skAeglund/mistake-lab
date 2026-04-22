@@ -1607,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cancel animateLinePreview on board interaction. The Show Line auto-preview walks through the best line over 400ms-per-move ticks, reading window._reviewBestLine.animating on each iteration. goToReviewLine and stepReviewBestLine already flip animating=false (user clicked a move or pressed ← →), but direct board interaction didn't — if the user started dragging a piece while the preview was ticking, the animation kept running and teleported the board away from wherever the user was trying to go. Add `if (window._reviewBestLine) window._reviewBestLine.animating = false` at three board-interaction entry points: handleEngineLineBranch (user creates a branch inside a review line view), and both universal review guards in onDrop / the click handler (user tries to move on a read-only review context and gets snapped back). In all three cases the user clearly wanted to stop the animation, so cancel first.</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Skip repertoire trie hint during Game Review retry. showHint's filter-practice branch returns the repertoire move whenever practiceContItem is set, !practiceRepIgnored, and the trie has an entry for the current position. But during a Game Review retry (contLineReviewRetryIdx >= 0) the user is drilling on finding the engine's best move for a position where they previously made a mistake — the trie's move may be a different (deliberate-prep) choice that doesn't match what the eval says was best. Returning the trie move here misleads the user and, via the wp-drop check in the retry path, can get scored as "correct" when it isn't the literal best. Gate the branch on `contLineReviewRetryIdx < 0` so retry falls through to the Stockfish-based hint below.</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -6046,7 +6046,13 @@ async function showHint() {
   }
 
   // ── Filter practice repertoire hint: use trie move ──
-  if (practiceContItem && !practiceRepIgnored && repertoireTrie && currentSolveFen) {
+  // Finding #15: skip this branch during a Game Review retry. The retry
+  // drills the user on playing the engine's best move for a position where
+  // they previously made a mistake; the repertoire trie's move may be a
+  // different (deliberate-prep) choice that doesn't match what the eval
+  // says was best. Fall through to the Stockfish-based hint below.
+  if (practiceContItem && !practiceRepIgnored && repertoireTrie && currentSolveFen &&
+      contLineReviewRetryIdx < 0) {
     const posKey = fenPositionKey(currentSolveFen);
     const entry = trieFirst(posKey);
     if (entry && entry.uci) {
