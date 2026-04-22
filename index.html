@@ -1607,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Refresh the eval bar when stepping through review best-line / refutation. During Show Line and Show Refutation in Game Review, the eval bar stayed frozen on the prior position's evaluation as the user stepped through the line via arrow keys, clicked feedback-card moves, or watched animateLinePreview. With the priority-1 fix we now set browsingLine=true in these views, which gates updateEvalBar onto evalSfResult — but nothing was requesting fresh analysis for the stepped-to positions. Wire requestEvalWorkerAnalysis into every nav entry point: showReviewBestLine (for postBestFen when the view opens), showReviewRefutation (for lineMoves[0].fen after the opponent's refutation reply is played), animateLinePreview per animation frame, goToReviewLine (feedback-card move click), and stepReviewBestLine's back-to-preFen branch. All gated on `evalBarEnabled && evalBarRevealed && !tacticMode`, matching the pattern in goToLineMove. Teardown: exitReviewBestLine, reviewNextKeyMove, reviewPrevKeyMove now call stopEvalWorkerSearch so the last browsed position's result doesn't keep feeding updateEvalBar via the `browsingLine && evalSfResult` branch once we're back at the key-move card.</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Refresh Game Review summary card as background deep-eval re-classifies moves. startContLineReview waits up to 15s for the silentEvalQueue to drain before rendering the summary; if the user hits "Low Depth Review" or the timeout fires, the initial summary shows pre-deep-eval classifications. applySilentEvalToMove then keeps updating mv.classification / wpDrop / afterCp in the background, but the summary card (tally, accuracy %, sparkline, "Review N key moves" button count) was built once and never rebuilt — so the keyMoves queue the user navigated could point to moves that were no longer mistakes at depth 22, or miss moves that only became mistakes at depth 22. Fix: (1) extract the summary markup into renderContLineReviewSummary(data) so it can be re-emitted, (2) add maybeRefreshReviewSummary() gated on `contLineReviewMode && contLineReviewKeyIdx === -1 && !window._reviewBestLine` so it only runs when the user is sitting on the summary card (never disturbs advanced key-move review or Show Line / Show Refutation views), (3) hook it into both queue drains — processSilentEvalQueue (eval worker) and processQueueOnMainWorker (main worker helper). The sparkline click handler still works across refreshes because buildEvalSparkline writes window._reviewEvalPoints on every render and onReviewGraphClick reads it live.</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -4153,6 +4153,13 @@ async function processSilentEvalQueue() {
   }
 
   silentEvalProcessing = false;
+  // Finding #7: if the user landed on the Review summary via Low Depth Review
+  // or the 15s queue-wait timeout, the initial summary reflects partial (or
+  // pre-deep-eval) classifications. Now that the queue has fully drained,
+  // refresh the summary card so the tally / accuracy / keyMoves list match
+  // the final deep-eval numbers. No-op unless the user is still on the
+  // summary card (see maybeRefreshReviewSummary).
+  maybeRefreshReviewSummary();
 }
 
 /** Shared: apply deep eval classification to a contLine move. */
@@ -5295,6 +5302,10 @@ async function processQueueOnMainWorker() {
   }
 
   silentEvalMainProcessing = false;
+  // Finding #7: mirror of the refresh in processSilentEvalQueue — when the
+  // main-worker helper drains its side of the queue, also refresh the review
+  // summary card if the user is still sitting on it.
+  maybeRefreshReviewSummary();
 }
 
 function sfAnalyze(fen, depth = 16, multiPv = 1) {
@@ -15406,6 +15417,33 @@ async function startContLineReview() {
   const container = document.getElementById('feedbackContainer');
   container.innerHTML = '';
 
+  renderContLineReviewSummary(data);
+
+  // Update keyMoves list in case background silent eval changes classifications
+  // while the user is sitting on the summary (see renderContLineReviewSummary).
+  contLineReviewKeyMoves = data.keyMoves;
+
+  // Navigate to start of line
+  if (contLine) {
+    goToContLineMove(-1); // go to base position
+    renderContLine();
+  }
+
+  // Kick off background tactic scan (non-blocking). The banner renders
+  // progress above the feedback area and survives navigation within review.
+  // A second call while a scan is active is a no-op (idempotent guard).
+  startTacticScan();
+}
+
+// Finding #7: renders the Game Review summary card (sparkline, accuracy,
+// tally, keyMoves button). Extracted so processSilentEvalQueue can re-render
+// it as background deep-eval updates classifications — previously
+// Low Depth Review / 15s timeout would strand stale low-depth numbers on
+// the card even as the queue kept re-classifying moves.
+function renderContLineReviewSummary(data) {
+  const container = document.getElementById('feedbackContainer');
+  if (!container) return;
+
   // Build eval sparkline SVG
   const sparklineHtml = buildEvalSparkline(data.evalPoints);
 
@@ -15439,18 +15477,22 @@ async function startContLineReview() {
     </div>
   `;
   container.innerHTML = summaryHtml;
-
-  // Navigate to start of line
-  if (contLine) {
-    goToContLineMove(-1); // go to base position
-    renderContLine();
-  }
-
-  // Kick off background tactic scan (non-blocking). The banner renders
-  // progress above the feedback area and survives navigation within review.
-  // A second call while a scan is active is a no-op (idempotent guard).
-  startTacticScan();
 }
+
+// Finding #7: called from processSilentEvalQueue after the queue drains
+// (and from applySilentEvalToMove for incremental updates). Only rebuilds
+// when the user is sitting on the summary card — advanced key-move review
+// stays untouched so the user's navigation state isn't disrupted.
+function maybeRefreshReviewSummary() {
+  if (!contLineReviewMode) return;
+  if (contLineReviewKeyIdx !== -1) return; // user advanced into key moves — don't disturb
+  if (window._reviewBestLine) return; // inside Show Line / Show Refutation view — don't disturb
+  const data = buildContLineReviewData();
+  if (!data) return;
+  contLineReviewKeyMoves = data.keyMoves;
+  renderContLineReviewSummary(data);
+}
+
 
 function reviewNextKeyMove() {
   if (!contLineReviewMode || contLineReviewKeyMoves.length === 0) return;
