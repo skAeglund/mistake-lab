@@ -1607,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Mistake review scan: first-attempt-only SRS rule across mistake/tactic/retry (M2-M) — Again recorded on attempt 1 + srsRecorded/firstAttemptFailed/hintUsed preserved in retryPosition so the locked grade stays locked. Skip buildEngineLine when revealBestMove owns the UI (H1-M). Resync gameEngine at startContinuationMode entry if Show-engine's-best reset it (H2-M). Unconditionally clear hint overlay for wrong moves (M1-M). Defer hintUsed=true past waitForPreAnalysis (L2-M). Sync activeGameId on cross-game nav after confirmRemoveMistake (L4-M).</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix opening explorer "No games found" after a double pawn push. Pre-2aad194 IDB fendata records stored moveStats[].posKey / finalFen with chess.js's junk EP square (set on every double push even when no capture is pseudo-legal) — the lookup side now normalizes via fenPositionKey but the cache side still held the EP-inclusive form, so e.g. 1.d4 c5 2.d5 Nf6 3.c4 missed all 8 games. Fix is two layers: (A) buildOpeningIndex's cache-hit branch normalizes moveStats[].posKey and finalFen in-place on read — mutation aliases fenDataCache so subsequent saves persist the heal; idempotent on already-normalized entries. (B) migrateLegacyFenDataPosKeys runs once per device at showMainApp (localStorage-flag gated), walks IDB, normalizes all records, writes back only dirty ones. Layer A guarantees correctness regardless of B's completion; B avoids repeating the work across sessions.</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3244,6 +3244,59 @@ function migrateOldLocalStorageFenCache() {
     for (const k of keys) localStorage.removeItem(k);
     if (keys.length > 0) console.log(`[FenDataCache] Cleared ${keys.length} old localStorage entries`);
   } catch (_) {}
+}
+
+// One-time migration: fenPositionKey used to take the first 4 FEN fields verbatim,
+// so chess.js's "junk EP square" on every double pawn push (set even when no
+// capture is pseudo-legal) was preserved in cached moveStats[].posKey and
+// finalFen. Once fenPositionKey started stripping non-pseudo-legal EP (commit
+// 2aad194), lookups computed the normalized key while IDB records still held the
+// EP-inclusive form — opening explorer then reported "No games found" for any
+// position directly after a double push (e.g. after 1.d4 c5 2.d5 Nf6 3.c4 → the
+// post-c4 position's cached posKey ends in "c3" while the filter board's lookup
+// ends in "-"). gistData notes/scoreboard/customDeviations/dismissed got a
+// matching migration at the time (migrateLegacyPosKeys) but the IDB fendata
+// store was missed. FEN_DB_VERSION stays at 1 so we don't force a full chess.js
+// replay — just walk records, normalize posKey + finalFen in-place, and write
+// back only dirty ones. Idempotent: normalized keys are fixed points. Gated by
+// a localStorage flag so it runs once. buildOpeningIndex also normalizes on
+// read (see cache-hit branch) so correctness doesn't depend on this completing —
+// this just persists the heal across sessions and avoids repeating the work.
+function migrateLegacyFenDataPosKeys() {
+  const FLAG_KEY = 'mistakelab_fendata_ep_migrated';
+  try { if (localStorage.getItem(FLAG_KEY) === '1') return; } catch (_) {}
+  const t0 = performance.now();
+  loadAllFenDataFromIDB().then(data => {
+    const dirty = {};
+    let dirtyRecords = 0, msFixed = 0, finalFenFixed = 0;
+    const totalRecords = Object.keys(data).length;
+    for (const gid in data) {
+      const rec = data[gid];
+      if (!rec) continue;
+      let changed = false;
+      if (Array.isArray(rec.moveStats)) {
+        for (const ms of rec.moveStats) {
+          if (!ms || !ms.posKey) continue;
+          const norm = fenPositionKey(ms.posKey);
+          if (norm !== ms.posKey) { ms.posKey = norm; changed = true; msFixed++; }
+        }
+      }
+      if (rec.finalFen) {
+        const norm = fenPositionKey(rec.finalFen);
+        if (norm !== rec.finalFen) { rec.finalFen = norm; changed = true; finalFenFixed++; }
+      }
+      if (changed) { dirty[gid] = rec; dirtyRecords++; }
+    }
+    if (dirtyRecords === 0) {
+      try { localStorage.setItem(FLAG_KEY, '1'); } catch (_) {}
+      console.log(`[FenDataMigration] No legacy EP-inclusive posKeys in ${totalRecords} records (${(performance.now()-t0).toFixed(0)}ms)`);
+      return;
+    }
+    putFenDataToIDB(dirty).then(() => {
+      try { localStorage.setItem(FLAG_KEY, '1'); } catch (_) {}
+      console.log(`[FenDataMigration] Normalized ${msFixed} moveStats posKeys + ${finalFenFixed} finalFens across ${dirtyRecords}/${totalRecords} records in ${(performance.now()-t0).toFixed(0)}ms`);
+    }).catch(e => console.warn('[FenDataMigration] Write failed — will retry next session:', e.message));
+  }).catch(e => console.warn('[FenDataMigration] Read failed — will retry next session:', e.message));
 }
 
 // Persist a batch of freshly-computed fen data to IDB (async, fire-and-forget).
@@ -9021,7 +9074,23 @@ function doBuildOpeningIndex() {
           let moveStats, finalFen;
           if (cached && cached.moveStats) {
             moveStats = cached.moveStats;
-            finalFen = cached.finalFen || null;
+            // Heal legacy EP-inclusive posKeys in-place. Pre-2aad194 cache writes
+            // kept chess.js's "junk EP square" (set on every double pawn push,
+            // regardless of whether any pawn can actually capture), while the
+            // current fenPositionKey strips non-pseudo-legal EP. Without this
+            // heal, the lookup side normalizes but the cache side doesn't —
+            // opening explorer misses any position directly after a double push.
+            // Mutating `ms` also mutates fenDataCache[game.id].moveStats (shared
+            // reference), so the next saveFenDataCache write persists the fix.
+            // Idempotent: normalized keys are fixed points — new entries from
+            // the `else if` branch below are already normalized, no-op.
+            for (const ms of moveStats) {
+              if (!ms || !ms.posKey) continue;
+              const norm = fenPositionKey(ms.posKey);
+              if (norm !== ms.posKey) ms.posKey = norm;
+            }
+            finalFen = cached.finalFen ? fenPositionKey(cached.finalFen) : null;
+            if (cached.finalFen && finalFen !== cached.finalFen) cached.finalFen = finalFen;
             cacheHits++;
           } else if (moves.length > 0) {
             const chess = new Chess(game.initialFen || undefined);
@@ -10091,6 +10160,11 @@ function showMainApp() {
 
   // Clear any legacy localStorage fen cache entries (now stored in IndexedDB)
   migrateOldLocalStorageFenCache();
+  // Heal legacy EP-inclusive posKeys in IDB fendata records from pre-2aad194
+  // writes. Async + fire-and-forget; runs once per device (localStorage flag).
+  // buildOpeningIndex also normalizes on read, so explorer correctness doesn't
+  // depend on this completing.
+  migrateLegacyFenDataPosKeys();
   // Request persistent storage to reduce the chance of IDB being evicted under
   // device memory pressure. On Chromium browsers this is usually granted silently
   // if the site is installed as a PWA or has been engaged with; on others the user
