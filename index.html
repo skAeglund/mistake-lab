@@ -1607,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">RepertoireCheck: tear down active continuation / retry state before entering lead-up. startRepertoireFromBeginning and replayRepertoireBeginning previously left repContActive / repContLine / repContRetrying set if the user clicked "From beginning" or "Replay beginning" mid-continuation. Pending setTimeouts in advanceRepertoireContinuation and repContShowAnswer guard on repContActive, so flipping those flags at lead-up entry makes the stale callbacks no-ops instead of letting them run over the lead-up board state.</div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">RepertoireCheck: tear down lead-up and repCont state on drill exit. exitRepertoireDrill set repertoireDrillMode = false but didn't clear repLeadUpActive, repReplayTimer, repContActive, or associated state. If the user exited mid-replay-beginning (via Back to Repertoire) or mid-continuation, the replay's scheduleNext setTimeout or advanceRepertoireContinuation's post-correct timer would still fire and rewrite the board after the user had already navigated away. Now clears all sub-mode state so pending callbacks become no-ops.</div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -19189,6 +19189,23 @@ function startRepertoireReview() {
 function exitRepertoireDrill() {
   if (!repertoireDrillMode) return;
   repertoireDrillMode = false;
+
+  // Tear down any sub-modes that may be active so pending setTimeouts / replay
+  // callbacks become no-ops. Without this, exiting mid-replay or mid-continuation
+  // lets scheduleNext (replayRepertoireBeginning) or advanceRepertoireContinuation
+  // rewrite the board after the user has already navigated away.
+  repLeadUpActive = false;
+  repLeadUpLine = null;
+  repLeadUpIdx = -1;
+  if (repReplayTimer) { clearTimeout(repReplayTimer); repReplayTimer = null; }
+  repContActive = false;
+  repContLine = null;
+  repContBrowsing = false;
+  repContPendingBranches = [];
+  repContRetrying = false;
+  repContRetryQueue = [];
+  repContFailedFens.clear();
+
   if (savedFilteredMistakes) {
     filteredMistakes = savedFilteredMistakes;
     savedFilteredMistakes = null;
