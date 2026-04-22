@@ -1607,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Preserve under-promotion piece in RepertoireCheck lead-up deviation attempts. repLeadUpPlayMove's end-of-lead-up branch re-played the user's move with { promotion: 'q' } hardcoded — if the user deliberately underpromoted to rook/bishop/knight, the reconstructed move silently became a queen promotion, leading to a correctness check against the wrong move. Now uses move.promotion || 'q' so the re-play matches what the user actually played.</div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">RepertoireCheck: clear lastmove highlight on wrong-move retry. evaluateRepertoireMove's wrong-but-retry branch undid the bad move and redrew the board but didn't clear the .square-lastmove class — after a lead-up that ends with showLastMoveHighlight(source, target) on the user's deviation attempt, the highlight stayed stamped on the failed attempt's squares through the retry.</div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -19291,6 +19291,9 @@ function evaluateRepertoireMove(source, target, move) {
       // Wrong but still has attempts — undo and let them retry
       gameEngine.undo();
       boardObj.position(gameEngine.fen(), true);
+      // Clear lastmove highlight so the wrong attempt's source/target (or a
+      // prior lead-up highlight) doesn't stay stamped on the retry board.
+      clearLastMoveHighlight();
       showCheckHighlightDeferred(gameEngine);
 
       const remaining = 3 - currentAttempts;
