@@ -1607,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Guard the "Review Game" button in stopAndReviewContinuation's "Continuation ended" card against the 0-annotated-moves dead end. buildContLineReviewData returns null when contLine has no moves with a classification, so startContLineReview would silently bail — but the Review Game button was still shown, producing a no-op click. Every other end-of-continuation call site (finishAdvantage, checkmate/draw-as-winner, checkmate/draw-as-loser, turn-mismatch) already guarded on `contLine && contLine.moves.some(mv => mv.classification)`; only Stop & Review was missing it. Fix is just that same guard. Filter practice's unconditional Stop & Review button in posInfoCard (line 14701) is intentional — it doubles as an exit affordance for the user to bail out of practice before playing any moves, and with this guard the 0-moves click produces a clean "0 moves played. [▶ Play again] [↩ Back to openings]" feedback instead of a broken review button. Non-resumed silent continuation already gates Stop & Review on `userMoves >= SILENT_REVIEW_MIN_MOVES (5)` so no 0-move dead end exists there.</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Re-hide toolbar buttons in exitContLineReview. startContLineReview unconditionally unhides btnLichess (Analysis) and btnNote — and conditionally btnViewGame for real-game items — so the user can invoke these during Game Review. exitContLineReview didn't undo that, so the buttons stayed visible after review exit in contexts where they shouldn't be: the filter practice "↩ Back to openings" path (enterOpeningFilter → exitContLineReview) left Analysis + Note showing in the Opening Filter, and the practice "▶ Play again" retry path (retryPosition practice branch → exitContLineReview) left them visible across the restart. Add the paired hide in exitContLineReview. Safe for all navigation paths: loadPosition (Prev/Next to a mistake/tactic/advantage item) unhides them again immediately at line 11093+, so this is a no-op for those paths.</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -16270,6 +16270,17 @@ function exitContLineReview() {
   window._lastRetryResult = null;
   engineLine = null;
   browsingLine = false;
+  // Finding #9: re-hide the toolbar buttons that startContLineReview unhid.
+  // Without this, btnLichess / btnNote / btnViewGame stay visible after
+  // review exit even when the next context shouldn't show them — notably
+  // filter practice's "↩ Back to openings" path (enterOpeningFilter → here),
+  // and the practice "▶ Play again" retry path (retryPosition → here).
+  // For mistake/tactic/advantage items navigated via Prev/Next, loadPosition
+  // runs immediately after this and re-unhides the three buttons (line 11093+),
+  // so this hide is a no-op for those paths.
+  document.getElementById('btnLichess').classList.add('hidden');
+  document.getElementById('btnNote').classList.add('hidden');
+  document.getElementById('btnViewGame').classList.add('hidden');
   // IMP-004: clear review-scoped board overlays (best-move arrows, move-class
   // badges, hint state, selection) so they can't leak into whatever comes next.
   clearBoardOverlays();
