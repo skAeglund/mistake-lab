@@ -1607,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix visual regression in the priority-1 Game Review universal guards. In fbf4756 the guards in onDrop and onBoardClick ran AFTER showLastMoveHighlight(source, target) — when the guard fired, .square-lastmove was stamped onto the user's attempted drag-from/drag-to squares, then gameEngine.undo() + boardObj.position(fen, false) rebuilt the board DOM (wiping BOTH the stale stamped highlight and the legitimate pre-drag highlight on the key-move's squares). Plus showCheckHighlight wasn't re-applied after the DOM rebuild, so in-check positions lost their check marker too. Restructure: (1) move the guard to run before showLastMoveHighlight/showCheckHighlight, so those visual-effect calls never fire in the snapback path; (2) after boardObj.position() inside the guard, explicitly restore showCheckHighlight(gameEngine) and — if contLine.currentIdx >= 0 and the move has a UCI — showLastMoveHighlight for the actual current review-line move. User now sees the correct last-move highlight restored after any errant drag in a read-only review context.</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix custom RepertoireCheck deviation marking correct moves as wrong, closes #8. evaluateRepertoireMove used trieMatchesMove(m.positionKey, ...) which only consults repertoireTrie — but custom deviations added via addCustomDeviation/addCustomDeviationFromInput live on the item (gistData.repertoire.customDeviations), not in the trie, so any position not covered by the loaded studies was an automatic false-negative. New isRepertoireCorrectForItem(m, san, uci) helper checks the item's stored repertoireMove first, then falls back to trieMatchesMove so trie-sourced items with multiple valid continuations still grade correctly.</div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -18226,6 +18226,17 @@ function trieMatchesMove(posKey, san, uci) {
   return arr.some(e => e.uci === uci || e.san === san);
 }
 
+// True when a played move is correct for a repertoire drill item. Custom
+// deviations live only on the item (not in the trie), so trieMatchesMove alone
+// misses them. Check the item's stored repertoireMove first, then fall back to
+// the trie (which may list multiple valid continuations for trie-sourced items).
+function isRepertoireCorrectForItem(m, san, uci) {
+  if (!m) return false;
+  const expected = m.repertoireMove;
+  if (expected && (expected.uci === uci || expected.san === san)) return true;
+  return trieMatchesMove(m.positionKey, san, uci);
+}
+
 // True when the move played at fenBefore matches the user's repertoire for that
 // position. `uci` is optional — if absent, it's derived from `san` via chess.js.
 // Safe to call before the trie is loaded (returns false).
@@ -19217,7 +19228,7 @@ function evaluateRepertoireMove(source, target, move) {
 
   const playedUci = source + target + (move.promotion || '');
   const expected = m.repertoireMove;
-  const isCorrect = trieMatchesMove(m.positionKey, move.san, playedUci);
+  const isCorrect = isRepertoireCorrectForItem(m, move.san, playedUci);
   const isLastItem = currentMistakeIdx >= filteredMistakes.length - 1;
 
   if (isCorrect) {
