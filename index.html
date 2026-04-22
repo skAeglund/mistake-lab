@@ -1607,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Re-hide toolbar buttons in exitContLineReview. startContLineReview unconditionally unhides btnLichess (Analysis) and btnNote — and conditionally btnViewGame for real-game items — so the user can invoke these during Game Review. exitContLineReview didn't undo that, so the buttons stayed visible after review exit in contexts where they shouldn't be: the filter practice "↩ Back to openings" path (enterOpeningFilter → exitContLineReview) left Analysis + Note showing in the Opening Filter, and the practice "▶ Play again" retry path (retryPosition practice branch → exitContLineReview) left them visible across the restart. Add the paired hide in exitContLineReview. Safe for all navigation paths: loadPosition (Prev/Next to a mistake/tactic/advantage item) unhides them again immediately at line 11093+, so this is a no-op for those paths.</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Clear contWrongMovePending on continuation teardown. The flag is set (line 12980) when a user plays a wrong move in a live non-silent continuation — the refutation engine line is shown and the flag gates the "Try again" flow, voice system behavior (7824, 7888), and the continuation advance fallback branch (13063). tryAgainFromContinuationLine and retryPosition both clear it, but stopAndReviewContinuation and exitContLineReview didn't, so the flag could leak across sessions when the user navigated via paths that bypass loadPosition (which also clears it). enterOpeningFilter calls exitContLineReview unconditionally, so a wrong-move-pending state from a prior live continuation could survive into the opening filter and cause voice gating or advance-logic misbehavior later. Fix is defensive cleanup in both places.</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -15206,6 +15206,13 @@ function stopAndReviewContinuation() {
   recordPracticeResult(evalToResult(afterMoveCpWhite), afterMoveCpWhite);
   continuationMode = false;
   silentContinuation = false;
+  // Finding #10: clear the wrong-move-pending flag on continuation teardown.
+  // Normally tryAgainFromContinuationLine clears it, but a user could skip
+  // that by clicking Stop & Review (if still reachable) or by allowing the
+  // game to progress in silent mode. Defensive cleanup here prevents voice
+  // gating (7824/7888) and the continuation advance fallback branch (13063)
+  // from misfiring in a future context.
+  contWrongMovePending = false;
   clearContSession();
   hideMaiaControls();
   hideContStopReview();
@@ -16270,6 +16277,13 @@ function exitContLineReview() {
   window._lastRetryResult = null;
   engineLine = null;
   browsingLine = false;
+  // Finding #10: clear the wrong-move-pending flag. enterOpeningFilter calls
+  // exitContLineReview unconditionally on entry — if the user had played a
+  // wrong move in a prior live continuation (contWrongMovePending=true) and
+  // then navigated to the opening filter via some other path, the flag leaks
+  // and voice gating / continuation advance logic can misfire in the next
+  // context. Paired with the same clear in stopAndReviewContinuation.
+  contWrongMovePending = false;
   // Finding #9: re-hide the toolbar buttons that startContLineReview unhid.
   // Without this, btnLichess / btnNote / btnViewGame stay visible after
   // review exit even when the next context shouldn't show them — notably
