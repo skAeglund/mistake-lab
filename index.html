@@ -1607,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">RepertoireCheck: clear lastmove highlight on wrong-move retry. evaluateRepertoireMove's wrong-but-retry branch undid the bad move and redrew the board but didn't clear the .square-lastmove class — after a lead-up that ends with showLastMoveHighlight(source, target) on the user's deviation attempt, the highlight stayed stamped on the failed attempt's squares through the retry.</div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">RepertoireCheck: tear down active continuation / retry state before entering lead-up. startRepertoireFromBeginning and replayRepertoireBeginning previously left repContActive / repContLine / repContRetrying set if the user clicked "From beginning" or "Replay beginning" mid-continuation. Pending setTimeouts in advanceRepertoireContinuation and repContShowAnswer guard on repContActive, so flipping those flags at lead-up entry makes the stale callbacks no-ops instead of letting them run over the lead-up board state.</div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -20056,6 +20056,18 @@ function startRepertoireFromBeginning() {
   }
 
   if (repReplayTimer) { clearTimeout(repReplayTimer); repReplayTimer = null; }
+
+  // Tear down any active repertoire continuation / retry state before entering
+  // lead-up. Continuation setTimeouts (in advanceRepertoireContinuation and
+  // repContShowAnswer) are guarded by `if (repContActive)`; flipping those
+  // flags now means stale pending callbacks become no-ops.
+  repContActive = false;
+  repContLine = null;
+  repContBrowsing = false;
+  repContPendingBranches = [];
+  repContRetrying = false;
+  repContRetryQueue = [];
+
   // BUG-009: for practice-sourced deviations the "beginning" of the lead-up
   // is the filter/session start FEN, not necessarily the standard start.
   const baseFen = m.initialFen || 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
@@ -20101,6 +20113,15 @@ function replayRepertoireBeginning() {
 
   // Cancel any existing replay
   if (repReplayTimer) { clearTimeout(repReplayTimer); repReplayTimer = null; }
+
+  // Tear down any active repertoire continuation / retry state before entering
+  // lead-up replay. Same rationale as startRepertoireFromBeginning.
+  repContActive = false;
+  repContLine = null;
+  repContBrowsing = false;
+  repContPendingBranches = [];
+  repContRetrying = false;
+  repContRetryQueue = [];
 
   // BUG-009: practice-sourced deviations may have a non-standard initialFen
   const baseFen = m.initialFen || 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
