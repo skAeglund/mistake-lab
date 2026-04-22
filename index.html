@@ -1607,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Refresh Game Review summary card as background deep-eval re-classifies moves. startContLineReview waits up to 15s for the silentEvalQueue to drain before rendering the summary; if the user hits "Low Depth Review" or the timeout fires, the initial summary shows pre-deep-eval classifications. applySilentEvalToMove then keeps updating mv.classification / wpDrop / afterCp in the background, but the summary card (tally, accuracy %, sparkline, "Review N key moves" button count) was built once and never rebuilt — so the keyMoves queue the user navigated could point to moves that were no longer mistakes at depth 22, or miss moves that only became mistakes at depth 22. Fix: (1) extract the summary markup into renderContLineReviewSummary(data) so it can be re-emitted, (2) add maybeRefreshReviewSummary() gated on `contLineReviewMode && contLineReviewKeyIdx === -1 && !window._reviewBestLine` so it only runs when the user is sitting on the summary card (never disturbs advanced key-move review or Show Line / Show Refutation views), (3) hook it into both queue drains — processSilentEvalQueue (eval worker) and processQueueOnMainWorker (main worker helper). The sparkline click handler still works across refreshes because buildEvalSparkline writes window._reviewEvalPoints on every render and onReviewGraphClick reads it live.</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Guard the "Review Game" button in stopAndReviewContinuation's "Continuation ended" card against the 0-annotated-moves dead end. buildContLineReviewData returns null when contLine has no moves with a classification, so startContLineReview would silently bail — but the Review Game button was still shown, producing a no-op click. Every other end-of-continuation call site (finishAdvantage, checkmate/draw-as-winner, checkmate/draw-as-loser, turn-mismatch) already guarded on `contLine && contLine.moves.some(mv => mv.classification)`; only Stop & Review was missing it. Fix is just that same guard. Filter practice's unconditional Stop & Review button in posInfoCard (line 14701) is intentional — it doubles as an exit affordance for the user to bail out of practice before playing any moves, and with this guard the 0-moves click produces a clean "0 moves played. [▶ Play again] [↩ Back to openings]" feedback instead of a broken review button. Non-resumed silent continuation already gates Stop & Review on `userMoves >= SILENT_REVIEW_MIN_MOVES (5)` so no 0-move dead end exists there.</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -15222,10 +15222,18 @@ function stopAndReviewContinuation() {
   clearHintHighlights();
 
   const moveCount = contLine ? contLine.moves.filter(mv => mv.isUser).length : 0;
+  // Finding #8: guard the "Review Game" button — buildContLineReviewData
+  // returns null when contLine has no annotated moves, so startContLineReview
+  // silently bails and the click does nothing. All other end-of-continuation
+  // call sites (finishContinuation checkmate/draw, turn-mismatch) already
+  // include this guard; only this Stop & Review path was missing it.
+  const reviewBtn = contLine && contLine.moves.some(mv => mv.classification)
+    ? `<div style="margin-top:8px;"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="startContLineReview()">📋 Review Game</button></div>`
+    : '';
   showColorFeedback('var(--accent)', 'rgba(66,133,244,0.08)',
     'Continuation ended',
     `${moveCount} moves played.` +
-    `<div style="margin-top:8px;"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="startContLineReview()">📋 Review Game</button></div>` +
+    reviewBtn +
     practiceEndBtns()
   );
 
