@@ -1607,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Don't record SRS for synthetic practice / resumed items on skip. skipPosition unconditionally called `recordReview(posId(m), again)` — but practice items (gameId '_practice', movePly 0) and resumed items (gameId '_resumed') aren't real drill positions. Their posIds ('_practice_0', '_resumed_0') are synthetic and stable across sessions, so every skip pollutes gistData.positions with orphan SRS data that accumulates indefinitely. The SRS queue excludes practice-type items from due checks anyway, so the recorded grade can't re-surface the card — it's pure garbage in the Gist. Gate the recordReview call on `m.type !== 'practice' && m.gameId !== '_practice' && m.gameId !== '_resumed'`. The rest of skipPosition (navigation to next position / advance queue / session progress update) runs unchanged.</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix visual regression in the priority-1 Game Review universal guards. In fbf4756 the guards in onDrop and onBoardClick ran AFTER showLastMoveHighlight(source, target) — when the guard fired, .square-lastmove was stamped onto the user's attempted drag-from/drag-to squares, then gameEngine.undo() + boardObj.position(fen, false) rebuilt the board DOM (wiping BOTH the stale stamped highlight and the legitimate pre-drag highlight on the key-move's squares). Plus showCheckHighlight wasn't re-applied after the DOM rebuild, so in-check positions lost their check marker too. Restructure: (1) move the guard to run before showLastMoveHighlight/showCheckHighlight, so those visual-effect calls never fire in the snapback path; (2) after boardObj.position() inside the guard, explicitly restore showCheckHighlight(gameEngine) and — if contLine.currentIdx >= 0 and the move has a UCI — showLastMoveHighlight for the actual current review-line move. User now sees the correct last-move highlight restored after any errant drag in a read-only review context.</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -10792,15 +10792,15 @@ function onBoardClick(e) {
     clearSelection();
     if (move) {
       clearArrows();
-      boardObj.position(gameEngine.fen());
-      showLastMoveHighlight(move.from, move.to);
-      showCheckHighlight(gameEngine);
 
       // Game Review guard (issue #9): same rationale as the onDrop guard —
       // block stray moves that would fall through to evaluateMove / SRS /
       // buildEngineLine from a read-only review context. See onDrop for the
       // full commentary. Engine-line branching (Show Line / Show Refutation)
       // is intercepted earlier in this handler at ~line 10699.
+      // MUST run before showLastMoveHighlight below — that call stamps the
+      // `.square-lastmove` class on the snapped-back move's from/to squares,
+      // leaving the wrong squares highlighted if we fall into this guard.
       {
         const inReviewContext = contLineReviewMode ||
           (contLineReviewKeyMoves && contLineReviewKeyMoves.length > 0);
@@ -10813,6 +10813,10 @@ function onBoardClick(e) {
           return;
         }
       }
+
+      boardObj.position(gameEngine.fen());
+      showLastMoveHighlight(move.from, move.to);
+      showCheckHighlight(gameEngine);
 
       // Making a move while browsing the continuation line
       if (contLine && contLineBrowsing) {
@@ -11499,8 +11503,6 @@ function onDrop(source, target) {
   if (move === null) { clearSelection(); return 'snapback'; }
 
   clearSelection();
-  showLastMoveHighlight(source, target);
-  showCheckHighlight(gameEngine);
 
   // Game Review guard (issue #9): block any stray board move that would
   // otherwise fall through to evaluateMove / SRS / buildEngineLine and
@@ -11510,6 +11512,9 @@ function onDrop(source, target) {
   //     intercepted at line ~11440 before we reach this point.
   // Everything else (key-move cards, retry-result cards, the post-review
   // Complete summary) is a read-only review context; snap the piece back.
+  // MUST run before showLastMoveHighlight below — that call stamps the
+  // `.square-lastmove` class on the snapped-back move's from/to squares,
+  // and if we fall into this guard we'd leave that stale highlight behind.
   {
     const inReviewContext = contLineReviewMode ||
       (contLineReviewKeyMoves && contLineReviewKeyMoves.length > 0);
@@ -11519,10 +11524,23 @@ function onDrop(source, target) {
       if (window._reviewBestLine) window._reviewBestLine.animating = false;
       gameEngine.undo();
       boardObj.position(gameEngine.fen(), false);
+      // boardObj.position rebuilds the board DOM and wipes our custom CSS
+      // classes (square-check, square-checkmate, square-lastmove). Restore
+      // highlight for the current review-line position so the key move's
+      // from/to squares stay highlighted (re-review audit).
       showCheckHighlight(gameEngine);
+      if (contLine && contLine.currentIdx >= 0 && contLine.moves[contLine.currentIdx]?.uci) {
+        const uci = contLine.moves[contLine.currentIdx].uci;
+        showLastMoveHighlight(uci.substring(0, 2), uci.substring(2, 4));
+      }
       return 'snapback';
     }
   }
+
+  showLastMoveHighlight(source, target);
+  showCheckHighlight(gameEngine);
+
+  // (stray-move guard already handled above — before the visual effects)
 
   // Making a move while browsing the continuation line — truncate and branch
   if (contLine && contLineBrowsing) {
