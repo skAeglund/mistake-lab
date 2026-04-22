@@ -1607,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">RepertoireCheck: tear down lead-up and repCont state on drill exit. exitRepertoireDrill set repertoireDrillMode = false but didn't clear repLeadUpActive, repReplayTimer, repContActive, or associated state. If the user exited mid-replay-beginning (via Back to Repertoire) or mid-continuation, the replay's scheduleNext setTimeout or advanceRepertoireContinuation's post-correct timer would still fire and rewrite the board after the user had already navigated away. Now clears all sub-mode state so pending callbacks become no-ops.</div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">RepertoireCheck: tear down prior drill before starting a new one in startRepertoireDrill. startRepertoireReview already did this to prevent savedFilteredMistakes from being overwritten with the previous drill queue (losing the original non-drill filteredMistakes). startRepertoireDrill was missing the symmetric guard. Defensive — panel is hidden during drill so the Drill button is usually unreachable, but the symmetry with startRepertoireReview is worth keeping.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -19115,6 +19115,12 @@ function lichessStudyBtn(m) {
 
 function startRepertoireDrill() {
   if (!repertoireDeviations.length) return;
+
+  // If a prior drill is still active, tear it down cleanly before starting a new one.
+  // Without this, savedFilteredMistakes would be overwritten with the previous drill
+  // queue and the original non-drill filteredMistakes would be lost. Mirrors the
+  // guard in startRepertoireReview.
+  if (repertoireDrillMode) exitRepertoireDrill();
 
   // Build drill queue — deviations are already deduplicated with type:'repertoire'
   repertoireDrillQueue = repertoireDeviations.map(d => ({ ...d }));
