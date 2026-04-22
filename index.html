@@ -1607,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix opening explorer "No games found" after a double pawn push. Pre-2aad194 IDB fendata records stored moveStats[].posKey / finalFen with chess.js's junk EP square (set on every double push even when no capture is pseudo-legal) — the lookup side now normalizes via fenPositionKey but the cache side still held the EP-inclusive form, so e.g. 1.d4 c5 2.d5 Nf6 3.c4 missed all 8 games. Fix is two layers: (A) buildOpeningIndex's cache-hit branch normalizes moveStats[].posKey and finalFen in-place on read — mutation aliases fenDataCache so subsequent saves persist the heal; idempotent on already-normalized entries. (B) migrateLegacyFenDataPosKeys runs once per device at showMainApp (localStorage-flag gated), walks IDB, normalizes all records, writes back only dirty ones. Layer A guarantees correctness regardless of B's completion; B avoids repeating the work across sessions.</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix Game Review losing state when a board move falls through the wrong code path (issue #9). After a retry result card is shown (handleReviewRetryResult resets contLineBrowsing=false and contLineReviewRetryIdx=-1), any subsequent board move — inside a refutation, inside a best line, or even on the retry card itself — previously walked past both branching guards in onDrop/click and landed in evaluateMove, which (a) recorded an "Again" SRS grade against the original mistake's pid, (b) called buildEngineLine from a stale currentSolveFen and undid the wrong move, and (c) wired a Try-again button to tryAgainFromLine which innerHTML=''s both feedbackContainer and contLineContainer — wiping the review UI. Three-layer fix: (1) UNIVERSAL REVIEW GUARD in onDrop and the click handler — when contLineReviewMode or a post-review keyMoves queue is active and no retry is in flight, snapback the piece. This catches key-move cards, retry result cards, and the Review Complete summary. (2) BRANCHING INFRASTRUCTURE inside Show Line / Show Refutation — showReviewBestLine and showReviewRefutation now mirror the review line into a real engineLine and set browsingLine=true, so board moves route through the existing handleEngineLineBranch and create branches on engineLine.alternatives without ever touching contLine, evaluateMove, or SRS. engineLine.currentIdx is synced from _reviewBestLine navigation (animateLinePreview, goToReviewLine, stepReviewBestLine's back-to-preFen branch) so branches fork from the user's actual viewing position. goToReviewLine / stepReviewBestLine also reset engineLine.activeAlt=-1 since the feedback-card move list renders main line only — a click there is a "snap back to main line" action. (3) TEARDOWN — exitReviewBestLine, reviewNextKeyMove, reviewPrevKeyMove all drop engineLine + browsingLine + the engineLineBox DOM node so alternatives scoped to the closed line view don't leak into the next key move or a subsequent review. Escape key routes review line views to exitReviewBestLine before the generic contLineBrowsing / engineLine branches, so both _reviewBestLine and engineLine tear down cleanly. Async-race guards in showReviewBestLine / showReviewRefutation (contLineSnap + mvSnap captured pre-await, bail on mismatch) prevent a late-arriving sfAnalyze result from setting engineLine/browsingLine against a stale state if the user navigates away during analysis.</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -10779,6 +10779,22 @@ function onBoardClick(e) {
       showLastMoveHighlight(move.from, move.to);
       showCheckHighlight(gameEngine);
 
+      // Game Review guard (issue #9): same rationale as the onDrop guard —
+      // block stray moves that would fall through to evaluateMove / SRS /
+      // buildEngineLine from a read-only review context. See onDrop for the
+      // full commentary. Engine-line branching (Show Line / Show Refutation)
+      // is intercepted earlier in this handler at ~line 10699.
+      {
+        const inReviewContext = contLineReviewMode ||
+          (contLineReviewKeyMoves && contLineReviewKeyMoves.length > 0);
+        if (inReviewContext && contLineReviewRetryIdx < 0) {
+          gameEngine.undo();
+          boardObj.position(gameEngine.fen(), false);
+          showCheckHighlight(gameEngine);
+          return;
+        }
+      }
+
       // Making a move while browsing the continuation line
       if (contLine && contLineBrowsing) {
         // Review retry mode — evaluate the move without modifying contLine
@@ -11466,6 +11482,25 @@ function onDrop(source, target) {
   clearSelection();
   showLastMoveHighlight(source, target);
   showCheckHighlight(gameEngine);
+
+  // Game Review guard (issue #9): block any stray board move that would
+  // otherwise fall through to evaluateMove / SRS / buildEngineLine and
+  // corrupt review state. Legitimate move contexts during review are:
+  //   - Retry drill (contLineReviewRetryIdx >= 0) — evaluated below.
+  //   - Engine-line branching (engineLine set + browsingLine=true) — already
+  //     intercepted at line ~11440 before we reach this point.
+  // Everything else (key-move cards, retry-result cards, the post-review
+  // Complete summary) is a read-only review context; snap the piece back.
+  {
+    const inReviewContext = contLineReviewMode ||
+      (contLineReviewKeyMoves && contLineReviewKeyMoves.length > 0);
+    if (inReviewContext && contLineReviewRetryIdx < 0) {
+      gameEngine.undo();
+      boardObj.position(gameEngine.fen(), false);
+      showCheckHighlight(gameEngine);
+      return 'snapback';
+    }
+  }
 
   // Making a move while browsing the continuation line — truncate and branch
   if (contLine && contLineBrowsing) {
@@ -15376,6 +15411,13 @@ async function startContLineReview() {
 function reviewNextKeyMove() {
   if (!contLineReviewMode || contLineReviewKeyMoves.length === 0) return;
   window._reviewBestLine = null;
+  // Issue #9: drop any engineLine left over from a Show Line / Show Refutation
+  // that was open on the previous key move. Branches the user may have created
+  // on that view are discarded (scoped to that line view only).
+  engineLine = null;
+  browsingLine = false;
+  const engineLineBox = document.getElementById('engineLineBox');
+  if (engineLineBox) engineLineBox.remove();
   contLineReviewKeyIdx++;
   if (contLineReviewKeyIdx >= contLineReviewKeyMoves.length) {
     contLineReviewKeyIdx = contLineReviewKeyMoves.length; // past end
@@ -15391,6 +15433,12 @@ function reviewNextKeyMove() {
 function reviewPrevKeyMove() {
   if (!contLineReviewMode || contLineReviewKeyMoves.length === 0) return;
   window._reviewBestLine = null;
+  // Issue #9: same teardown as reviewNextKeyMove — drop any engineLine from
+  // a Show Line / Show Refutation on the previous key move.
+  engineLine = null;
+  browsingLine = false;
+  const engineLineBox = document.getElementById('engineLineBox');
+  if (engineLineBox) engineLineBox.remove();
   contLineReviewKeyIdx--;
   if (contLineReviewKeyIdx < 0) {
     contLineReviewKeyIdx = 0;
@@ -15482,6 +15530,13 @@ async function showReviewBestLine(moveIdx) {
   const postBestFen = chess.fen();
   const alreadyAtPostBest = !!gameEngine && gameEngine.fen() === postBestFen;
 
+  // Issue #9: capture contLine ref + move identity to detect navigation away
+  // during the sfAnalyze await below. Without this, a late-arriving result
+  // would set engineLine + browsingLine against a stale state and misroute
+  // the new position's board moves.
+  const contLineSnap = contLine;
+  const mvSnap = mv;
+
   // Show loading state
   const container = document.getElementById('feedbackContainer');
   container.innerHTML = `
@@ -15505,6 +15560,9 @@ async function showReviewBestLine(moveIdx) {
 
   // Analyze the position AFTER the best move to get the continuation
   const result = await sfAnalyze(postBestFen, 20, 1);
+  // Bail if the user navigated away during analysis (contLine replaced or
+  // the targeted move changed).
+  if (contLine !== contLineSnap || contLine?.moves[moveIdx] !== mvSnap) return;
   if (result && result.pvs && result.pvs[0]) {
     const pvMoves = (result.pvs[0].moves || '').trim().split(/\s+/).filter(Boolean);
     for (const uci of pvMoves.slice(0, 9)) { // cap continuation at 9 (total line: 10)
@@ -15554,6 +15612,23 @@ async function showReviewBestLine(moveIdx) {
 
   // Store line for navigation
   window._reviewBestLine = { moveIdx, lineMoves, preFen, currentIdx: 0 };
+
+  // Issue #9: also set up an `engineLine` mirroring the review line. Any board
+  // move the user now makes routes through the existing engine-line branching
+  // infrastructure (onDrop's `browsingLine && engineLine` intercept →
+  // handleEngineLineBranch), which creates branches on engineLine.alternatives
+  // without touching contLine, evaluateMove, or SRS. The `_reviewBestLine`
+  // copy above still drives arrow-key nav and the feedback move-list clicks.
+  engineLine = {
+    baseFen: preFen,
+    moves: lineMoves.map(lm => ({ san: lm.san, uci: lm.uci, fen: lm.fen, isUser: false })),
+    currentIdx: 0,
+    alternatives: [],
+    activeAlt: -1,
+    extension: null,
+    cpWhite: null,
+  };
+  browsingLine = true;
 
   const cls = MOVE_CLASSIFICATION[mv.classification] || {};
   const sym = mv.classification === 'good' ? '✓' : (mv.classification === 'best' ? '★' : cls.symbol || '');
@@ -15606,6 +15681,13 @@ async function animateLinePreview(moveIdx, startIdx, endIdx) {
     }
     showCheckHighlightDeferred(gameEngine);
     data.currentIdx = i;
+    // Issue #9: keep the mirrored engineLine in sync so a board move branches
+    // from the current viewing position, not the stale entry index. Only sync
+    // while no branches exist — once the user has branched, engineLine owns
+    // its own navigation state.
+    if (engineLine && engineLine.alternatives.length === 0) {
+      engineLine.currentIdx = i;
+    }
 
     // Update active state in the move list
     const moves = document.querySelectorAll('#feedbackContainer .engine-line-moves .move');
@@ -15620,6 +15702,17 @@ function goToReviewLine(moveIdx, lineIdx) {
   if (!data || data.moveIdx !== moveIdx || !data.lineMoves[lineIdx]) return;
   data.animating = false; // cancel auto-preview if user clicked a move
   data.currentIdx = lineIdx;
+  // Issue #9: the feedback-card move list renders the main line only. A click
+  // here is a "snap back to the main line at this index" action. Reset
+  // engineLine.activeAlt so getEngineLineFen (and any subsequent branch from
+  // handleEngineLineBranch) operates on the main line — otherwise a post-branch
+  // click leaves activeAlt set and future branches fork from the wrong position.
+  // Any alt the user already created is preserved in engineLine.alternatives
+  // and remains accessible via the engineLineBox panel.
+  if (engineLine) {
+    engineLine.currentIdx = lineIdx;
+    engineLine.activeAlt = -1;
+  }
   const lm = data.lineMoves[lineIdx];
   gameEngine.load(lm.fen);
   boardObj.position(lm.fen, false);
@@ -15647,6 +15740,12 @@ function stepReviewBestLine(delta) {
   if (newIdx === -1) {
     // Back to pre-move position
     data.currentIdx = -1;
+    // Issue #9: snap engineLine back to the main line (pre-branch position).
+    // See goToReviewLine for rationale.
+    if (engineLine) {
+      engineLine.currentIdx = -1;
+      engineLine.activeAlt = -1;
+    }
     gameEngine.load(data.preFen);
     boardObj.position(data.preFen, false);
     clearLastMoveHighlight();
@@ -15664,6 +15763,16 @@ function stepReviewBestLine(delta) {
 function exitReviewBestLine(moveIdx) {
   const wasRetryContext = !!window._reviewBestLine?.retryContext;
   window._reviewBestLine = null;
+  // Issue #9: also tear down the engineLine + browsingLine that
+  // showReviewBestLine / showReviewRefutation set up for board-move branching.
+  // Drop any alternatives the user created too — they lived only inside this
+  // line view. The engineLineBox panel (rendered by handleEngineLineBranch if
+  // the user branched) is removed too so the feedback area is clean.
+  engineLine = null;
+  browsingLine = false;
+  const engineLineBox = document.getElementById('engineLineBox');
+  if (engineLineBox) engineLineBox.remove();
+  updateLineNavBar();
   // Coming back from a retry-context refutation: restore the retry result card
   // (keeps the user's retry move highlighted and the feedback buttons intact).
   if (wasRetryContext && restoreRetryResultView()) return;
@@ -15687,6 +15796,12 @@ async function showReviewRefutation(moveIdx, fromRetry = false) {
   const badClassification = retryValid
     ? classifyWpDrop(retry.wpDrop, retry.isExactBest)
     : originalMv.classification;
+
+  // Issue #9: snapshot contLine ref + move identity for post-await validation.
+  // Prevents the late result from setting engineLine/browsingLine against a
+  // stale state if the user navigated away during the analysis wait.
+  const contLineSnap = contLine;
+  const mvSnap = originalMv;
 
   // Show loading
   const container = document.getElementById('feedbackContainer');
@@ -15712,6 +15827,8 @@ async function showReviewRefutation(moveIdx, fromRetry = false) {
 
   // Analyze: opponent's best response to the bad move
   const result = await sfAnalyze(postFen, 20, 1);
+  // Bail if the user navigated away during analysis.
+  if (contLine !== contLineSnap || contLine?.moves[moveIdx] !== mvSnap) return;
   if (!result || !result.pvs || !result.pvs[0]) {
     if (retryValid) restoreRetryResultView(); else showReviewKeyMoveInfo(moveIdx);
     return;
@@ -15794,6 +15911,23 @@ async function showReviewRefutation(moveIdx, fromRetry = false) {
   // exitReviewBestLine to restore the retry result view instead of the
   // original key-move info.
   window._reviewBestLine = { moveIdx, lineMoves, preFen: postFen, currentIdx: 0, retryContext: retryValid };
+
+  // Issue #9: mirror `_reviewBestLine` into an `engineLine` so board moves
+  // branch via handleEngineLineBranch instead of falling through to
+  // evaluateMove / SRS / buildEngineLine. The engineLine.baseFen is postFen
+  // (the position AFTER the user's bad move — lineMoves start with the
+  // opponent's refutation reply, already on the board). See showReviewBestLine
+  // for the full rationale.
+  engineLine = {
+    baseFen: postFen,
+    moves: lineMoves.map(lm => ({ san: lm.san, uci: lm.uci, fen: lm.fen, isUser: false })),
+    currentIdx: 0,
+    alternatives: [],
+    activeAlt: -1,
+    extension: null,
+    cpWhite: null,
+  };
+  browsingLine = true;
 
   container.innerHTML = `
     <div class="feedback-box" style="background:rgba(239,95,95,0.06);border-left:3px solid #ef5f5f;">
@@ -20641,6 +20775,15 @@ document.addEventListener('keydown', (e) => {
     if (dtModal && !dtModal.classList.contains('hidden')) { closeDetectedTacticsModal(); return; }
     if (openingFilterMode) { exitOpeningFilter(false); return; }
     if (document.body.classList.contains('drawer-open')) { closeDrawer(); return; }
+    // Issue #9: review line view (Show Line / Show Refutation) exits cleanly
+    // via exitReviewBestLine — restores the key-move card (or retry result
+    // card) AND tears down the mirrored engineLine. Must check before the
+    // generic contLineBrowsing / engineLine branches below, since a review
+    // line view has both flags set.
+    if (window._reviewBestLine) {
+      exitReviewBestLine(window._reviewBestLine.moveIdx);
+      return;
+    }
     if (contLineBrowsing) { contLineGoToEnd(); return; }
     if (browsingLine && engineLine) { exitEngineLine(); return; }
     if (browsingLine && tacticLine) { goToTacticLineMove(tacticLine.moves.length - 1); return; }
