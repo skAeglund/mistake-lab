@@ -1607,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Tactic review scan: confirmInvalidateLine nav before feedback (H1), corrupt-opponent-move bail-out (M1), drop-gate consolidation fixing multi-line paused state and a latent post-solve continuation block (M2), preserve Main-line-solved card on Show engine line (M3), recurse on malformed short alt (L1), hint unavailable during refutation browsing (L2), defensive gameEngine.move check in showTacticEngineLine (L4). Also syncs activeGameId when post-invalidate navigation crosses games.</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Mistake review scan: first-attempt-only SRS rule across mistake/tactic/retry (M2-M) — Again recorded on attempt 1 + srsRecorded/firstAttemptFailed/hintUsed preserved in retryPosition so the locked grade stays locked. Skip buildEngineLine when revealBestMove owns the UI (H1-M). Resync gameEngine at startContinuationMode entry if Show-engine's-best reset it (H2-M). Unconditionally clear hint overlay for wrong moves (M1-M). Defer hintUsed=true past waitForPreAnalysis (L2-M). Sync activeGameId on cross-game nav after confirmRemoveMistake (L4-M).</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -6007,7 +6007,6 @@ async function showHint() {
 
   if (hintLevel === 0) {
     // First press: wait for depth 20, freeze move, pause analysis, highlight piece
-    hintUsed = true;
     if (btn) { btn.disabled = true; btn.textContent = '⟳ Waiting…'; }
 
     const fenSnapshot = currentSolveFen;
@@ -6017,6 +6016,13 @@ async function showHint() {
       if (btn) { btn.disabled = false; btn.textContent = '💡 Hint'; }
       return;
     }
+
+    // L2-M: mark hint as used only after the wait actually produced a hint.
+    // Previously this was set eagerly before the await, so a wait that
+    // resolved to null (orphaned session bump while staying on the same
+    // position) left hintUsed=true and penalized the user's eventual good
+    // move with an Again(hint) grade for a hint they never saw.
+    hintUsed = true;
 
     hintMove = pre.bestMove;
 
@@ -11596,6 +11602,19 @@ async function evaluateTacticMove(from, to, move) {
     // Wrong move — instant feedback, engine line loads in background
     tacticWrongAttempts++;
     if (currentAttempts === 1) firstAttemptFailed = true;
+    // First-attempt rule: record Again immediately on first wrong tactic
+    // move (any step). Previously SRS recording was deferred to
+    // finishTacticComplete, so a user who blundered a step and navigated
+    // away via Next/Prev would lose the grade entirely. tacticWrongAttempts
+    // persists via tacticTryAgain so finishTacticComplete will still
+    // classify as Again on eventual completion, but the `if (!srsRecorded)`
+    // guard prevents re-recording.
+    let srsInfoEarly = '';
+    if (!srsRecorded && !detectedTacticSolveMode) {
+      const srsCard = recordReview(posId(m), FSRS_GRADE.again);
+      srsRecorded = true;
+      srsInfoEarly = srsTag('Again', srsCard);
+    }
     const color = '#e05757';
     const colorDim = 'rgba(224,87,87,0.08)';
 
@@ -11611,7 +11630,7 @@ async function evaluateTacticMove(from, to, move) {
 
     // Show feedback instantly
     const tryAgainBtn = `<button class="btn btn-ghost btn-sm" style="margin-top:6px;border-color:var(--accent);color:var(--accent);" onclick="tacticTryAgain()">↺ Try again</button>`;
-    showColorFeedback(color, colorDim, 'Not the right move', tryAgainBtn);
+    showColorFeedback(color, colorDim, 'Not the right move', srsInfoEarly + tryAgainBtn);
 
     // Load engine line in background (don't block feedback)
     const afterFen = gameEngine.fen();
@@ -12256,7 +12275,16 @@ function confirmRemoveMistake() {
     document.getElementById('emptyMsg').classList.remove('hidden');
     document.getElementById('posInfoCard').style.display = 'none';
   } else {
-    loadPosition(Math.min(currentMistakeIdx, filteredMistakes.length - 1));
+    const nextIdx = Math.min(currentMistakeIdx, filteredMistakes.length - 1);
+    loadPosition(nextIdx);
+    // L4-M: if the loaded item is from a different game than the one we
+    // were on, sync activeGameId + re-render the sidebar. Previously the
+    // old game (now empty of reviews) stayed highlighted.
+    const loaded = filteredMistakes[nextIdx];
+    if (loaded && loaded.gameId !== activeGameId) {
+      activeGameId = loaded.gameId;
+      renderGameList();
+    }
   }
 }
 
@@ -12809,20 +12837,31 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
       const tryAgainBtn = currentAttempts < 3
         ? `<button class="btn btn-ghost btn-sm" style="margin-top:6px;border-color:var(--accent);color:var(--accent);" onclick="tryAgainFromLine()">↺ Try again</button>`
         : '';
+      // Record Again immediately on first-attempt Blunder (first-attempt
+      // rule). Previously this was deferred to attempt 3 exhaustion, so a
+      // user who blundered and navigated away via Next/Prev before exhausting
+      // would lose the grade entirely — it never recorded. The 3-attempt
+      // reveal flow is still kept for learning, but the grade is locked from
+      // attempt 1.
+      let srsInfoEarly = '';
+      if (currentAttempts === 1 && !srsRecorded) {
+        const srsCard = recordReview(pid, FSRS_GRADE.again);
+        srsRecorded = true;
+        srsInfoEarly = srsTag('Again', srsCard);
+      }
       showColorFeedback(color, colorDim, 'Not quite',
         `<code>${escHtml(move.san)}</code> loses ${wpStr}% winning chances (−${Math.round(cpLoss)}cp).` +
         bestMoveButton(revealId, bestMoveSan, bestMoveUci, m) +
         `<div class="attempts-indicator">${renderAttemptDots()}</div>` +
+        srsInfoEarly +
         tryAgainBtn);
 
       if (currentAttempts >= 3) {
         // 3 attempts exhausted — reveal best move (resets gameEngine internally)
         revealBestMove(bestMoveUci, m);
-        if (!srsRecorded) {
-          const srsCard = recordReview(pid, FSRS_GRADE.again);
-          srsRecorded = true;
-          showFeedback('info', 'SRS: Again', `Next review: ${srsCard.due}`);
-        }
+        // srsRecorded is already true from the first-attempt record above,
+        // so the `if (!srsRecorded)` guard that used to live here is a no-op
+        // now. Kept the "Bad mistake" button + session/queue updates below.
         showFeedback('info', '', '<button class="btn btn-ghost btn-sm" style="font-size:10px;color:var(--text-muted);border-color:var(--border);" onclick="handleBadMistake()">✕ Bad mistake</button>');
         updateSessionProgress();
         renderQueue();
@@ -12894,11 +12933,26 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
   } else {
     // Inaccurate or wrong in normal mode — show engine line
     document.getElementById('btnRetry').classList.remove('hidden');
-    // Hide hint when puzzle is resolved (inaccuracy, or wrong with 3 attempts used)
-    if (wpDrop <= 10 || currentAttempts >= 3) {
-      document.getElementById('btnHint').classList.add('hidden');
-      clearHintHighlights();
-    }
+    // M1-M: always clear the hint overlay for any non-good move. The
+    // previous condition (`wpDrop <= 10 || currentAttempts >= 3`) left
+    // the hint arrow drawn during Blunder attempt 1 or 2, pointing at
+    // squares from the puzzle-start position while the board shows the
+    // refutation. Also hide the button: during refutation browsing there's
+    // no meaningful hint to give (evaluateMove has already stopped
+    // pre-analysis, and the board position isn't the one we'd hint for).
+    // tryAgainFromLine re-enables the button when the user retries.
+    document.getElementById('btnHint').classList.add('hidden');
+    clearHintHighlights();
+    // H1-M: on 3-attempt exhaust, the blunder branch above already called
+    // revealBestMove(), which reset gameEngine to m.fenBefore, repositioned
+    // the board, and drew the best-move arrow. Running buildEngineLine
+    // here would synchronously call goToLineMove(1) (auto-advance to the
+    // opponent's reply), animating the board away from the reveal and
+    // leaving a stale bestMoveArrow on squares that don't match the new
+    // position. revealBestMove owns the UI in this state; the user can
+    // still press 'A' for analysis mode if they want to explore the
+    // refutation.
+    if (wpDrop > 10 && currentAttempts >= 3) return;
     buildEngineLine(currentSolveFen, move, contUci || '', afterMoveCpWhite);
 
     // For wrong moves (< 3 attempts): board stays at post-move position (engineLine idx 0).
@@ -15956,7 +16010,34 @@ async function showTacticEngineLine() {
 }
 
 function startContinuationMode() {
+  // H2-M: if the user clicked "Show engine's best" in the feedback before
+  // clicking "Play Continuation", onRevealBestMove reset gameEngine to the
+  // pre-user-move FEN (to show the best-move arrow on the original puzzle
+  // board). Every read below assumes gameEngine is at the POST-user-move
+  // position — without this resync the explorer/Maia query below would run
+  // from the pre-move FEN (user still to move), return a move for the
+  // user's color, and advanceContinuation would play it as the opponent's
+  // response — the user would watch their own color's piece move as if
+  // the opponent played it.
+  // Replay the user's good move from data.baseFen to land gameEngine at
+  // the correct post-move position. Safe whether or not onRevealBestMove
+  // was clicked — the replay is deterministic.
+  const data = window._deferredEngineLine;
+  if (data) {
+    const replay = new Chess(data.baseFen);
+    const applied = replay.move({
+      from: data.move.from,
+      to: data.move.to,
+      promotion: data.move.promotion
+    });
+    if (applied) {
+      gameEngine = replay;
+      boardObj.position(gameEngine.fen(), false);
+    }
+  }
+
   continuationMode = true;
+  continuationEvalBarOn = false; // #4: eval bar always starts OFF in continuation
 
   // IMP-004: clear overlays left over from the evaluation feedback (best-move
   // arrow, move-class badge, any selection/annotations) before entering
@@ -15990,7 +16071,6 @@ function startContinuationMode() {
   if (opts) opts.remove();
 
   // Initialize continuation line with the user's triggering good move
-  const data = window._deferredEngineLine;
   if (data) {
     contLine = {
       baseFen: data.baseFen,
@@ -16444,9 +16524,27 @@ function retryPosition() {
   if (currentMistakeIdx < 0) return;
   const m = filteredMistakes[currentMistakeIdx];
 
+  // M2-M: SRS first-attempt rule — the grade recorded on the user's FIRST
+  // attempt is the only one that counts. Retry lets the user re-drill for
+  // practice but must NOT upgrade (or downgrade) the grade already recorded.
+  // loadPosition below resets srsRecorded + firstAttemptFailed + hintUsed
+  // as part of its full-state reset (that's correct when navigating to a
+  // new position); preserve those three across the retry so the grade
+  // stays locked. tacticWrongAttempts is also reset by loadPosition, but
+  // Fix 2 (immediate-record on first wrong tactic move) makes srsRecorded
+  // the authoritative gate — once it's true, finishTacticComplete's
+  // `if (!srsRecorded)` check prevents re-recording regardless of what
+  // tacticWrongAttempts reads.
+  const preservedSrsRecorded = srsRecorded;
+  const preservedFirstAttemptFailed = firstAttemptFailed;
+  const preservedHintUsed = hintUsed;
+
   // For tactics and advantage items, reload from scratch (resets all state properly)
   if (m.type === 'tactic' || m.type === 'advantage') {
     loadPosition(currentMistakeIdx);
+    srsRecorded = preservedSrsRecorded;
+    firstAttemptFailed = preservedFirstAttemptFailed;
+    hintUsed = preservedHintUsed;
     return;
   }
 
@@ -16511,59 +16609,16 @@ function retryPosition() {
     return;
   }
 
-  currentAttempts = 0;
-  firstAttemptFailed = false;
-  hintLevel = 0;
-  hintMove = null;
-  continuationMode = false;
-  contWrongMovePending = false;
-  clearPremove();
-  hideMaiaControls();
-  document.getElementById('btnRetry').classList.add('hidden');
-  const hintBtn2 = document.getElementById('btnHint');
-  hintBtn2.classList.remove('hidden');
-  hintBtn2.disabled = false;
-  hintBtn2.textContent = '💡 Hint';
-  hintBtn2.style.borderColor = '';
-  hintBtn2.style.color = '';
-  engineLine = null;
-  browsingLine = false;
-  // IMP-007: Retry from the anchor is a legitimate "back to drill"
-  // action — unblock piece interactions that were frozen by a prior
-  // variation jump.
-  noteJumpedAway = false;
-  contLine = null;
-  clearContSession();
-  contLineBrowsing = false;
-  contLineSubtitle = '';
-  updateLineNavBar();
-  // IMP-004: superset of the previous clearHighlights + clearHintHighlights +
-  // hideArrow; also wipes activeArrows/activeCircles (user-drawn annotations)
-  // which the old path left behind.
-  clearBoardOverlays();
-  clearLastMoveHighlight();
-
-  // Reset chess engine and board to original position
-  gameEngine = new Chess(m.fenBefore);
-  currentSolveFen = m.fenBefore;
-  boardObj.position(m.fenBefore, false);
-  showCheckHighlight(gameEngine);
-
-  // Reset info card (keep analysis status)
-  document.getElementById('posInfoContent').innerHTML = `
-    <div style="font-size:13px;line-height:1.7">
-      <div>Move <code class="mono">${m.moveNumber}${m.playerColor==='white'?'.':'…'}</code> — win% dropped <span style="color:var(--red);font-weight:600">−${m.wpDrop}%</span> <span style="color:var(--text-muted)">(${m.cpLoss}cp)</span></div>
-      <div id="mistakeReveal">
-        <button class="btn btn-ghost btn-sm" style="margin-top:6px;font-size:11px;" onclick="this.parentElement.innerHTML='You played <code class=mono>${escHtml(m.sanPlayed)}</code>'">Show original mistake</button>
-      </div>
-      <div id="preAnalysisTag" style="font-size:11px;margin-top:4px;color:var(--text-muted)"></div>
-    </div>
-  `;
-  updatePreAnalysisUI();
-  startPreAnalysis(m.fenBefore);
-
-  document.getElementById('feedbackContainer').innerHTML = '';
-  document.getElementById('contLineContainer').innerHTML = '';
+  // M2-M v2: mistake retry uses loadPosition for canonical state reset
+  // (matches tactic/advantage retry), then restores the preserved SRS
+  // flags so the first-attempt grade stays locked. First-attempt Blunder
+  // records Again immediately in handleEvalResult's wrong branch (see
+  // the currentAttempts===1 record there), so srsRecorded=true is set
+  // before Retry is even reachable.
+  loadPosition(currentMistakeIdx);
+  srsRecorded = preservedSrsRecorded;
+  firstAttemptFailed = preservedFirstAttemptFailed;
+  hintUsed = preservedHintUsed;
 }
 
 // ─── UI Helpers ───
