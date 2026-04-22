@@ -1607,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix retry-cancel race in evaluateMove. The function snapshotted currentMistakeIdx at entry (to bail if the user navigates away during Stockfish analysis) but not contLineReviewRetryIdx. If the user played a retry move during Game Review, then — while SF was mid-await — clicked Skip on the retry card (cancelReviewRetry sets retryIdx=-1) or pressed A to enter analysis mode (enterAnalysisMode also nulls retryIdx), the late-arriving analysis resolved and handleEvalResult read retryIdx=-1, skipped the retry branch, and recorded a spurious Again SRS grade against the original mistake's pid. Symmetric problem after enterAnalysisMode: the analysis result would also call buildEngineLine / wire a tryAgainFromLine button that innerHTML=''s the feedback area the analysis mode now owns. Fix is an additional `const retrySnap = contLineReviewRetryIdx` snapshot at function entry, paired with a `contLineReviewRetryIdx !== retrySnap` bail at every post-await checkpoint: the retry-stability loop, the non-retry waitForPreAnalysis branch, the fallback one-shot sfAnalyze, the slow-path sfAnalyzeAdaptive, and the catch block. Synchronous fast paths (stored bestMove match and cached-PV match) need no guard since they read retryIdx directly with no intervening await.</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Refresh the eval bar when stepping through review best-line / refutation. During Show Line and Show Refutation in Game Review, the eval bar stayed frozen on the prior position's evaluation as the user stepped through the line via arrow keys, clicked feedback-card moves, or watched animateLinePreview. With the priority-1 fix we now set browsingLine=true in these views, which gates updateEvalBar onto evalSfResult — but nothing was requesting fresh analysis for the stepped-to positions. Wire requestEvalWorkerAnalysis into every nav entry point: showReviewBestLine (for postBestFen when the view opens), showReviewRefutation (for lineMoves[0].fen after the opponent's refutation reply is played), animateLinePreview per animation frame, goToReviewLine (feedback-card move click), and stepReviewBestLine's back-to-preFen branch. All gated on `evalBarEnabled && evalBarRevealed && !tacticMode`, matching the pattern in goToLineMove. Teardown: exitReviewBestLine, reviewNextKeyMove, reviewPrevKeyMove now call stopEvalWorkerSearch so the last browsed position's result doesn't keep feeding updateEvalBar via the `browsingLine && evalSfResult` branch once we're back at the key-move card.</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -15462,6 +15462,8 @@ function reviewNextKeyMove() {
   browsingLine = false;
   const engineLineBox = document.getElementById('engineLineBox');
   if (engineLineBox) engineLineBox.remove();
+  // Finding #5: drop the eval worker result tied to the previous line view.
+  stopEvalWorkerSearch();
   contLineReviewKeyIdx++;
   if (contLineReviewKeyIdx >= contLineReviewKeyMoves.length) {
     contLineReviewKeyIdx = contLineReviewKeyMoves.length; // past end
@@ -15483,6 +15485,8 @@ function reviewPrevKeyMove() {
   browsingLine = false;
   const engineLineBox = document.getElementById('engineLineBox');
   if (engineLineBox) engineLineBox.remove();
+  // Finding #5: drop the eval worker result tied to the previous line view.
+  stopEvalWorkerSearch();
   contLineReviewKeyIdx--;
   if (contLineReviewKeyIdx < 0) {
     contLineReviewKeyIdx = 0;
@@ -15673,6 +15677,13 @@ async function showReviewBestLine(moveIdx) {
     cpWhite: null,
   };
   browsingLine = true;
+  // Finding #5: request a fresh eval for the entry position (postBestFen).
+  // animateLinePreview below only refreshes eval from lineMoves[1] onward,
+  // so without this the bar keeps showing the prior position's eval during
+  // the 400ms pre-animation pause and until the animation advances.
+  if (evalBarEnabled && evalBarRevealed && !tacticMode) {
+    requestEvalWorkerAnalysis(postBestFen);
+  }
 
   const cls = MOVE_CLASSIFICATION[mv.classification] || {};
   const sym = mv.classification === 'good' ? '✓' : (mv.classification === 'best' ? '★' : cls.symbol || '');
@@ -15732,6 +15743,12 @@ async function animateLinePreview(moveIdx, startIdx, endIdx) {
     if (engineLine && engineLine.alternatives.length === 0) {
       engineLine.currentIdx = i;
     }
+    // Finding #5: refresh the eval bar for the new position via the dedicated
+    // eval worker. browsingLine=true (set in showReviewBestLine/Refutation) so
+    // updateEvalBar will read evalSfResult.cpWhite when the result arrives.
+    if (evalBarEnabled && evalBarRevealed && !tacticMode) {
+      requestEvalWorkerAnalysis(lm.fen);
+    }
 
     // Update active state in the move list
     const moves = document.querySelectorAll('#feedbackContainer .engine-line-moves .move');
@@ -15767,6 +15784,10 @@ function goToReviewLine(moveIdx, lineIdx) {
   bestMoveArrow = null;
   moveClassBadge = null;
   renderArrows();
+  // Finding #5: refresh eval bar for the new position.
+  if (evalBarEnabled && evalBarRevealed && !tacticMode) {
+    requestEvalWorkerAnalysis(lm.fen);
+  }
 
   // Update active state in the move list
   const moves = document.querySelectorAll('#feedbackContainer .engine-line-moves .move');
@@ -15799,6 +15820,10 @@ function stepReviewBestLine(delta) {
     const moves = document.querySelectorAll('#feedbackContainer .engine-line-moves .move');
     moves.forEach(el => el.classList.remove('active'));
     checkForNote(data.preFen);
+    // Finding #5: refresh eval bar for the pre-move position.
+    if (evalBarEnabled && evalBarRevealed && !tacticMode) {
+      requestEvalWorkerAnalysis(data.preFen);
+    }
   } else {
     goToReviewLine(data.moveIdx, newIdx);
   }
@@ -15816,6 +15841,11 @@ function exitReviewBestLine(moveIdx) {
   browsingLine = false;
   const engineLineBox = document.getElementById('engineLineBox');
   if (engineLineBox) engineLineBox.remove();
+  // Finding #5: stop the dedicated eval worker so its last result (the
+  // last-browsed line position) doesn't keep feeding updateEvalBar via the
+  // `browsingLine && evalSfResult` branch once we're back at the key-move card.
+  stopEvalWorkerSearch();
+  updateEvalBar();
   updateLineNavBar();
   // Coming back from a retry-context refutation: restore the retry result card
   // (keeps the user's retry move highlighted and the feedback buttons intact).
@@ -15972,6 +16002,11 @@ async function showReviewRefutation(moveIdx, fromRetry = false) {
     cpWhite: null,
   };
   browsingLine = true;
+  // Finding #5: refresh eval bar for the entry position (board is at
+  // lineMoves[0].fen after the opponent's refutation reply was played above).
+  if (evalBarEnabled && evalBarRevealed && !tacticMode && lineMoves[0]) {
+    requestEvalWorkerAnalysis(lineMoves[0].fen);
+  }
 
   container.innerHTML = `
     <div class="feedback-box" style="background:rgba(239,95,95,0.06);border-left:3px solid #ef5f5f;">
