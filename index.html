@@ -1607,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hide the main ↺ Retry button during Game Review (issue #7). Previously stopAndReviewContinuation revealed btnRetry and it stayed visible through the whole review — clicking it (or pressing R) called retryPosition which wipes review state: for mistake/tactic/advantage items via loadPosition, and for practice items by rebuilding contLine from scratch. Three pieces: (1) stopAndReviewContinuation now adds('hidden') on btnRetry instead of removing it, so the button is hidden on the live→review transition. (2) startContLineReview also hides btnRetry, covering the "↺ Start over" path from showReviewComplete (where the button was re-revealed at the end of the prior review). (3) showReviewComplete re-reveals btnRetry after all key moves have been reviewed, since the "retry the drill" semantics make sense again once review is effectively over. Paired retryPosition hardening: the practice-item branch now calls exitContLineReview up front, clearing contLineReviewKeyMoves. Without that, hitting Retry from the Review Complete state (where btnRetry is re-revealed and keyMoves is still populated) rebuilds contLine but leaves keyMoves behind, so the priority-1 universal review guard (inReviewContext = contLineReviewMode || keyMoves.length > 0) would snapback every subsequent move in the newly-started practice. The tactic/advantage/mistake retry paths already route through loadPosition which clears all review state.</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix retry-cancel race in evaluateMove. The function snapshotted currentMistakeIdx at entry (to bail if the user navigates away during Stockfish analysis) but not contLineReviewRetryIdx. If the user played a retry move during Game Review, then — while SF was mid-await — clicked Skip on the retry card (cancelReviewRetry sets retryIdx=-1) or pressed A to enter analysis mode (enterAnalysisMode also nulls retryIdx), the late-arriving analysis resolved and handleEvalResult read retryIdx=-1, skipped the retry branch, and recorded a spurious Again SRS grade against the original mistake's pid. Symmetric problem after enterAnalysisMode: the analysis result would also call buildEngineLine / wire a tryAgainFromLine button that innerHTML=''s the feedback area the analysis mode now owns. Fix is an additional `const retrySnap = contLineReviewRetryIdx` snapshot at function entry, paired with a `contLineReviewRetryIdx !== retrySnap` bail at every post-await checkpoint: the retry-stability loop, the non-retry waitForPreAnalysis branch, the fallback one-shot sfAnalyze, the slow-path sfAnalyzeAdaptive, and the catch block. Synchronous fast paths (stored bestMove match and cached-PV match) need no guard since they read retryIdx directly with no intervening await.</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -12400,6 +12400,13 @@ function confirmRemoveMistake() {
 // ─── Evaluate the user's move via Stockfish ───
 async function evaluateMove(from, to, move) {
   const mistakeIdx = currentMistakeIdx; // snapshot — detect if user navigates away during async
+  // Finding #4: snapshot retryIdx too. If the user cancels an in-flight retry
+  // (Skip on the retry card → cancelReviewRetry, or 'A' → enterAnalysisMode),
+  // retryIdx becomes -1 while evaluateMove is mid-await. Without this guard,
+  // the late result lands in handleEvalResult's general branch and records a
+  // spurious "Again" SRS grade against the original mistake's pid. Paired
+  // with every `currentMistakeIdx !== mistakeIdx` abort below.
+  const retrySnap = contLineReviewRetryIdx;
   const m = filteredMistakes[mistakeIdx];
   const container = document.getElementById('feedbackContainer');
   clearHintHighlights();
@@ -12576,6 +12583,11 @@ async function evaluateMove(from, to, move) {
           sfLog('evaluateMove', `ABORT: user navigated away during retry stability check`);
           return;
         }
+        // Finding #4: retry was canceled (Skip / enterAnalysisMode) mid-flight.
+        if (contLineReviewRetryIdx !== retrySnap) {
+          sfLog('evaluateMove', `ABORT: retry canceled during stability check (retrySnap=${retrySnap} now=${contLineReviewRetryIdx})`);
+          return;
+        }
         const curWp = cpToWinPct(preAnalysis?.bestCp ?? 0);
         const wpDelta = Math.abs(curWp - prevWp);
         sfLog('evaluateMove', `REVIEW RETRY: depth ${preAnalysisDepth} bestCp=${preAnalysis?.bestCp} wp=${curWp.toFixed(1)} delta=${wpDelta.toFixed(1)} ${wpDelta < RETRY_WP_THRESHOLD ? 'STABLE' : 'CHANGED'}`);
@@ -12590,6 +12602,11 @@ async function evaluateMove(from, to, move) {
     sfLog('evaluateMove', `preAnalysis live: depth=${pre?.depth} bestMove=${pre?.bestMove} mistakeIdx snapshot=${mistakeIdx} current=${currentMistakeIdx}`);
     if (currentMistakeIdx !== mistakeIdx) {
       sfLog('evaluateMove', `ABORT: user navigated away (was ${mistakeIdx}, now ${currentMistakeIdx})`);
+      return;
+    }
+    // Finding #4: retry state changed during the wait — bail.
+    if (contLineReviewRetryIdx !== retrySnap) {
+      sfLog('evaluateMove', `ABORT: retry state changed during wait (retrySnap=${retrySnap} now=${contLineReviewRetryIdx})`);
       return;
     }
 
@@ -12641,6 +12658,11 @@ async function evaluateMove(from, to, move) {
         sfLog('evaluateMove', `ABORT after one-shot: user navigated away`);
         return;
       }
+      // Finding #4: same retry-state race after the one-shot await.
+      if (contLineReviewRetryIdx !== retrySnap) {
+        sfLog('evaluateMove', `ABORT after one-shot: retry state changed`);
+        return;
+      }
       bestCp = preResult?.pvs[0]?.cp ?? 0;
       bestMoveUci = preResult?.bestMove || '?';
       bestMoveSan = uciToSan(currentSolveFen, bestMoveUci);
@@ -12657,6 +12679,11 @@ async function evaluateMove(from, to, move) {
     sfLog('evaluateMove', `after-move result: bestMove=${afterResult?.bestMove} mistakeIdx snapshot=${mistakeIdx} current=${currentMistakeIdx}`);
     if (currentMistakeIdx !== mistakeIdx) {
       sfLog('evaluateMove', `ABORT after slow-path: user navigated away`);
+      return;
+    }
+    // Finding #4: slow-path analysis completed after a retry cancel — discard.
+    if (contLineReviewRetryIdx !== retrySnap) {
+      sfLog('evaluateMove', `ABORT after slow-path: retry state changed`);
       return;
     }
 
@@ -12685,6 +12712,10 @@ async function evaluateMove(from, to, move) {
     const loadEl = document.getElementById(loadingId);
     if (loadEl) loadEl.remove();
     if (currentMistakeIdx !== mistakeIdx) return; // user navigated away
+    // Finding #4: retry canceled while the analysis was throwing — the cancel
+    // path (cancelReviewRetry / enterAnalysisMode) owns the board and UI now,
+    // so don't show an error card or undo the move here.
+    if (contLineReviewRetryIdx !== retrySnap) return;
     showFeedback('info', 'Error', 'Analysis failed: ' + escHtml(err.message));
     gameEngine.undo();
     boardObj.position(gameEngine.fen());
