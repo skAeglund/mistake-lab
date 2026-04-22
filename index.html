@@ -1607,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">UI fixes for #4/#5/#6: eval bar toggleable during continuation practice; duplicate Play Continuation button row after revealing best move; hide Prev button + counter in review mode with Next widened and accent-outlined once graded. Transient continuationEvalBarOn flag always starts OFF on every continuation entry. updatePositionNav() helper keeps desktop + mobile nav states in sync across loadPosition, toggleReviewMode, and updateSessionProgress.</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Tactic review scan: confirmInvalidateLine nav before feedback (H1), corrupt-opponent-move bail-out (M1), drop-gate consolidation fixing multi-line paused state and a latent post-solve continuation block (M2), preserve Main-line-solved card on Show engine line (M3), recurse on malformed short alt (L1), hint unavailable during refutation browsing (L2), defensive gameEngine.move check in showTacticEngineLine (L4). Also syncs activeGameId when post-invalidate navigation crosses games.</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -5919,6 +5919,13 @@ async function showHint() {
 
   // ── Tactic mode hint: use pre-computed move ──
   if (tacticMode && tacticStepIdx < tacticMoves.length) {
+    // L2: during wrong-move refutation browsing, the board shows a diverged
+    // position — tacticMoves[tacticStepIdx].uci would highlight squares
+    // whose pieces may not even exist here. Prompt the user to retry first.
+    if (browsingLine) {
+      showFeedback('info', 'Hint unavailable', 'Try the position again first, then press Hint.');
+      return;
+    }
     const expected = tacticMoves[tacticStepIdx];
     if (!expected || !expected.uci) return;
     tacticHintUsed = true;
@@ -10637,6 +10644,12 @@ function onBoardClick(e) {
   }
 
   if (!gameEngine || browsingLine) return;
+  // M2: same paused-tactic gate as onDragStart (line 11280 area). Without
+  // this, tap-to-move on mobile bypasses the drag-guard entirely — a tap in
+  // the multi-line "main line solved, alts remain" pause or the M1
+  // corrupt-data bail-out would fall through to the tactic/mistake dispatch
+  // at line 10769.
+  if (tacticLine && !tacticMode && !continuationMode && !contLineBrowsing) return;
   // IMP-007: same rationale as onDragStart — tap-to-move from a jumped
   // variation position would be evaluated against stale mistake state.
   if (noteJumpedAway) return;
@@ -11276,8 +11289,19 @@ function onDragStart(source, piece) {
     selectSquare(source, chess);
     return true;
   }
-  // Tactic fully solved — no more moves allowed (user is reviewing the line)
-  if (tacticCompleted) return false;
+  // Tactic is in a paused, drop-blocking state:
+  //   - fully-solved review (tacticCompleted)
+  //   - M2: multi-line paused after main line solved with unsolved alts
+  //     (tacticMode=false, tacticCompleted=false)
+  //   - M1: corrupt-opponent-move bail-out
+  // All three share: tacticLine populated, tacticMode off, not in
+  // continuation, not mid-contLine-branch. continuationMode and
+  // contLineBrowsing carve out tactic-continuation play (which still has
+  // tacticCompleted=true after finishTacticComplete) — previously the naked
+  // `if (tacticCompleted) return false;` blocked every drop in that
+  // continuation, so users couldn't actually play the continuation after
+  // solving a tactic.
+  if (tacticLine && !tacticMode && !continuationMode && !contLineBrowsing) return false;
   if (!gameEngine || browsingLine) return false;
   const m = filteredMistakes[currentMistakeIdx];
   if (!m) return false;
@@ -11632,7 +11656,25 @@ function tacticAutoPlayOpponent() {
   if (!oppMove || oppMove.isUser) return; // shouldn't happen but guard
 
   const result = gameEngine.move(oppMove.uci, { sloppy: true });
-  if (!result) return;
+  if (!result) {
+    // M1: opponent move rejected by chess.js — the cached tactic is corrupt
+    // (stale castling rights, turn mismatch, illegal UCI from an old cache
+    // version). Previously the function just returned silently, leaving the
+    // user on a frozen board with no feedback and no recovery path.
+    // Pause tactic mode and surface a yellow warning with the same Bad-line
+    // → "Convert to mistake / Just remove" flow used for intentional
+    // invalidation. For detectedTacticSolveMode there's no SRS position to
+    // invalidate (handleInvalidateLine is a no-op there), so offer "abandon"
+    // as the recovery.
+    tacticMode = false;
+    const recoveryBtn = detectedTacticSolveMode
+      ? `<div style="margin-top:8px;"><button class="btn btn-ghost btn-sm" onclick="abandonDetectedTacticSolve()">Back to review</button></div>`
+      : `<div style="margin-top:8px;"><button class="btn btn-ghost btn-sm" style="border-color:var(--yellow);color:var(--yellow);" onclick="handleInvalidateLine()">✕ Bad line</button></div>`;
+    showColorFeedback('var(--yellow)', 'rgba(255,193,7,0.08)',
+      'Tactic data corrupt',
+      `Opponent move <code>${escHtml(oppMove.uci)}</code> isn't legal in the current position — the cached tactic line is stale.` + recoveryBtn);
+    return;
+  }
 
   boardObj.position(gameEngine.fen(), true);
   clearHighlights();
@@ -11733,7 +11775,18 @@ function loadNextTacticAlt() {
 
   tacticAltIdx++;
   const altLine = tacticAltLines[tacticAltIdx];
-  if (!altLine || altLine.length < 3) return;
+  // L1: a malformed short alt (cached with < 3 moves — legacy / corrupt
+  // entry) previously silently halted the flow, leaving the user on a blank
+  // state with no progression. Match the invalidated-branch pattern below:
+  // recurse to the next alt, or finish if exhausted.
+  if (!altLine || altLine.length < 3) {
+    if (tacticAltIdx + 1 < tacticAltLines.length) {
+      loadNextTacticAlt();
+    } else {
+      finishTacticComplete();
+    }
+    return;
+  }
 
   // Skip invalidated lines
   if (invLines.has(lineFingerprint(altLine))) {
@@ -12073,21 +12126,60 @@ function confirmInvalidateLine(convertToMistake) {
 
   // Last line — remove the whole tactic
   if (!tacticHasValidLines(m)) {
+    // H1: capture fen before the allMistakes mutation. After removal,
+    // currentMistakeIdx either points into a shrunken filteredMistakes (next
+    // item silently shifted into this slot) or goes out-of-bounds for the
+    // last-item case — both previously left the user staring at the removed
+    // tactic's position. Snapshot the identifiers, do the mutation, then
+    // explicitly load the next item.
+    const gameIdSnapshot = m.gameId;
+    const fenBeforeSnapshot = m.fenBefore;
+
     if (convertToMistake) {
       extractAllMistakes();
-      applyFilters();
-      renderGameList();
-      buildReviewQueue();
-      updateSessionProgress();
-      showFeedback('info', 'Converted to mistake', 'The first move will now appear as a single-move review.');
     } else {
       allMistakes = allMistakes.filter(mm => posId(mm) !== pid);
-      applyFilters();
-      renderGameList();
-      buildReviewQueue();
-      updateSessionProgress();
-      showFeedback('info', 'Tactic removed', 'This tactic won\'t appear in reviews.');
     }
+    applyFilters();
+    renderGameList();
+    buildReviewQueue();
+    updateSessionProgress();
+
+    const feedbackTitle = convertToMistake ? 'Converted to mistake' : 'Tactic removed';
+    const feedbackText = convertToMistake
+      ? 'The first move will now appear as a single-move review.'
+      : 'This tactic won\'t appear in reviews.';
+
+    // Navigate away before the user can interact with the stale state.
+    if (reviewMode) {
+      advanceReviewQueue();
+    } else if (filteredMistakes.length === 0) {
+      clearBoard();
+      currentMistakeIdx = -1;
+    } else {
+      // Prefer next item in the same game; for Convert, the just-restored
+      // mistake sits at the same fenBefore and wins the `atSameFen` match.
+      const sameGame = filteredMistakes.filter(mm => mm.gameId === gameIdSnapshot);
+      let nextIdx;
+      if (sameGame.length > 0) {
+        const atSameFen = sameGame.find(mm => mm.fenBefore === fenBeforeSnapshot);
+        nextIdx = filteredMistakes.indexOf(atSameFen || sameGame[0]);
+      } else {
+        // No more in this game — land on whatever shifted into the old slot.
+        nextIdx = Math.min(currentMistakeIdx, filteredMistakes.length - 1);
+        if (nextIdx < 0) nextIdx = 0;
+      }
+      loadPosition(nextIdx);
+      // L4-M: sync activeGameId if navigation crossed games (same gap
+      // that was also patched in confirmRemoveMistake).
+      const loaded = filteredMistakes[nextIdx];
+      if (loaded && loaded.gameId !== activeGameId) {
+        activeGameId = loaded.gameId;
+        renderGameList();
+      }
+    }
+
+    showFeedback('info', feedbackTitle, feedbackText);
     return;
   }
 
@@ -15814,7 +15906,15 @@ function startTacticContinuation() {
 }
 
 async function showTacticEngineLine() {
-  document.getElementById('feedbackContainer').innerHTML = '';
+  // M3: previously wiped feedbackContainer here, which destroyed the
+  // multi-line "Main line solved — opponent has N other responses" card
+  // along with its Next-line / Play-Continuation / Bad-line buttons,
+  // leaving the user no visible way back into the alt-line progression.
+  // renderEngineLine dedups its own #engineLineBox (line 13344) and
+  // hideEvaluatingFeedback is scoped to just the spinner, so letting the
+  // existing feedback card stay put is both correct and what we want —
+  // the engine line renders below it via renderEngineLine's
+  // firstFeedback.insertAdjacentElement('afterend', ...).
   // Build engine line from current position using Stockfish
   const fen = gameEngine.fen();
   if (!sfReady) return;
@@ -15841,7 +15941,12 @@ async function showTacticEngineLine() {
     const firstMove = chess.move({ from: firstUci.substring(0,2), to: firstUci.substring(2,4), promotion: firstUci.length > 4 ? firstUci[4] : undefined });
     if (!firstMove) return;
     // Apply the first move to gameEngine too
-    gameEngine.move({ from: firstUci.substring(0,2), to: firstUci.substring(2,4), promotion: firstUci.length > 4 ? firstUci[4] : undefined });
+    // L4: symmetric defensive check — if gameEngine is out of sync with
+    // `fen` (shouldn't happen since we sourced fen from gameEngine.fen(),
+    // but guard anyway), a rejected apply here would diverge gameEngine
+    // from the board and poison all subsequent user interactions.
+    const geResult = gameEngine.move({ from: firstUci.substring(0,2), to: firstUci.substring(2,4), promotion: firstUci.length > 4 ? firstUci[4] : undefined });
+    if (!geResult) return;
     const restUci = uciMoves.slice(1).join(' ');
     buildEngineLine(fen, firstMove, restUci, cpWhite);
   } catch (e) {
