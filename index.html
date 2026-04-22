@@ -1607,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix Game Review losing state when a board move falls through the wrong code path (issue #9). After a retry result card is shown (handleReviewRetryResult resets contLineBrowsing=false and contLineReviewRetryIdx=-1), any subsequent board move — inside a refutation, inside a best line, or even on the retry card itself — previously walked past both branching guards in onDrop/click and landed in evaluateMove, which (a) recorded an "Again" SRS grade against the original mistake's pid, (b) called buildEngineLine from a stale currentSolveFen and undid the wrong move, and (c) wired a Try-again button to tryAgainFromLine which innerHTML=''s both feedbackContainer and contLineContainer — wiping the review UI. Three-layer fix: (1) UNIVERSAL REVIEW GUARD in onDrop and the click handler — when contLineReviewMode or a post-review keyMoves queue is active and no retry is in flight, snapback the piece. This catches key-move cards, retry result cards, and the Review Complete summary. (2) BRANCHING INFRASTRUCTURE inside Show Line / Show Refutation — showReviewBestLine and showReviewRefutation now mirror the review line into a real engineLine and set browsingLine=true, so board moves route through the existing handleEngineLineBranch and create branches on engineLine.alternatives without ever touching contLine, evaluateMove, or SRS. engineLine.currentIdx is synced from _reviewBestLine navigation (animateLinePreview, goToReviewLine, stepReviewBestLine's back-to-preFen branch) so branches fork from the user's actual viewing position. goToReviewLine / stepReviewBestLine also reset engineLine.activeAlt=-1 since the feedback-card move list renders main line only — a click there is a "snap back to main line" action. (3) TEARDOWN — exitReviewBestLine, reviewNextKeyMove, reviewPrevKeyMove all drop engineLine + browsingLine + the engineLineBox DOM node so alternatives scoped to the closed line view don't leak into the next key move or a subsequent review. Escape key routes review line views to exitReviewBestLine before the generic contLineBrowsing / engineLine branches, so both _reviewBestLine and engineLine tear down cleanly. Async-race guards in showReviewBestLine / showReviewRefutation (contLineSnap + mvSnap captured pre-await, bail on mismatch) prevent a late-arriving sfAnalyze result from setting engineLine/browsingLine against a stale state if the user navigates away during analysis.</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hide the main ↺ Retry button during Game Review (issue #7). Previously stopAndReviewContinuation revealed btnRetry and it stayed visible through the whole review — clicking it (or pressing R) called retryPosition which wipes review state: for mistake/tactic/advantage items via loadPosition, and for practice items by rebuilding contLine from scratch. Three pieces: (1) stopAndReviewContinuation now adds('hidden') on btnRetry instead of removing it, so the button is hidden on the live→review transition. (2) startContLineReview also hides btnRetry, covering the "↺ Start over" path from showReviewComplete (where the button was re-revealed at the end of the prior review). (3) showReviewComplete re-reveals btnRetry after all key moves have been reviewed, since the "retry the drill" semantics make sense again once review is effectively over. Paired retryPosition hardening: the practice-item branch now calls exitContLineReview up front, clearing contLineReviewKeyMoves. Without that, hitting Retry from the Review Complete state (where btnRetry is re-revealed and keyMoves is still populated) rebuilds contLine but leaves keyMoves behind, so the priority-1 universal review guard (inReviewContext = contLineReviewMode || keyMoves.length > 0) would snapback every subsequent move in the newly-started practice. The tactic/advantage/mistake retry paths already route through loadPosition which clears all review state.</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -15169,7 +15169,13 @@ function stopAndReviewContinuation() {
   hideContStopReview();
   stopPreAnalysis();
 
-  document.getElementById('btnRetry').classList.remove('hidden');
+  // Issue #7: btnRetry must stay HIDDEN through the Game Review. Previously
+  // this revealed the button (remove('hidden')), which meant clicking the
+  // main ↺ Retry — or pressing R — during review called retryPosition and
+  // wiped the entire review (reloads m.fenBefore for mistake/tactic/advantage
+  // items or rebuilds contLine from scratch for practice items). The button
+  // is re-revealed in showReviewComplete after all key moves are done.
+  document.getElementById('btnRetry').classList.add('hidden');
   document.getElementById('btnHint').classList.add('hidden');
   clearHintHighlights();
 
@@ -15342,6 +15348,13 @@ async function startContLineReview() {
   contLineReviewMode = true;
   contLineReviewKeyMoves = data.keyMoves;
   contLineReviewKeyIdx = -1;
+
+  // Issue #7: hide the main ↺ Retry button for the duration of the review.
+  // stopAndReviewContinuation already hides it on the live→review path; this
+  // also catches the "↺ Start over" path from showReviewComplete (where
+  // btnRetry was re-revealed when the prior review completed).
+  // showReviewComplete re-reveals it when all key moves have been reviewed.
+  document.getElementById('btnRetry').classList.add('hidden');
 
   // Reveal toolbar buttons useful in review. Filter practice bypasses
   // loadPosition entirely, so btnLichess (Analysis) and btnNote stay hidden
@@ -16120,6 +16133,11 @@ function showReviewComplete() {
     </div>
   `;
   contLineReviewMode = false;
+  // Issue #7: once every key move has been reviewed, the main ↺ Retry button
+  // is safe to re-reveal — the expected "retry the drill" semantics apply
+  // again now that the review session is effectively over. stopAndReviewContinuation
+  // hides it on entry; this is the paired re-reveal.
+  document.getElementById('btnRetry').classList.remove('hidden');
 }
 
 function exitContLineReview() {
@@ -16758,6 +16776,14 @@ function retryPosition() {
 
   // For practice items, restart the continuation from the same position
   if (m.type === 'practice') {
+    // Issue #7: if the user hits Retry from the Review Complete state (where
+    // btnRetry is intentionally re-revealed), clear any lingering Game Review
+    // state before rebuilding contLine. Otherwise contLineReviewKeyMoves stays
+    // populated after the rebuild, and the universal review guard in onDrop /
+    // the click handler (see "Game Review guard" there) keeps snapping every
+    // move back because `inReviewContext = … || keyMoves.length > 0` is true.
+    // exitContLineReview is a safe no-op when no review state is present.
+    exitContLineReview();
     currentAttempts = 0;
     practiceRepIgnored = false;
     explorerApiNotified = false;
