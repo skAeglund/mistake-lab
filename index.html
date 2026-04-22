@@ -1607,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Skip repertoire trie hint during Game Review retry. showHint's filter-practice branch returns the repertoire move whenever practiceContItem is set, !practiceRepIgnored, and the trie has an entry for the current position. But during a Game Review retry (contLineReviewRetryIdx >= 0) the user is drilling on finding the engine's best move for a position where they previously made a mistake — the trie's move may be a different (deliberate-prep) choice that doesn't match what the eval says was best. Returning the trie move here misleads the user and, via the wp-drop check in the retry path, can get scored as "correct" when it isn't the literal best. Gate the branch on `contLineReviewRetryIdx < 0` so retry falls through to the Stockfish-based hint below.</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Don't record SRS for synthetic practice / resumed items on skip. skipPosition unconditionally called `recordReview(posId(m), again)` — but practice items (gameId '_practice', movePly 0) and resumed items (gameId '_resumed') aren't real drill positions. Their posIds ('_practice_0', '_resumed_0') are synthetic and stable across sessions, so every skip pollutes gistData.positions with orphan SRS data that accumulates indefinitely. The SRS queue excludes practice-type items from due checks anyway, so the recorded grade can't re-surface the card — it's pure garbage in the Gist. Gate the recordReview call on `m.type !== 'practice' && m.gameId !== '_practice' && m.gameId !== '_resumed'`. The rest of skipPosition (navigation to next position / advance queue / session progress update) runs unchanged.</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -16874,8 +16874,18 @@ function skipPosition() {
   if (currentMistakeIdx < 0) return;
   clearArrows()
   const m = filteredMistakes[currentMistakeIdx];
-  // Skip = record as "Again" so it comes back soon (only if not already graded)
-  if (!srsRecorded) {
+  // Skip = record as "Again" so it comes back soon (only if not already graded).
+  // Finding #17: exclude synthetic items (filter practice / resumed games) from
+  // SRS recording. Their gameIds are '_practice' / '_resumed' and movePly is
+  // 0, so posId returns stable strings like '_practice_0' — recording against
+  // those pollutes gistData.positions and the completed set with orphan
+  // entries that never correspond to real drill positions. The SRS queue also
+  // treats practice items as new items (see type !== 'practice' filters in
+  // the queue builder), so a recorded grade here can't re-surface the card
+  // anyway; the record is pure garbage.
+  const isSynthetic = m.type === 'practice' ||
+    m.gameId === '_practice' || m.gameId === '_resumed';
+  if (!srsRecorded && !isSynthetic) {
     recordReview(posId(m), FSRS_GRADE.again);
     srsRecorded = true;
   }
