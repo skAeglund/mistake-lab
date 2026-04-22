@@ -689,6 +689,17 @@
     font-size: 13px; color: var(--text-secondary);
     min-width: 80px; text-align: center;
   }
+  /* #6: review-mode styling — prev + counter hidden; Next widened; subtle
+     accent outline once the current item is SRS-graded. Applies to both the
+     desktop position-nav and the mobile-toolbar-nav via the same class. */
+  .nav-review-wide { padding-left: 14px; padding-right: 14px; }
+  .mobile-toolbar-nav .nav-btn.nav-review-wide {
+    width: auto; padding: 0 14px; font-size: 15px; gap: 4px;
+  }
+  .nav-review-completed {
+    border-color: var(--accent) !important;
+    color: var(--accent) !important;
+  }
   .empty-board-msg {
     position: absolute; inset: 0;
     display: flex; flex-direction: column;
@@ -1596,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Continuation &amp; Advantage Capitalization: scan-pass fixes. Fixes stale post-move timer on nav; resume using orientation instead of playerColor; silent-eval queue corruption on branch/nav; opponent −0cp sign flip; advantage collapse losing its last move; engine-failure exits skipping SRS; explorer-failure notice hidden in non-silent mode; branching clobbering advantage UI.</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">UI fixes for #4/#5/#6: eval bar toggleable during continuation practice; duplicate Play Continuation button row after revealing best move; hide Prev button + counter in review mode with Next widened and accent-outlined once graded. Transient continuationEvalBarOn flag always starts OFF on every continuation entry. updatePositionNav() helper keeps desktop + mobile nav states in sync across loadPosition, toggleReviewMode, and updateSessionProgress.</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1606,9 +1617,9 @@
   <div class="mobile-toolbar" id="mobileToolbar">
     <button class="mobile-toolbar-btn" onclick="toggleDrawer()" aria-label="Open game list">☰</button>
     <div class="mobile-toolbar-nav">
-      <button class="nav-btn" onclick="prevPosition()" aria-label="Previous position">‹</button>
+      <button class="nav-btn" id="btnPrevPuzzleMobile" onclick="prevPosition()" aria-label="Previous position">‹</button>
       <span class="mobile-toolbar-counter" id="posCounterMobile">—</span>
-      <button class="nav-btn" onclick="nextPosition()" aria-label="Next position">›</button>
+      <button class="nav-btn" id="btnNextPuzzleMobile" onclick="nextPosition()" aria-label="Next position">›</button>
     </div>
     <div class="mobile-session" id="mobileSession">
       <span id="sessionTextMobile">0/0</span>
@@ -1719,9 +1730,9 @@
     </div>
     <div class="position-nav" id="positionNav">
       <span class="position-nav-arrows">
-        <button class="btn btn-ghost btn-sm" onclick="prevPosition()">← Prev</button>
+        <button class="btn btn-ghost btn-sm" id="btnPrevPuzzle" onclick="prevPosition()">← Prev</button>
         <span class="position-counter" id="posCounter">—</span>
-        <button class="btn btn-ghost btn-sm" onclick="nextPosition()">Next →</button>
+        <button class="btn btn-ghost btn-sm" id="btnNextPuzzle" onclick="nextPosition()">Next →</button>
       </span>
       <button class="btn btn-ghost btn-sm" onclick="skipPosition()" title="Skip this position">Skip</button>
       <button class="btn btn-ghost btn-sm hidden" id="btnHint" onclick="showHint()" title="Show a hint for this position (H)">💡 Hint</button>
@@ -1977,6 +1988,7 @@ let evalBarEnabled = localStorage.getItem('evalBarEnabled') !== 'false'; // user
 let mobileDepthOffset = parseInt(localStorage.getItem('mobileDepthOffset') || '1', 10); // reduce depth on mobile
 let sfHashMB = parseInt(localStorage.getItem('sfHashMB') || (window.innerWidth <= 768 ? '256' : '512'), 10); // main worker hash in MB
 let evalBarRevealed = false;     // true after first attempt on current position
+let continuationEvalBarOn = false; // transient: user-toggle during continuation practice (always starts OFF)
 // --- Eval bar dedicated Stockfish worker (two-phase: quick depth then deep when idle) ---
 let evalSfWorker = null;
 let evalSfReady = false;
@@ -5690,8 +5702,15 @@ function updatePreAnalysisUI() {
 
 // ─── Eval Bar ───
 function toggleEvalBar() {
-  evalBarEnabled = !evalBarEnabled;
-  localStorage.setItem('evalBarEnabled', evalBarEnabled);
+  if (continuationMode) {
+    // During continuation practice the toggle is transient — don't overwrite the
+    // user's persisted preference. #4: bar is gated by continuationEvalBarOn
+    // here, which is reset to false on every continuation entry.
+    continuationEvalBarOn = !continuationEvalBarOn;
+  } else {
+    evalBarEnabled = !evalBarEnabled;
+    localStorage.setItem('evalBarEnabled', evalBarEnabled);
+  }
   updateEvalBarIcon();
   updateEvalBar();
 }
@@ -5721,11 +5740,17 @@ function updateEvalBar() {
   const hasEngineLineEval = browsingLine && engineLine && (evalSfResult || afterMoveCpWhite !== null);
   const hasAnalysisEval = analysisMode && analysisPvs.length > 0;
   const hasReviewEval = contLineReviewMode && afterMoveCpWhite !== null;
-  const shouldShow = evalBarEnabled && (
+  // #4: during continuation practice, the bar is governed by a separate transient
+  // flag (continuationEvalBarOn) that always starts OFF — independent of the
+  // user's persisted evalBarEnabled preference.
+  const hasContinuationEval = continuationMode && !tacticMode && !contLineReviewMode
+    && continuationEvalBarOn
+    && (preAnalysis || afterMoveCpWhite !== null || evalSfResult);
+  const shouldShow = (evalBarEnabled && (
     (hasAnalysisEval) ||
     (hasReviewEval) ||
     (evalBarRevealed && !continuationMode && !tacticMode && currentMistakeIdx >= 0 && (preAnalysis || hasEngineLineEval))
-  );
+  )) || hasContinuationEval;
   const wasVisible = bar.classList.contains('visible');
   bar.classList.toggle('visible', !!shouldShow);
   if (wasVisible !== !!shouldShow && boardObj) {
@@ -5774,6 +5799,16 @@ function updateEvalBar() {
   if (browsingLine && evalSfResult) {
     // Per-position eval from the dedicated eval worker
     cpWhite = evalSfResult.cpWhite;
+  } else if (continuationMode && preAnalysis) {
+    // #4: during continuation, prefer preAnalysis over afterMoveCpWhite.
+    // preAnalysis is always the eval of the currently-displayed position
+    // (started fresh by advanceContinuation after every opponent move).
+    // afterMoveCpWhite is the eval AFTER the user's last move, so after the
+    // opponent responds it's one ply stale — it describes the position before
+    // the opponent moved, not the one the user is currently looking at.
+    const fen = preAnalysisFen || currentSolveFen || m.fenBefore;
+    const sideToMove = fen.split(' ')[1]; // 'w' or 'b'
+    cpWhite = sideToMove === 'w' ? preAnalysis.bestCp : -preAnalysis.bestCp;
   } else if (afterMoveCpWhite !== null) {
     // After user's move — use post-move eval (updated by handleEvalResult, goToLineMove, etc.)
     cpWhite = afterMoveCpWhite;
@@ -10134,6 +10169,7 @@ function updateSessionProgress() {
   else renderGameList();
 
   updateRepertoireBadge();
+  updatePositionNav(); // #6: refresh Next-button outline after grading
 }
 
 // ─── Game list rendering ───
@@ -10325,6 +10361,7 @@ function toggleReviewMode() {
     renderGameList();
   }
   updatePanelTabs();
+  updatePositionNav(); // #6: sync Prev/counter/Next for the new mode
 }
 
 function renderReviewList() {
@@ -10908,6 +10945,7 @@ function loadPosition(globalIdx, skipAnimation = false) {
   firstAttemptFailed = false;
   srsRecorded = false;
   evalBarRevealed = false;
+  continuationEvalBarOn = false; // #4: transient flag — don't leak between puzzles
   afterMoveCpWhite = null;
   stopEvalWorkerSearch();
   updateEvalBar();
@@ -11044,6 +11082,7 @@ function loadPosition(globalIdx, skipAnimation = false) {
   const localIdx = gameMistakes.indexOf(m);
   document.getElementById('posCounter').textContent = `${localIdx + 1} / ${gameMistakes.length}`;
   updateMobileCounter();
+  updatePositionNav(); // #6: review-mode variant (hide prev/counter, widen Next, reset completed outline)
 
   // Show position info
   const infoCard = document.getElementById('posInfoCard');
@@ -13596,6 +13635,7 @@ function resumeContSession(session) {
 
   // Enter continuation mode
   continuationMode = true;
+  continuationEvalBarOn = false; // #4: eval bar always starts OFF in continuation (even on resume)
   silentContinuation = !!session.silentContinuation;
   advantageMode = !!session.advantageMode;
   currentSolveFen = resumeFen;
@@ -14341,6 +14381,7 @@ function launchFilterPractice() {
   contLine = { baseFen: fen, moves: [], currentIdx: -1 };
   contLineBrowsing = false;
   continuationMode = true;
+  continuationEvalBarOn = false; // #4: eval bar always starts OFF in continuation
   silentContinuation = true;
   if (voiceSettings.enabled) voiceStart();
   updateEvalBar();
@@ -14616,6 +14657,14 @@ function showContinuationOptions(m, move, contUci) {
   window._deferredEngineLine = { baseFen: currentSolveFen, move, contUci, cpWhite: afterMoveCpWhite };
 
   const container = document.getElementById('feedbackContainer');
+  // #5: remove any existing continuation-options row before inserting a new one.
+  // Trigger path: user plays a ≤5%-drop move (row 1 inserted), clicks "Show
+  // engine's best" (row 1 left in DOM — onRevealBestMove only resets the
+  // board), then plays the revealed best move. handleEvalResult re-fires,
+  // showColorFeedback wipes .feedback-box elements but not #continuationOptions,
+  // and this function inserts row 2. Defensive querySelectorAll covers any
+  // session already in the duplicate state.
+  container.querySelectorAll('#continuationOptions').forEach(el => el.remove());
   const div = document.createElement('div');
   div.id = 'continuationOptions';
   div.style.cssText = 'display:flex;gap:8px;animation:fadeSlideIn 0.3s ease;';
@@ -14653,6 +14702,7 @@ function startAdvantageContinuation(m) {
   };
   contLineBrowsing = false;
   continuationMode = true;
+  continuationEvalBarOn = false; // #4: eval bar always starts OFF in continuation
   if (voiceSettings.enabled) voiceStart();
   if (!silentContinuation) showMaiaControls();
   updateEvalBar();
@@ -15751,6 +15801,7 @@ function startTacticContinuation() {
   };
   contLineBrowsing = false;
   continuationMode = true;
+  continuationEvalBarOn = false; // #4: eval bar always starts OFF in continuation
   showMaiaControls();
   updateEvalBar();
   // Check highlight: the tactic may have delivered check — show it before the
@@ -17031,6 +17082,45 @@ function closeDrawer() {
 function updateMobileCounter() {
   const el = document.getElementById('posCounterMobile');
   if (el) el.textContent = document.getElementById('posCounter').textContent;
+}
+
+// #6: in review mode the prev button is a no-op (reviewQueue excludes the
+// just-graded current item, so currentInQueue is -1 or 0 and prevPosition()
+// returns without loading anything) and the "x / y" counter reflects the
+// current game's in-filter position, which is meaningless when items come
+// from many games. Hide both, widen Next, and add a subtle accent outline on
+// Next once the current item has been SRS-graded. Outside review mode, this
+// restores the default "← Prev  x/y  Next →" layout.
+function updatePositionNav() {
+  const inReview = !!reviewMode;
+  const completed = inReview && srsRecorded;
+  const ids = ['btnPrevPuzzle', 'btnPrevPuzzleMobile'];
+  const counterIds = ['posCounter', 'posCounterMobile'];
+  const nextDesktop = document.getElementById('btnNextPuzzle');
+  const nextMobile = document.getElementById('btnNextPuzzleMobile');
+
+  for (const id of ids) {
+    const el = document.getElementById(id);
+    if (el) el.style.display = inReview ? 'none' : '';
+  }
+  for (const id of counterIds) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    // Don't override the mobile media-query hide of the desktop counter —
+    // set display:none when hiding and '' otherwise. The mobile CSS rule
+    // (.position-counter { display: none }) still applies when '' is set.
+    el.style.display = inReview ? 'none' : '';
+  }
+  if (nextDesktop) {
+    nextDesktop.textContent = inReview ? 'Next Puzzle →' : 'Next →';
+    nextDesktop.classList.toggle('nav-review-wide', inReview);
+    nextDesktop.classList.toggle('nav-review-completed', completed);
+  }
+  if (nextMobile) {
+    nextMobile.textContent = inReview ? 'Next ›' : '›';
+    nextMobile.classList.toggle('nav-review-wide', inReview);
+    nextMobile.classList.toggle('nav-review-completed', completed);
+  }
 }
 
 function updateMobileSession() {
