@@ -1607,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Keep the eval bar updating during Review Complete state. goToContLineMove's eval-bar refresh was gated on `contLineReviewMode && idx >= 0`, but showReviewComplete sets contLineReviewMode=false while leaving contLineReviewKeyMoves populated — the user can still step through all moves via ← → after finishing review, and the eval bar stays frozen on the last reviewed position. Widen the gate to `contLineReviewMode || contLineReviewKeyMoves.length > 0` (the same "in review context" predicate used by the priority-1 universal review guard).</div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cancel animateLinePreview on board interaction. The Show Line auto-preview walks through the best line over 400ms-per-move ticks, reading window._reviewBestLine.animating on each iteration. goToReviewLine and stepReviewBestLine already flip animating=false (user clicked a move or pressed ← →), but direct board interaction didn't — if the user started dragging a piece while the preview was ticking, the animation kept running and teleported the board away from wherever the user was trying to go. Add `if (window._reviewBestLine) window._reviewBestLine.animating = false` at three board-interaction entry points: handleEngineLineBranch (user creates a branch inside a review line view), and both universal review guards in onDrop / the click handler (user tries to move on a read-only review context and gets snapped back). In all three cases the user clearly wanted to stop the animation, so cancel first.</div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -10799,6 +10799,8 @@ function onBoardClick(e) {
         const inReviewContext = contLineReviewMode ||
           (contLineReviewKeyMoves && contLineReviewKeyMoves.length > 0);
         if (inReviewContext && contLineReviewRetryIdx < 0) {
+          // Finding #12: cancel animateLinePreview on user-initiated interaction.
+          if (window._reviewBestLine) window._reviewBestLine.animating = false;
           gameEngine.undo();
           boardObj.position(gameEngine.fen(), false);
           showCheckHighlight(gameEngine);
@@ -11506,6 +11508,9 @@ function onDrop(source, target) {
     const inReviewContext = contLineReviewMode ||
       (contLineReviewKeyMoves && contLineReviewKeyMoves.length > 0);
     if (inReviewContext && contLineReviewRetryIdx < 0) {
+      // Finding #12: user-initiated board interaction cancels any running
+      // animateLinePreview even if we snap the move back.
+      if (window._reviewBestLine) window._reviewBestLine.animating = false;
       gameEngine.undo();
       boardObj.position(gameEngine.fen(), false);
       showCheckHighlight(gameEngine);
@@ -13296,6 +13301,10 @@ function getActiveMoveAt(idx) {
 /** Handle a move made while browsing an engine line — create or extend a branch */
 async function handleEngineLineBranch(source, target) {
   if (!engineLine) { boardObj.position(getEngineLineFen() || 'start', false); return; }
+  // Finding #12: board interaction cancels any in-flight animateLinePreview.
+  // Without this, the auto-preview keeps ticking and teleports the board away
+  // from whatever branch / position the user just created.
+  if (window._reviewBestLine) window._reviewBestLine.animating = false;
   const currentFen = getEngineLineFen();
   if (!currentFen) { boardObj.position('start', false); return; }
 
