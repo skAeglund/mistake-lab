@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Continuation Practice End - Add option to open full game in analysis in Lichess, closes #10. ♟ Analyze on Lichess button added to every continuation-end feedback surface (Stop & Review, advantage drill end, checkmate/draw/unexpected-turn natural ends) plus the Game Review summary card and the Review Complete state. Clicking POSTs a PGN to https://lichess.org/paste via a dynamic hidden form targeting _blank — Lichess has no GET-URL PGN import, POSTing /paste is the only supported path. PGN wraps contLine.moves with [Event]/[Site]/[Result "*"] headers; when contLine.baseFen ≠ standard start, [Variant "From Position"] + [FEN ...] + [SetUp "1"] are added per PGN 19.6 so Lichess initializes from the correct position. Six continuation-end reviewBtn constructions consolidated into continuationEndActionsHtml() — side effect: non-silent natural ends now also pick up the Lichess button (previously only the practiceEndBtns row showed).</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Post-merge scan on #10–#13: fix 2 findings. Finding 1 (from #11): deleteNote wipes panel.innerHTML like closeNotePanel/enterNoteEditMode/showNoteViewMode but was the only one of the four that didn't call resetNoteVariationState() — a dangling noteActiveVarParent would survive and silently respond to arrow keys against a detached DOM subtree, latching noteJumpedAway=true and blocking piece drags with no visible panel as the apparent cause. Add the reset. Finding 2 (from #10): continuationEndActionsHtml() unconditionally showed Review Game when classifications existed, but the pre-#10 code in the three advanceContinuation paths (checkmate / checkmated / turn-mismatch) gated on wasSilent — non-silent mode populates classifications too but already showed per-move feedback live, so post-hoc Game Review is noise there. Add wasSilent parameter: advantage (always silent) and stopAndReviewContinuation (silent-only reachable) pass true to match pre-#10 behavior; the three advanceContinuation sites pass their local wasSilent/wasSilent2/wasSilent3. Analyze on Lichess button still appears in all six paths regardless of silent state, which is the intentional widening for #10.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -13538,13 +13538,14 @@ function openContinuationOnLichess(btn) {
 }
 
 // Shared end-of-continuation actions row: "📋 Review Game" (only if
-// any moves carry classification data) + "♟ Analyze on Lichess"
-// (whenever any moves exist). Replaces the per-site reviewBtn
-// construction at each of the six continuation-end feedback points
-// so the Lichess button lands everywhere in one place.
-function continuationEndActionsHtml() {
+// wasSilent AND any moves carry classification data — non-silent mode
+// shows per-move feedback live, so a post-hoc Game Review is noise) +
+// "♟ Analyze on Lichess" (whenever any moves exist). Replaces the
+// per-site reviewBtn construction at each of the six continuation-end
+// feedback points so the Lichess button lands everywhere in one place.
+function continuationEndActionsHtml(wasSilent) {
   if (!contLine || !contLine.moves || contLine.moves.length === 0) return '';
-  const hasAnnotated = contLine.moves.some(mv => mv.classification);
+  const hasAnnotated = wasSilent && contLine.moves.some(mv => mv.classification);
   const reviewBtn = hasAnnotated
     ? `<button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="startContLineReview()">📋 Review Game</button>`
     : '';
@@ -15601,7 +15602,10 @@ function finishAdvantage(outcome) {
   const invalidateBtn = `<div style="margin-top:6px;"><button class="btn btn-ghost btn-sm" style="font-size:10px;color:var(--text-muted);border-color:var(--border);" onclick="handleBadMistake()">✕ Bad position</button></div>`;
 
   // Issue #10: consolidated Review Game + Analyze on Lichess actions row.
-  const actionsHtml = continuationEndActionsHtml();
+  // Advantage mode is always silent, so Review Game gate is effectively
+  // true — matches pre-#10 behavior where Review Game showed whenever
+  // classifications existed in this path.
+  const actionsHtml = continuationEndActionsHtml(true);
 
   showColorFeedback(
     outcome === 'victory' ? '#4caf50'
@@ -15709,10 +15713,13 @@ function stopAndReviewContinuation() {
   // call sites (finishContinuation checkmate/draw, turn-mismatch) already
   // include this guard; only this Stop & Review path was missing it.
   // Issue #10: consolidated Review Game + Analyze on Lichess actions row.
+  // Stop & Review is only reachable in silent mode (the "Stop & Review"
+  // button is silent-only, appearing after SILENT_REVIEW_MIN_MOVES), so
+  // wasSilent is effectively true — matches pre-#10 behavior.
   // Finding #8 preserved: continuationEndActionsHtml returns '' when the
   // contLine has no moves, so startContLineReview (which bails when there
   // are no annotations) can't be reached from a stale button.
-  const actionsHtml = continuationEndActionsHtml();
+  const actionsHtml = continuationEndActionsHtml(true);
   showColorFeedback('var(--accent)', 'rgba(66,133,244,0.08)',
     'Continuation ended',
     `${moveCount} moves played.` +
@@ -16986,10 +16993,11 @@ async function advanceContinuation(contUci) {
     hideMaiaControls();
     hideContStopReview();
     // Issue #10: unified Review Game + Analyze on Lichess actions row.
-    // Review Game appears only when classifications exist (silent mode
-    // populates them); Analyze on Lichess appears whenever moves exist,
-    // so non-silent checkmate/draw ends now pick up the Lichess option too.
-    const endBtns = continuationEndActionsHtml() + practiceEndBtns();
+    // Review Game gated on wasSilent (non-silent mode already shows
+    // per-move feedback live — a post-hoc Game Review would be noise).
+    // Analyze on Lichess appears whenever moves exist, so non-silent
+    // checkmate/draw ends now pick up the Lichess option too.
+    const endBtns = continuationEndActionsHtml(wasSilent) + practiceEndBtns();
     if (gameEngine.in_checkmate()) {
       recordPracticeResult('win', null);
       showFeedback('correct', 'Checkmate!', 'You delivered checkmate!' + endBtns);
@@ -17183,9 +17191,9 @@ async function advanceContinuation(contUci) {
     hideMaiaControls();
     hideContStopReview();
     const m = filteredMistakes[currentMistakeIdx];
-    // Issue #10: unified actions row (Review Game when classifications exist,
+    // Issue #10: unified actions row (Review Game gated on wasSilent2,
     // Analyze on Lichess whenever moves exist).
-    const endBtns2 = continuationEndActionsHtml() + practiceEndBtns();
+    const endBtns2 = continuationEndActionsHtml(wasSilent2) + practiceEndBtns();
     if (gameEngine.in_checkmate()) {
       recordPracticeResult('loss', null);
       showFeedback('wrong', 'Checkmated', 'The opponent delivered checkmate.' + endBtns2);
@@ -17216,9 +17224,9 @@ async function advanceContinuation(contUci) {
     clearContSession();
     hideMaiaControls();
     hideContStopReview();
-    // Issue #10: unified actions row (Review Game when classifications exist,
+    // Issue #10: unified actions row (Review Game gated on wasSilent3,
     // Analyze on Lichess whenever moves exist).
-    showFeedback('info', 'Continuation ended', 'Unexpected turn.' + continuationEndActionsHtml() + practiceEndBtns());
+    showFeedback('info', 'Continuation ended', 'Unexpected turn.' + continuationEndActionsHtml(wasSilent3) + practiceEndBtns());
     if (wasSilent3) renderContLine();
     document.getElementById('btnRetry').classList.remove('hidden');
     document.getElementById('btnHint').classList.add('hidden');
@@ -21633,6 +21641,15 @@ function deleteNote() {
   mobileDrawStartSq = null;
   // IMP-007: drop anchor for consistency with closeNotePanel.
   noteAnchorFen = null;
+  // Scan finding: match the other panel.innerHTML-rewrite paths
+  // (closeNotePanel/enterNoteEditMode/showNoteViewMode) and drop the
+  // #11 variation-browse pointer. Without this, if the user clicks a
+  // variation move, opens Edit, then Delete, noteActiveVarParent would
+  // still reference the now-detached DOM subtree — ←/→ would silently
+  // move the board with no visible panel and latch noteJumpedAway,
+  // blocking piece drags from an invisible cause. (saveNote also ends
+  // up here via the empty-text→deleteNote path, so this covers both.)
+  resetNoteVariationState();
   const panel = document.getElementById('notePanel');
   if (panel) { panel.style.display = 'none'; panel.innerHTML = ''; }
   activeArrows.clear();
