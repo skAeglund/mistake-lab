@@ -1607,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Engine Lines scan: fix 14 findings in engine-line/branching subsystem. EL1/EL2 capture engineLine ref at start of handleEngineLineBranch/_doExtendEngineLine, guard all post-await writes on engineLine===el so navigating to another puzzle mid-analysis can't push phantom alts onto the replacement engineLine or append stale extension moves. EL3 stop advancing gameEngine in showTacticEngineLine so exitEngineLine lands on the tactic's final position and Play Continuation starts from the right baseline. EL5 render alts with branchIdx=-1 before the main loop so baseFen branches show up in the line panel. EL6 capture startIdx/startActiveAlt before the branch await; skip forced navigation if the user navigated elsewhere in the same engineLine during analysis (keep the alt in the list, don't teleport). EL7 exitEngineLine now calls clearAnalysisArrow. EL9 strip orphan #engineLineBox from the DOM on analysis exit when engineLine global is null (feedbackHtml snapshot restore brings back a non-functional panel otherwise). EL11 goToLineMove(-1) clears afterMoveCpWhite so the bar shows "—" until the eval worker returns (previously flashed the post-move eval at the pre-move base position). EL12 add prepareEngineLineExtension calls to the three match paths (same-move advance, switch-to-main, switch-to-sibling-alt) so arrow-right at the new terminus hits the extension cache. EL13 goToTacticLineMove clears analysisArrow on engineLine dismiss. EL15 null window._deferredEngineLine after consumption in showDeferredEngineLine/startContinuationMode and in loadPosition reset block. EL16 exitEngineLine terminates in-flight sfWorker if sfSearchActive (battery drain when user exits mid-branch-analysis).</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Clickable line in notes shows as illegal /invalid even though the moves are legal, closes #12. getCurrentNoteFen() returned m.fenBefore while the board had already advanced to the post-move position (e.g. after an Excellent response), so a variation line like "30. Rh1 g3" was tokenized against the pre-move FEN with the wrong side-to-move and the White move Rh1 parsed as illegal for Black. Reorder the mistake-review branch so live gameEngine.fen() wins; it equals m.fenBefore pre-move (loadPosition seeds it) and matches the visible board post-move. m.fenBefore kept as a safety fallback when gameEngine is unavailable.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -20646,10 +20646,17 @@ function getCurrentNoteFen() {
     return repLeadUpLine.moves[repLeadUpIdx].fen;
   }
   if (continuationMode && currentSolveFen) return currentSolveFen;
+  // Issue #12: prefer the live board FEN over m.fenBefore. Before the user
+  // plays, gameEngine.fen() equals m.fenBefore anyway (loadPosition seeds it).
+  // After an Excellent/Good response, gameEngine.fen() is the post-move
+  // position — which is what the user is looking at when they open the note
+  // panel, and what any variation line they write ("30. Rh1 g3") tokenizes
+  // against. Falling back to m.fenBefore stranded the anchor on the pre-move
+  // side-to-move, so White-to-move continuations parsed as illegal for Black.
+  if (typeof gameEngine !== 'undefined' && gameEngine) return gameEngine.fen();
   if (currentMistakeIdx >= 0 && filteredMistakes[currentMistakeIdx]) {
     return filteredMistakes[currentMistakeIdx].fenBefore;
   }
-  if (typeof gameEngine !== 'undefined' && gameEngine) return gameEngine.fen();
   return null;
 }
 
