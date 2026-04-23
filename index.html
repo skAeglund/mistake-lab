@@ -195,6 +195,11 @@
   .note-move.clickable:hover {
     background: rgba(91, 156, 240, 0.16);
   }
+  .note-move.clickable.active {
+    /* Issue #11: highlight the variation move currently on the board */
+    background: rgba(91, 156, 240, 0.32);
+    font-weight: 600;
+  }
   .note-move.clickable.disabled {
     cursor: not-allowed;
     opacity: 0.55;
@@ -1607,7 +1612,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Clickable line in notes shows as illegal /invalid even though the moves are legal, closes #12. getCurrentNoteFen() returned m.fenBefore while the board had already advanced to the post-move position (e.g. after an Excellent response), so a variation line like "30. Rh1 g3" was tokenized against the pre-move FEN with the wrong side-to-move and the White move Rh1 parsed as illegal for Black. Reorder the mistake-review branch so live gameEngine.fen() wins; it equals m.fenBefore pre-move (loadPosition seeds it) and matches the visible board post-move. m.fenBefore kept as a safety fallback when gameEngine is unavailable.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add standard line navigation when clicking on clickable line in a position note, closes #11. ←/→ now step through the active variation the same way they step through an engine line: the just-clicked move gets a bold blue highlight, ← walks back one move per press down to the note's anchor position (then becomes a no-op), → walks forward to the last clickable move (no extension past human-authored line). Introduces noteActiveVarParent/Idx state, factors jumpBoardToNoteFen out of jumpToNoteMove so arrow-step and click share the same board-load path, and resets the state at every panel.innerHTML swap (close / edit / view re-render) so the pointer can't dangle on a detached DOM subtree. Keybind sits after repLeadUp/repCont and before engineLine/tacticLine/contLine so variation browse wins; still never engages during tactic/cont/rep drill modes because jumpToNoteMove is guarded there.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2058,6 +2063,16 @@ let noteAnchorFen = null;
 // now at the jumped variation position and evaluating a move from here
 // against the still-active mistake context would produce nonsense.
 let noteJumpedAway = false;
+// Issue #11: after the user clicks a move inside a clickable variation,
+// these track which variation and which move are active so ←/→ can step
+// through the line like an engine line. noteActiveVarParent references
+// the .note-variation wrapper span (the source of truth for the move
+// list — re-query its clickable children each step so DOM changes don't
+// desync state). noteActiveVarIdx is -1 at the anchor position (one
+// step "before" the first clicked move, matching engineLine.currentIdx
+// = -1 semantics) or 0..N-1 for a specific move.
+let noteActiveVarParent = null;
+let noteActiveVarIdx = -1;
 // IMP-006: mobile-only tap-to-draw mode for note-edit. Desktop uses
 // right-click drag which doesn't exist on touch devices, so note editing
 // on mobile previously couldn't attach arrows/circles at all.
@@ -20851,25 +20866,22 @@ function renderVariationTokens(tokens) {
   return `<span class="note-variation">${pieces.join(' ')}</span>`;
 }
 
-// Invoked from onclick on a .note-move.clickable span. Jumps the live board
-// to the post-move FEN stored on the element. Blocked during drill modes —
-// jumping would disturb an in-progress tactic / continuation / repertoire
-// drill where the user is expected to find a specific move.
-function jumpToNoteMove(el) {
-  if (!el || !el.dataset) return;
-  if (tacticMode || continuationMode || repertoireDrillMode) return;
-  const fen = el.dataset.fen;
-  if (!fen || !boardObj) return;
+// Shared core used by both click-to-jump and ←/→ variation stepping.
+// Loads the given FEN into gameEngine/board, applies last-move highlight
+// and check state, and (for non-analysis/non-filter contexts) latches
+// noteJumpedAway so the drill's drag/drop handlers ignore the user
+// until they explicitly Retry/Prev/Next. Safe to call with a null
+// fromSq/toSq pair (clears the last-move highlight — used when
+// stepping back to the note's anchor position).
+function jumpBoardToNoteFen(fen, fromSq, toSq) {
+  if (!fen || !boardObj) return false;
   try {
     const probe = new Chess();
-    if (!probe.load(fen)) return;
+    if (!probe.load(fen)) return false;
     gameEngine = probe;
     boardObj.position(fen, false);
-    if (el.dataset.from && el.dataset.to) {
-      showLastMoveHighlight(el.dataset.from, el.dataset.to);
-    } else {
-      clearLastMoveHighlight();
-    }
+    if (fromSq && toSq) showLastMoveHighlight(fromSq, toSq);
+    else clearLastMoveHighlight();
     showCheckHighlight(gameEngine);
     // Note arrows/circles are attached to the anchor position and become
     // meaningless (or misleading) once we've jumped into a variation — hide
@@ -20885,9 +20897,86 @@ function jumpToNoteMove(el) {
     if (!analysisMode && !openingFilterMode) {
       noteJumpedAway = true;
     }
+    return true;
   } catch (err) {
     console.warn('[Note] jump failed:', err);
+    return false;
   }
+}
+
+// Invoked from onclick on a .note-move.clickable span. Jumps the live board
+// to the post-move FEN stored on the element. Blocked during drill modes —
+// jumping would disturb an in-progress tactic / continuation / repertoire
+// drill where the user is expected to find a specific move.
+function jumpToNoteMove(el) {
+  if (!el || !el.dataset) return;
+  if (tacticMode || continuationMode || repertoireDrillMode) return;
+  const fen = el.dataset.fen;
+  if (!fen) return;
+  const ok = jumpBoardToNoteFen(fen, el.dataset.from || null, el.dataset.to || null);
+  if (!ok) return;
+  // Issue #11: arm ←/→ stepping for the variation we just clicked into.
+  // querySelectorAll is live enough — the rendered variation is stable
+  // until the panel is re-rendered (edit/save/close), and those paths
+  // all reset noteActiveVarParent below.
+  const parent = el.closest('.note-variation');
+  if (parent) {
+    // Clear any stale .active (e.g. clicking into a different variation,
+    // or re-clicking within the same one).
+    document.querySelectorAll('.note-move.active').forEach(e => e.classList.remove('active'));
+    const clickables = Array.from(parent.querySelectorAll('.note-move.clickable'));
+    const idx = clickables.indexOf(el);
+    if (idx >= 0) {
+      el.classList.add('active');
+      noteActiveVarParent = parent;
+      noteActiveVarIdx = idx;
+    }
+  }
+}
+
+// Issue #11: step ←/→ through the currently-active note variation the
+// same way engine lines step. Returns true if the step was handled
+// (caller should preventDefault + return), false if there's no active
+// variation and the caller should fall through to other key handling.
+function noteVariationStep(delta) {
+  if (!noteActiveVarParent) return false;
+  // Re-query rather than caching — keeps us honest if the DOM underneath
+  // changed between steps (shouldn't, but safer).
+  const clickables = Array.from(noteActiveVarParent.querySelectorAll('.note-move.clickable'));
+  if (clickables.length === 0) {
+    noteActiveVarParent = null;
+    noteActiveVarIdx = -1;
+    return false;
+  }
+  const newIdx = noteActiveVarIdx + delta;
+  // Past anchor or past last move: consume the key (matches engineLine
+  // lineStep semantics where newIdx < -1 is a no-op).
+  if (newIdx < -1 || newIdx >= clickables.length) return true;
+  // Clear any existing .active; we'll re-set one below if newIdx >= 0.
+  clickables.forEach(e => e.classList.remove('active'));
+  if (newIdx === -1) {
+    // Back to the note's anchor position — the FEN the note was written
+    // against, before any variation move was played.
+    if (noteAnchorFen) jumpBoardToNoteFen(noteAnchorFen, null, null);
+    noteActiveVarIdx = -1;
+    return true;
+  }
+  const el = clickables[newIdx];
+  el.classList.add('active');
+  jumpBoardToNoteFen(el.dataset.fen, el.dataset.from || null, el.dataset.to || null);
+  noteActiveVarIdx = newIdx;
+  return true;
+}
+
+function resetNoteVariationState() {
+  // Called whenever the note panel's rendered HTML is about to be replaced
+  // (close / edit / save→view) — the old noteActiveVarParent reference
+  // would become a detached element whose querySelectorAll still returns
+  // children, so arrow keys would silently keep "working" against an
+  // invisible DOM. Resetting here keeps the state aligned with the
+  // currently-visible panel.
+  noteActiveVarParent = null;
+  noteActiveVarIdx = -1;
 }
 
 // Insert @@StartV@@  @@EndV@@ at the textarea cursor (or wrapping the
@@ -20970,6 +21059,10 @@ function showNoteViewMode(panel, note) {
   // after saveNote, at which point gameEngine may be at a jumped position
   // rather than the original anchor. openNotePanel is the single place
   // that captures the anchor for the panel session.
+  // Issue #11: but we DO reset the variation browse pointer, since the
+  // panel.innerHTML below about to throw out whatever element it was
+  // pointing at.
+  resetNoteVariationState();
   reparentNotePanelForViewport();
   // Show note arrows as overlay
   showNoteArrows(note);
@@ -21000,6 +21093,10 @@ function enterNoteEditMode() {
 
   notePanelOpen = true;
   noteEditMode = true;
+  // Issue #11: edit mode replaces panel.innerHTML with a textarea, so
+  // any previously-active clickable variation element is about to go
+  // away. Drop the pointer.
+  resetNoteVariationState();
   reparentNotePanelForViewport();
 
   // Restore saved arrows/circles as live annotations for editing
@@ -21159,6 +21256,9 @@ function closeNotePanel() {
   mobileDrawStartSq = null;
   // IMP-007: drop the anchor so the next openNotePanel captures fresh.
   noteAnchorFen = null;
+  // Issue #11: drop the ←/→ variation browse pointer too — it references
+  // an element inside panel.innerHTML, which we're about to wipe.
+  resetNoteVariationState();
   const panel = document.getElementById('notePanel');
   if (panel) { panel.style.display = 'none'; panel.innerHTML = ''; }
   // Clear user-drawn arrows if we were editing
@@ -21346,6 +21446,21 @@ document.addEventListener('keydown', (e) => {
   if (repContActive && repContLine && repContLine.moves.length > 0) {
     if (e.key === 'ArrowLeft') { repContLineStep(-1); e.preventDefault(); return; }
     if (e.key === 'ArrowRight') { repContLineStep(1); e.preventDefault(); return; }
+  }
+  // Issue #11: clickable variation in a position note — ←/→ steps through
+  // the variation the same way engine lines work. Must run before the
+  // engineLine/tacticLine/contLine branch below: in a normal mistake
+  // review, none of those are set when a note variation is active
+  // (jumpToNoteMove is blocked during drill modes), but a stale engineLine
+  // from a prior wrong-move session could still be around, and the
+  // variation browse takes precedence. noteVariationStep is a no-op and
+  // returns false when noteActiveVarParent is null, so we fall through.
+  if (noteActiveVarParent) {
+    if (e.key === 'ArrowLeft') {
+      if (noteVariationStep(-1)) { e.preventDefault(); return; }
+    } else if (e.key === 'ArrowRight') {
+      if (noteVariationStep(1)) { e.preventDefault(); return; }
+    }
   }
   // Arrow keys: engine line takes priority (for wrong-move browsing during tactics)
   if (e.key === 'ArrowLeft') {
