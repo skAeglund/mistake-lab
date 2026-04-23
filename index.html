@@ -1607,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Voice scan: fix 11 findings in voice/TTS subsystem. V1/V2 remove dead repertoire-continuation branches in voiceExecuteMove (unreachable via gate). V3 add voiceStart hook to startTacticContinuation. V4 add voiceStart to practice retry path. V5 logout now tears down voice and clears continuation/advantage/silent/wrongMove flags before state reset. V6 guard advanceContinuation post-TTS state checks (continuation still live, index unchanged, item exists, gameEngine not null, turn matches) against user interaction during the 0.5–1.5s TTS await that previously destroyed drills. V7 add voiceStop to six end-of-continuation paths. V8 add voiceStop to enterAnalysisMode and enterOpeningFilter. V9 serialize voiceHandleAlternatives in onresult via async IIFE (burst speech could race and overwrite voicePendingMove). V10 clear queued premove in voiceExecuteMove. V12 add voiceUnsupported sentinel so the unavailable feedback doesn't re-fire every continuation entry on Safari/Firefox. V15 await voiceSpeak at repertoire deviation alert for consistency.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Engine Lines scan: fix 14 findings in engine-line/branching subsystem. EL1/EL2 capture engineLine ref at start of handleEngineLineBranch/_doExtendEngineLine, guard all post-await writes on engineLine===el so navigating to another puzzle mid-analysis can't push phantom alts onto the replacement engineLine or append stale extension moves. EL3 stop advancing gameEngine in showTacticEngineLine so exitEngineLine lands on the tactic's final position and Play Continuation starts from the right baseline. EL5 render alts with branchIdx=-1 before the main loop so baseFen branches show up in the line panel. EL6 capture startIdx/startActiveAlt before the branch await; skip forced navigation if the user navigated elsewhere in the same engineLine during analysis (keep the alt in the list, don't teleport). EL7 exitEngineLine now calls clearAnalysisArrow. EL9 strip orphan #engineLineBox from the DOM on analysis exit when engineLine global is null (feedbackHtml snapshot restore brings back a non-functional panel otherwise). EL11 goToLineMove(-1) clears afterMoveCpWhite so the bar shows "—" until the eval worker returns (previously flashed the post-move eval at the pre-move base position). EL12 add prepareEngineLineExtension calls to the three match paths (same-move advance, switch-to-main, switch-to-sibling-alt) so arrow-right at the new terminus hits the extension cache. EL13 goToTacticLineMove clears analysisArrow on engineLine dismiss. EL15 null window._deferredEngineLine after consumption in showDeferredEngineLine/startContinuationMode and in loadPosition reset block. EL16 exitEngineLine terminates in-flight sfWorker if sfSearchActive (battery drain when user exits mid-branch-analysis).</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -6516,6 +6516,18 @@ function exitAnalysisMode() {
   analysisTreeCurrent = null;
   analysisNodes = {};
   analysisSavedState = null;
+  // EL9: the tactic-snapshot restore path re-applies feedbackContainer.innerHTML
+  // (line 6469–6470) and the review-snapshot path does likewise via
+  // restoreReviewStateAfterAnalysis. Both snapshots were captured BEFORE
+  // enterAnalysisMode's `if (engineLine) exitEngineLine()` teardown, so the
+  // captured HTML includes whatever #engineLineBox was rendered at the time.
+  // The engineLine global is null on exit (we never restore it), so re-
+  // inserting the DOM produces a non-functional panel: clicks on alt moves
+  // hit `if (!engineLine) return;` and do nothing. Strip the orphan box so
+  // the user isn't staring at a stale engine-line panel that silently
+  // ignores every interaction.
+  const staleEngineLineBox = document.getElementById('engineLineBox');
+  if (staleEngineLineBox && !engineLine) staleEngineLineBox.remove();
   updateEvalBar();
   updateLineNavBar();
 }
@@ -11200,6 +11212,11 @@ function loadPosition(globalIdx, skipAnimation = false) {
   hideMaiaControls();
   engineLine = null;
   browsingLine = false;
+  // EL15: also drop the deferred engine-line payload stashed by the previous
+  // puzzle's showContinuationOptions. Without this it could survive until the
+  // next good move overwrites it, leaving a zombie reference to prior-puzzle
+  // data in the meantime.
+  window._deferredEngineLine = null;
   // IMP-007: a fresh position load (Prev/Next/click from queue/retry) is
   // the "return to drill" action that unblocks piece interactions after a
   // variation jump. Keep this in lockstep with the browsingLine reset.
@@ -12159,6 +12176,11 @@ function goToTacticLineMove(idx) {
     const elBox = document.getElementById('engineLineBox');
     if (elBox) elBox.remove();
     stopEvalWorkerSearch();
+    // EL13: mirror exitEngineLine's cleanup (added in EL7). Dismissing the
+    // engine line here without clearing the analysis arrow leaves a stale
+    // arrow painted if sfAnalyzeAdaptive was still running for a branch or
+    // extension when the user clicked a tactic-line move.
+    clearAnalysisArrow();
     updateLineNavBar();
   }
 
@@ -13360,6 +13382,14 @@ function getActiveMoveAt(idx) {
 /** Handle a move made while browsing an engine line — create or extend a branch */
 async function handleEngineLineBranch(source, target) {
   if (!engineLine) { boardObj.position(getEngineLineFen() || 'start', false); return; }
+  // EL1: capture the engineLine reference so post-await writes can verify the
+  // global still points at the same object. Without this guard, if the user
+  // navigated to another puzzle during sfAnalyzeAdaptive (loadPosition nulls
+  // engineLine, then a new wrong move in the next puzzle creates a fresh
+  // engineLine), the async would push `newAlt` / set currentIdx / force
+  // navigation on the REPLACEMENT engineLine, corrupting its alternatives
+  // array with a stale branchIdx and teleporting the user mid-puzzle.
+  const el = engineLine;
   // Finding #12: board interaction cancels any in-flight animateLinePreview.
   // Without this, the auto-preview keeps ticking and teleports the board away
   // from whatever branch / position the user just created.
@@ -13388,6 +13418,14 @@ async function handleEngineLineBranch(source, target) {
     if (replyIdx < getActivePathLength()) {
       setTimeout(() => { if (engineLine && engineLine.currentIdx === nextIdx) goToLineMove(replyIdx); }, 400);
     }
+    // EL12: same-move advance changes the active path position but the
+    // previous prepareEngineLineExtension's cached endFen is still valid
+    // for the CURRENT end of the path — no re-prep needed here.
+    // However, if the user's move + auto-reply lands them AT the end of
+    // the line, the very next arrow-right triggers extendEngineLine and
+    // we want the cached extension ready. Kick off a prep just in case
+    // the previous one got overwritten by an earlier branch.
+    prepareEngineLineExtension();
     return undefined;
   }
 
@@ -13403,6 +13441,12 @@ async function handleEngineLineBranch(source, target) {
       if (replyIdx2 < getActivePathLength()) {
         setTimeout(() => { if (engineLine && engineLine.currentIdx === nextIdx) goToLineMove(replyIdx2); }, 400);
       }
+      // EL12: switching paths (alt → main) means engineLine.extension's
+      // cached endFen refers to the previous path's end, which doesn't
+      // match the main line's end. Prep a fresh extension for the new
+      // active path so arrow-right extension hits the cache instead of
+      // falling through to on-demand analysis.
+      prepareEngineLineExtension();
       return undefined;
     }
   }
@@ -13419,6 +13463,9 @@ async function handleEngineLineBranch(source, target) {
       if (replyIdx3 < getActivePathLength()) {
         setTimeout(() => { if (engineLine && engineLine.currentIdx === nextIdx) goToLineMove(replyIdx3); }, 400);
       }
+      // EL12: see switch-to-main comment. Same logic applies: jumping to a
+      // sibling alt invalidates the previous path's cached extension.
+      prepareEngineLineExtension();
       return undefined;
     }
   }
@@ -13431,6 +13478,14 @@ async function handleEngineLineBranch(source, target) {
   clearHighlights();
   // 'chess' above already has the new branching move applied — reuse it.
   showCheckHighlight(chess);
+
+  // EL6: capture the navigation state at branch-start so the post-await forced
+  // navigation can be suppressed if the user navigated elsewhere within the
+  // same engineLine during the analysis wait. Without these, a user who
+  // clicked a main-line move (or stepped with arrows) mid-analysis would get
+  // teleported back to the branch reply position when SF resolved.
+  const startIdx = idx;
+  const startActiveAlt = engineLine.activeAlt;
 
   // Determine if we're inside an alt (depth 1) and past its branch point
   // → replace continuation (depth limit = 2)
@@ -13450,11 +13505,11 @@ async function handleEngineLineBranch(source, target) {
         stopPreAnalysis();
         showEvaluatingFeedback();
         const result = await sfAnalyzeAdaptive(newFen, {
-          onUpdate: (d, uci) => { if (engineLine) showAnalysisArrow(uci); }
+          onUpdate: (d, uci) => { if (engineLine === el) showAnalysisArrow(uci); }
         });
         clearAnalysisArrow();
         hideEvaluatingFeedback();
-        if (engineLine && engineLine.activeAlt >= 0 && engineLine.alternatives[engineLine.activeAlt] === alt) {
+        if (engineLine === el && engineLine.activeAlt >= 0 && engineLine.alternatives[engineLine.activeAlt] === alt) {
           const contMoves = parseSfContinuation(newFen, result, ENGINE_LINE_PLY - 1);
           alt.moves.push(...contMoves);
           const cp = result?.pvs?.[0]?.cp || 0;
@@ -13464,6 +13519,20 @@ async function handleEngineLineBranch(source, target) {
       } catch (e) { /* ignore */ }
     }
 
+    // EL1: if engineLine was replaced (e.g. user navigated to another puzzle
+    // during the await), skip the forced navigation so the new engineLine
+    // isn't teleported to a stale idx.
+    if (engineLine !== el) return undefined;
+    // EL6: if user navigated within the same engineLine during the await, just
+    // re-render the line panel (so the updated alt shows) and bail out of the
+    // forced navigation. Leaving the user where they clicked is less jarring
+    // than snapping them back to the branch reply.
+    const userStillAtBranch = (engineLine.currentIdx === startIdx && engineLine.activeAlt === startActiveAlt);
+    if (!userStillAtBranch) {
+      renderEngineLine();
+      prepareEngineLineExtension();
+      return undefined;
+    }
     engineLine.currentIdx = idx + 1; // point to the new move
     renderEngineLine();
     // Auto-advance to opponent's reply if available
@@ -13482,11 +13551,11 @@ async function handleEngineLineBranch(source, target) {
       stopPreAnalysis();
       showEvaluatingFeedback();
       const result = await sfAnalyzeAdaptive(newFen, {
-        onUpdate: (d, uci) => { if (engineLine) showAnalysisArrow(uci); }
+        onUpdate: (d, uci) => { if (engineLine === el) showAnalysisArrow(uci); }
       });
       clearAnalysisArrow();
       hideEvaluatingFeedback();
-      if (engineLine) {
+      if (engineLine === el) {
         const contMoves = parseSfContinuation(newFen, result, ENGINE_LINE_PLY - 1);
         newAlt.moves.push(...contMoves);
         const cp = result?.pvs?.[0]?.cp || 0;
@@ -13496,9 +13565,23 @@ async function handleEngineLineBranch(source, target) {
     } catch (e) { /* ignore */ }
   }
 
-  if (!engineLine) return undefined; // navigated away during analysis
+  // EL1: bail if engineLine was replaced (e.g. user navigated to another puzzle
+  // during the await). Pushing `newAlt` onto a fresh engineLine's alternatives
+  // would corrupt it with a branchIdx that doesn't correspond to any move in
+  // the new line, causing phantom alt rendering and broken navigation.
+  if (engineLine !== el) return undefined;
 
   engineLine.alternatives.push(newAlt);
+  // EL6: if user navigated within the same engineLine during the await, keep
+  // the newly-created alt in the list (the analysis already ran, no reason to
+  // throw it away) but don't switch to it and don't teleport the board — the
+  // user has moved on. They can click the alt later to revisit.
+  const userStillAtBranch2 = (engineLine.currentIdx === startIdx && engineLine.activeAlt === startActiveAlt);
+  if (!userStillAtBranch2) {
+    renderEngineLine();
+    prepareEngineLineExtension();
+    return undefined;
+  }
   engineLine.activeAlt = engineLine.alternatives.length - 1;
   engineLine.currentIdx = idx + 1; // point to the new move
   renderEngineLine();
@@ -13581,6 +13664,12 @@ async function extendEngineLine() {
 }
 async function _doExtendEngineLine() {
   if (!engineLine) return;
+  // EL2: same pattern as handleEngineLineBranch — capture the engineLine
+  // reference so the post-await append can't land on a REPLACEMENT engineLine
+  // after the user navigated to a different puzzle mid-extension. pathLen is
+  // also tied to el's length; applying it to a different engineLine would
+  // advance currentIdx past the end of the new line.
+  const el = engineLine;
   const pathLen = getActivePathLength();
   const endFen = (engineLine.activeAlt >= 0)
     ? engineLine.alternatives[engineLine.activeAlt].moves.at(-1)?.fen
@@ -13605,11 +13694,11 @@ async function _doExtendEngineLine() {
       stopPreAnalysis();
       showEvaluatingFeedback();
       const result = await sfAnalyzeAdaptive(endFen, {
-        onUpdate: (d, uci) => { if (engineLine) showAnalysisArrow(uci); }
+        onUpdate: (d, uci) => { if (engineLine === el) showAnalysisArrow(uci); }
       });
       clearAnalysisArrow();
       hideEvaluatingFeedback();
-      if (!engineLine) return;
+      if (engineLine !== el) return;
       extMoves = parseSfContinuation(endFen, result, ENGINE_LINE_PLY);
       const cp = result?.pvs?.[0]?.cp || 0;
       const side = endFen.split(' ')[1];
@@ -13617,7 +13706,7 @@ async function _doExtendEngineLine() {
     } catch { return; }
   }
 
-  if (!engineLine || !extMoves || extMoves.length === 0) return;
+  if (engineLine !== el || !extMoves || extMoves.length === 0) return;
 
   // Append moves and update eval on the active path
   if (engineLine.activeAlt >= 0) {
@@ -13662,6 +13751,20 @@ function renderEngineLine() {
   // Track move number / turn state for main line
   let mn = moveNum;
   let wt = isWhiteTurn;
+
+  // EL5: emit alts that branch at idx=-1 (user made a move AT baseFen).
+  // Reachable from Show-engine-line / Show-tactic-engine-line flows where
+  // engineLine.wrongMove is unset, so arrow-left can reach idx=-1 without
+  // triggering the retry trap in lineStep. Without this, such alts land in
+  // altsByBranch[-1] and the main loop (i = 0..n-1) never renders them —
+  // user's branch is reachable by state (getActiveMoveAt / goToLineMove
+  // handle branchIdx=-1 fine) but invisible in the line panel, so they
+  // can't click back to main or to another alt.
+  if (altsByBranch[-1]) {
+    for (const ai of altsByBranch[-1]) {
+      movesHtml += renderAltLineHtml(ai, -1, moveNum, isWhiteTurn);
+    }
+  }
 
   for (let i = 0; i < engineLine.moves.length; i++) {
     const mv = engineLine.moves[i];
@@ -13790,7 +13893,13 @@ function goToLineMove(idx, animate = true) {
   renderEngineLine();
 
   // Update eval bar with the active path's evaluation (immediate fallback)
-  if (engineLine.activeAlt >= 0) {
+  if (idx === -1) {
+    // EL11: at baseFen (idx=-1) the line's cpWhite is the eval AFTER the
+    // user's move, so using it as fallback flashes the wrong value on the
+    // eval bar while the eval worker is still computing the pre-move eval.
+    // Clear the fallback so the bar shows "—" until the worker returns.
+    afterMoveCpWhite = null;
+  } else if (engineLine.activeAlt >= 0) {
     const alt = engineLine.alternatives[engineLine.activeAlt];
     if (alt && alt.cpWhite != null) afterMoveCpWhite = alt.cpWhite;
   } else if (engineLine.cpWhite != null) {
@@ -13855,6 +13964,31 @@ function exitEngineLine() {
   const box = document.getElementById('engineLineBox');
   if (box) box.remove();
   hideEvaluatingFeedback();
+  // EL7: clear any stale analysis arrow. If the user exits (Back button /
+  // Escape / arrow-left past the bad move) while sfAnalyzeAdaptive is still
+  // running for a branch or extension, the onUpdate callback's engineLine
+  // guard prevents NEW arrows from being drawn, but whichever arrow was
+  // last painted stays on the board until something triggers renderArrows.
+  // tacticTryAgain clears this explicitly; exitEngineLine (reached from
+  // tryAgainFromLine / tryAgainFromContinuationLine / Back button / Escape)
+  // was the asymmetric one. Clearing it here also handles #8 transitively
+  // since the try-again helpers call exitEngineLine.
+  clearAnalysisArrow();
+  // EL16: terminate any still-running SF search kicked off by a branch or
+  // extension analysis that the user exited mid-flight. Self-correction
+  // would happen eventually at the next sfAnalyze call (which terminates
+  // via its own sfSearchActive check), but the intermediate seconds keep
+  // the worker CPU-bound, draining mobile battery. Matches the termination
+  // pattern in loadPosition's tactic/repertoire branches and in
+  // abandonDetectedTacticSolve. initStockfish returns immediately; the
+  // next SF consumer waits on sfReady before posting `go`.
+  if (sfSearchActive && sfWorker) {
+    try { sfWorker.terminate(); } catch (_) {}
+    sfWorker = null;
+    sfReady = false;
+    sfSearchActive = false;
+    initStockfish();
+  }
   clearHighlights();
   clearLastMoveHighlight();
   updateEvalBar();
@@ -15059,6 +15193,12 @@ function showDeferredEngineLine() {
   const data = window._deferredEngineLine;
   if (data) {
     buildEngineLine(data.baseFen, data.move, data.contUci, data.cpWhite);
+    // EL15: release after consumption so this data object doesn't linger as
+    // a zombie reference into the next puzzle (the user might navigate away
+    // without triggering showContinuationOptions on the next wrong/good move,
+    // leaving the old data available to anything that reads without
+    // re-setting first).
+    window._deferredEngineLine = null;
   }
 }
 
@@ -16441,13 +16581,19 @@ async function showTacticEngineLine() {
     const chess = new Chess(fen);
     const firstMove = chess.move({ from: firstUci.substring(0,2), to: firstUci.substring(2,4), promotion: firstUci.length > 4 ? firstUci[4] : undefined });
     if (!firstMove) return;
-    // Apply the first move to gameEngine too
-    // L4: symmetric defensive check — if gameEngine is out of sync with
-    // `fen` (shouldn't happen since we sourced fen from gameEngine.fen(),
-    // but guard anyway), a rejected apply here would diverge gameEngine
-    // from the board and poison all subsequent user interactions.
-    const geResult = gameEngine.move({ from: firstUci.substring(0,2), to: firstUci.substring(2,4), promotion: firstUci.length > 4 ? firstUci[4] : undefined });
-    if (!geResult) return;
+    // EL3: DO NOT advance gameEngine here. Previously this path applied the
+    // first SF move to gameEngine too (L4 defensive sync), but that broke:
+    //   - exitEngineLine restored boardObj.position(gameEngine.fen()), which
+    //     landed the user on SF's first move instead of the tactic's final
+    //     position. The user expected to come back to where the tactic ended.
+    //   - startTacticContinuation reads gameEngine.fen() as contLine.baseFen,
+    //     so clicking "▶ Play Continuation" after Show engine line started
+    //     the continuation from SF's first move — opponent's reply came
+    //     from the wrong position, downstream SRS/advantage/queueing was
+    //     keyed off a stale baseline.
+    // buildEngineLine works entirely off `fen` + `firstMove` (built from the
+    // local chess instance above), so gameEngine staying at tactic-final is
+    // exactly what the rest of the engine-line flow expects.
     const restUci = uciMoves.slice(1).join(' ');
     buildEngineLine(fen, firstMove, restUci, cpWhite);
   } catch (e) {
@@ -16531,6 +16677,8 @@ function startContinuationMode() {
     };
     contLineBrowsing = false;
     renderContLine();
+    // EL15: release after consumption — see showDeferredEngineLine's comment.
+    window._deferredEngineLine = null;
   }
 
   // gameEngine already has the user's good move applied
