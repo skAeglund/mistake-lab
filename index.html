@@ -518,6 +518,37 @@
   .engine-line-nav .hint {
     font-size: 10px; color: var(--text-muted); margin-left: auto;
   }
+  /* Issue #13: inline copy-to-clipboard button for navigable lines that
+     don't have a full nav bar (repertoire cont, repertoire lead-up, and
+     note variations). The engine-line / cont-line / tactic-line buttons
+     reuse the existing .btn-ghost styling inside .engine-line-nav. */
+  .line-copy-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 11px;
+    color: var(--text-muted);
+    cursor: pointer;
+    margin-left: 4px;
+    line-height: 1.2;
+    vertical-align: middle;
+    font-family: inherit;
+  }
+  .line-copy-btn:hover:not(:disabled) {
+    background: rgba(255,255,255,0.05);
+    color: var(--text-primary);
+  }
+  .line-copy-btn:disabled {
+    cursor: default;
+    opacity: 0.75;
+  }
+  .note-copy-btn {
+    /* Tighter than the base — notes render at 12px and we want the
+       button to not dominate the line. */
+    font-size: 10px;
+    padding: 0 5px;
+  }
 
   /* ─── Analysis Mode ─── */
   .analysis-panel { display: flex; flex-direction: column; gap: 0; height: 100%; overflow: hidden; }
@@ -1612,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Add standard line navigation when clicking on clickable line in a position note, closes #11. ←/→ now step through the active variation the same way they step through an engine line: the just-clicked move gets a bold blue highlight, ← walks back one move per press down to the note's anchor position (then becomes a no-op), → walks forward to the last clickable move (no extension past human-authored line). Introduces noteActiveVarParent/Idx state, factors jumpBoardToNoteFen out of jumpToNoteMove so arrow-step and click share the same board-load path, and resets the state at every panel.innerHTML swap (close / edit / view re-render) so the pointer can't dangle on a detached DOM subtree. Keybind sits after repLeadUp/repCont and before engineLine/tacticLine/contLine so variation browse wins; still never engages during tactic/cont/rep drill modes because jumpToNoteMove is guarded there.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">In all navigable lines - add a small copy to clipboard button, closes #13. 📋 button added to every navigable line: engine line, continuation, tactic line, repertoire continuation, repertoire lead-up, and per-variation inside position notes. Copy produces clean single-line PGN movetext ("5... Nf6 6. Bg5 Be7" or "1. e4 e5 2. Nf3"), derived from the line's baseFen fullmove counter and side-to-move — no more newlines from copy-pasting the rendered UI. Clipboard API primary, hidden-textarea execCommand fallback for older mobile webviews. Button flashes ✓ for 1.2s on success (or ✕ on both-paths fail) then restores. Engine/cont/tactic buttons reuse btn-ghost styling in the existing nav bar; repCont / repLeadUp / note-variation get a smaller inline .line-copy-btn. Note-variation button only renders when the variation has at least one legal move (nothing to copy otherwise) and doesn't interfere with #11 arrow-key nav — it's a button element, not a .note-move, so the selectors skip it cleanly.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -12172,6 +12203,7 @@ function renderTacticLine() {
     <div class="engine-line-nav">
       <button class="btn btn-ghost btn-sm" onclick="tacticLineStep(-1)">‹</button>
       <button class="btn btn-ghost btn-sm" onclick="tacticLineStep(1)">›</button>
+      <button class="btn btn-ghost btn-sm" onclick="copyTacticLinePgn(this)" title="Copy line as PGN" aria-label="Copy line as PGN">📋</button>
       <span class="hint">← → to step</span>
     </div>
   `;
@@ -13306,6 +13338,135 @@ function uciToSan(fen, uci) {
   }
 }
 
+// ─── Issue #13: Copy-to-clipboard helpers for navigable lines ───
+//
+// buildPgnMoveText turns a starting FEN and a flat SAN array into a
+// single-line PGN movetext (no headers, no newlines, no result token):
+//   "1. e4 e5 2. Nf3 Nc6"  for a line from the standard start
+//   "5... Nf6 6. Bg5 Be7"  for a line starting on Black's move 5
+// Uses the FEN's fullmove counter (field 5) and side-to-move (field 1)
+// as the starting number and color; if baseFen is null, assumes move 1
+// white-to-move. Alternatives/variations are not included — each line
+// type's copy function passes its own active-path SANs.
+function buildPgnMoveText(baseFen, sans) {
+  if (!sans || sans.length === 0) return '';
+  const fields = baseFen ? baseFen.split(' ') : [];
+  let fullmove = parseInt(fields[5], 10) || 1;
+  let isWhiteTurn = (fields[1] || 'w') === 'w';
+  let out = '';
+  for (let i = 0; i < sans.length; i++) {
+    const san = sans[i];
+    if (!san) continue;
+    if (isWhiteTurn) {
+      out += (out ? ' ' : '') + fullmove + '. ' + san;
+    } else if (i === 0) {
+      out += fullmove + '... ' + san;
+    } else {
+      out += ' ' + san;
+    }
+    if (!isWhiteTurn) fullmove++;
+    isWhiteTurn = !isWhiteTurn;
+  }
+  return out;
+}
+
+// Copy `text` via the Clipboard API, with an execCommand fallback for
+// contexts where the modern API is unavailable (old iOS webviews, etc.).
+// btnEl is the button the user clicked — briefly swaps its contents to
+// "✓" for visual confirmation, then restores.
+async function copyLineToClipboard(text, btnEl) {
+  if (!text) return;
+  let ok = false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    }
+  } catch { /* fall through to execCommand */ }
+  if (!ok) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      // Off-screen but not display:none (execCommand needs it in the
+      // layout tree to select).
+      ta.style.position = 'fixed';
+      ta.style.top = '0';
+      ta.style.left = '0';
+      ta.style.opacity = '0';
+      ta.style.pointerEvents = 'none';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+    } catch (err) {
+      console.warn('[Copy] failed:', err);
+    }
+  }
+  if (btnEl) {
+    const prev = btnEl.innerHTML;
+    btnEl.innerHTML = ok ? '✓' : '✕';
+    btnEl.disabled = true;
+    setTimeout(() => {
+      if (btnEl.isConnected) { btnEl.innerHTML = prev; btnEl.disabled = false; }
+    }, 1200);
+  }
+}
+
+// Per-line copy helpers. Each reads its own global state (no DOM
+// scraping — the data model is authoritative). Inline-SAN strings are
+// always clean (classification badges live in separate spans), so a
+// simple .map(mv => mv.san) is enough.
+
+function copyEngineLinePgn(btn) {
+  if (!engineLine) return;
+  const sans = [];
+  const pathLen = getActivePathLength();
+  for (let i = 0; i < pathLen; i++) {
+    const mv = getActiveMoveAt(i);
+    if (mv && mv.san) sans.push(mv.san);
+  }
+  copyLineToClipboard(buildPgnMoveText(engineLine.baseFen, sans), btn);
+}
+
+function copyContLinePgn(btn) {
+  if (!contLine) return;
+  const sans = contLine.moves.map(mv => mv && mv.san).filter(Boolean);
+  copyLineToClipboard(buildPgnMoveText(contLine.baseFen, sans), btn);
+}
+
+function copyTacticLinePgn(btn) {
+  if (!tacticLine) return;
+  const sans = tacticLine.moves.map(mv => mv && mv.san).filter(Boolean);
+  copyLineToClipboard(buildPgnMoveText(tacticLine.baseFen, sans), btn);
+}
+
+function copyRepContLinePgn(btn) {
+  if (!repContLine) return;
+  const sans = repContLine.moves.map(mv => mv && mv.san).filter(Boolean);
+  copyLineToClipboard(buildPgnMoveText(repContLine.baseFen, sans), btn);
+}
+
+function copyRepLeadUpLinePgn(btn) {
+  if (!repLeadUpLine) return;
+  const sans = repLeadUpLine.moves.map(mv => mv && mv.san).filter(Boolean);
+  copyLineToClipboard(buildPgnMoveText(repLeadUpLine.baseFen, sans), btn);
+}
+
+// Copy the legal prefix of a note-embedded clickable variation. The
+// button is rendered inside the .note-variation span, so walk up to
+// the wrapper and collect SANs from every clickable move (the non-
+// clickable struck-through moves past an illegal token are excluded —
+// they wouldn't round-trip as valid PGN).
+function copyNoteVariationPgn(btn) {
+  if (!btn) return;
+  const wrap = btn.closest('.note-variation');
+  if (!wrap) return;
+  const sans = Array.from(wrap.querySelectorAll('.note-move.clickable'))
+    .map(el => el.textContent.trim()).filter(Boolean);
+  copyLineToClipboard(buildPgnMoveText(noteAnchorFen, sans), btn);
+}
+
 // ─── Engine Line Browser ───
 function buildEngineLine(baseFen, userMove, contUci, cpWhite) {
   // Build a sequence: user's move + engine continuation
@@ -13813,6 +13974,7 @@ function renderEngineLine() {
       <button class="btn btn-ghost btn-sm" onclick="lineStep(-1)">‹</button>
       <button class="btn btn-ghost btn-sm" onclick="lineStep(1)">›</button>
       <button class="btn btn-ghost btn-sm" onclick="exitEngineLine()">Back</button>
+      <button class="btn btn-ghost btn-sm" onclick="copyEngineLinePgn(this)" title="Copy line as PGN" aria-label="Copy line as PGN">📋</button>
       <span class="hint">← → to step · make a move to branch</span>
     </div>
   `;
@@ -14323,6 +14485,7 @@ function renderContLine() {
       <button class="btn btn-ghost btn-sm" onclick="contLineStep(-1)">‹</button>
       <button class="btn btn-ghost btn-sm" onclick="contLineStep(1)">›</button>
       ${contLineBrowsing ? '<button class="btn btn-ghost btn-sm" onclick="contLineGoToEnd()">Back to end</button>' : ''}
+      <button class="btn btn-ghost btn-sm" onclick="copyContLinePgn(this)" title="Copy line as PGN" aria-label="Copy line as PGN">📋</button>
       ${browsingHint}
     </div>
     ${contStopHtml}
@@ -19848,6 +20011,8 @@ function renderRepContLine() {
       : (i > repContLine.currentIdx ? 'opacity:0.35;cursor:pointer;' : 'opacity:0.7;cursor:pointer;');
     html += `<span style="${style}" onclick="repContLineGoTo(${i})">${mv.san}</span> `;
   }
+  // Issue #13: trailing copy-to-clipboard button (no dedicated nav bar here).
+  html += `<button class="line-copy-btn" onclick="copyRepContLinePgn(this)" title="Copy line as PGN" aria-label="Copy line as PGN">📋</button>`;
   html += '</div>';
   cont.innerHTML = html;
 }
@@ -20452,6 +20617,9 @@ function renderRepLeadUpLine() {
   const devMoveNum = Math.floor(moves.length / 2) + 1;
   if (lastIsWhite) html += `<span style="opacity:0.4;font-size:10px;">${devMoveNum}.</span> `;
   html += `<span style="font-weight:700;color:var(--yellow);">?</span>`;
+  // Issue #13: copy button — exports just the known lead-up moves (the
+  // "?" deviation isn't a known SAN, so it's intentionally excluded).
+  html += ` <button class="line-copy-btn" onclick="copyRepLeadUpLinePgn(this)" title="Copy lead-up as PGN" aria-label="Copy lead-up as PGN">📋</button>`;
   html += '</div>';
   cont.innerHTML = html;
 }
@@ -20863,7 +21031,14 @@ function renderVariationTokens(tokens) {
       pieces.push(`<span class="note-result">${escHtml(tok.text)}</span>`);
     }
   }
-  return `<span class="note-variation">${pieces.join(' ')}</span>`;
+  // Issue #13: per-variation copy button. Only attach if there's at least
+  // one clickable (legal) move to copy — an all-illegal variation has
+  // nothing to export as PGN.
+  const hasClickable = tokens.some(t => t.type === 'move' && t.clickable);
+  const copyBtn = hasClickable
+    ? ` <button class="line-copy-btn note-copy-btn" onclick="copyNoteVariationPgn(this)" title="Copy variation as PGN" aria-label="Copy variation as PGN">📋</button>`
+    : '';
+  return `<span class="note-variation">${pieces.join(' ')}${copyBtn}</span>`;
 }
 
 // Shared core used by both click-to-jump and ←/→ variation stepping.
