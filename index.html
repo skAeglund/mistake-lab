@@ -1607,7 +1607,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">RepertoireCheck: tear down prior drill before starting a new one in startRepertoireDrill. startRepertoireReview already did this to prevent savedFilteredMistakes from being overwritten with the previous drill queue (losing the original non-drill filteredMistakes). startRepertoireDrill was missing the symmetric guard. Defensive — panel is hidden during drill so the Drill button is usually unreachable, but the symmetry with startRepertoireReview is worth keeping.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Voice scan: fix 11 findings in voice/TTS subsystem. V1/V2 remove dead repertoire-continuation branches in voiceExecuteMove (unreachable via gate). V3 add voiceStart hook to startTacticContinuation. V4 add voiceStart to practice retry path. V5 logout now tears down voice and clears continuation/advantage/silent/wrongMove flags before state reset. V6 guard advanceContinuation post-TTS state checks (continuation still live, index unchanged, item exists, gameEngine not null, turn matches) against user interaction during the 0.5–1.5s TTS await that previously destroyed drills. V7 add voiceStop to six end-of-continuation paths. V8 add voiceStop to enterAnalysisMode and enterOpeningFilter. V9 serialize voiceHandleAlternatives in onresult via async IIFE (burst speech could race and overwrite voicePendingMove). V10 clear queued premove in voiceExecuteMove. V12 add voiceUnsupported sentinel so the unavailable feedback doesn't re-fire every continuation entry on Safari/Firefox. V15 await voiceSpeak at repertoire deviation alert for consistency.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2264,6 +2264,7 @@ let voicePendingMove = null;    // SAN string awaiting voice confirmation
 let voiceLastOpponentSan = null; // last opponent move SAN for replay
 let voiceSelectedVoice = null;  // SpeechSynthesisVoice
 let voiceBtKeepAliveCtx = null; // AudioContext for Bluetooth anti-sleep
+let voiceUnsupported = false;   // V12: set when SpeechRecognition is missing; short-circuits subsequent voiceStart attempts to prevent feedback spam every continuation entry
 const voiceSettings = {
   enabled: false,
   confirm: true,
@@ -6373,6 +6374,7 @@ function enterAnalysisMode() {
   if (engineLine) exitEngineLine();
   if (continuationMode) {
     continuationMode = false;
+    if (voiceMode) voiceStop(); // V8: mode-switch teardown
     contLine = null;
     clearContSession();
     contLineBrowsing = false;
@@ -7736,9 +7738,10 @@ function voiceStopBtKeepAlive() {
 
 // ── Recognition init ──
 function voiceInitRecognition() {
-  if (voiceRecognition) return;
+  if (voiceRecognition || voiceUnsupported) return;
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) {
+    voiceUnsupported = true; // V12: one-shot failure — skip re-checks this session
     console.warn('Voice: SpeechRecognition not supported');
     showFeedback('info', '🎙 Voice unavailable', 'Speech recognition is not supported in this browser. Use Chrome or Edge.');
     return;
@@ -7767,15 +7770,23 @@ function voiceInitRecognition() {
     } catch(e) { console.log('Voice: phrase biasing failed:', e.message); }
   }
   voiceRecognition.onresult = (event) => {
-    for (let i = event.resultIndex; i < event.results.length; i++) {
-      if (!event.results[i].isFinal) continue;
-      const alts = [];
-      for (let j = 0; j < event.results[i].length; j++) {
-        const alt = event.results[i][j];
-        if (alt.transcript.trim()) alts.push({ text: alt.transcript.trim(), confidence: alt.confidence });
+    // V9: serialize multi-result processing. Burst speech can deliver more than
+    // one final result in a single onresult event — previously each alts batch
+    // fired voiceHandleAlternatives concurrently, so two pending-confirmation
+    // flows could overwrite each other's voicePendingMove. User says "yes" and
+    // confirms whichever one happened to win the race. Await each call so
+    // pending-move state and TTS utterances stay ordered.
+    (async () => {
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        if (!event.results[i].isFinal) continue;
+        const alts = [];
+        for (let j = 0; j < event.results[i].length; j++) {
+          const alt = event.results[i][j];
+          if (alt.transcript.trim()) alts.push({ text: alt.transcript.trim(), confidence: alt.confidence });
+        }
+        if (alts.length > 0) await voiceHandleAlternatives(alts);
       }
-      if (alts.length > 0) voiceHandleAlternatives(alts);
-    }
+    })();
   };
   voiceRecognition.onerror = (event) => {
     if (event.error === 'no-speech' || event.error === 'aborted') return;
@@ -7895,19 +7906,22 @@ function voiceExecuteMove(san) {
   if (!continuationMode && !advantageMode) return;
   const move = gameEngine.move(san);
   if (!move) { voiceSpeak('Invalid move'); return; }
+  // V10: a queued premove (set via onDrop during opponent's turn) was bound to
+  // the pre-voice-move position; it's stale now. Without this clear, the premove
+  // and its highlights persist until advanceContinuation tries to execute it
+  // after the opponent's reply — typically illegal in the new position, cleared
+  // then, but the visual highlight leaks through the interim.
+  clearPremove();
   boardObj.position(gameEngine.fen(), false);
   showLastMoveHighlight(move.from, move.to);
   showCheckHighlight(gameEngine);
   clearArrows();
-  // Route through the same path as onDrop
+  // Route through the same path as onDrop. The gate above restricts this to
+  // continuation/advantage/practice — repertoire continuation is a separate
+  // subsystem that voice doesn't currently support (voiceHandleAlternatives
+  // auto-stops voice when continuationMode goes false).
   currentAttempts++;
-  if (repContRetrying) {
-    evaluateRepContRetryMove(move.from, move.to, move);
-  } else if (repContActive) {
-    evaluateRepertoireContinuationMove(move.from, move.to, move);
-  } else {
-    evaluateMove(move.from, move.to, move);
-  }
+  evaluateMove(move.from, move.to, move);
 }
 
 // ── Start / stop / toggle voice mode ──
@@ -8044,6 +8058,21 @@ function logout() {
   // Flush any pending progress sync
   clearTimeout(syncDebounceTimer);
   if (gistData && isGistConfigured()) syncToGist();
+
+  // V5: tear down voice and continuation flags BEFORE clearing user/game state.
+  // Without this: the recognizer keeps auto-restarting via onend, the BT keep-
+  // alive oscillator keeps spinning, the floating 🎙 indicator stays visible
+  // over the login screen, and voiceHandleAlternatives' gate (!continuationMode
+  // && !advantageMode && !contWrongMovePending) may still return early because
+  // the continuation flags were never cleared, so spoken input keeps reaching
+  // voiceExecuteMove which calls gameEngine.move against the prior user's
+  // position. Stop voice first, then clear the continuation gates so any
+  // transient onresult in flight doesn't slip through.
+  if (voiceMode) voiceStop();
+  continuationMode = false;
+  advantageMode = false;
+  silentContinuation = false;
+  contWrongMovePending = false;
 
   appShown = false;
   currentUsername = '';
@@ -9257,6 +9286,7 @@ function enterOpeningFilter() {
   cleanupPracticeCont();
   continuationMode = false;
   silentContinuation = false;
+  if (voiceMode) voiceStop(); // V8: mode-switch teardown
   contLine = null;
   clearContSession();
   contLineBrowsing = false;
@@ -12524,7 +12554,12 @@ async function evaluateMove(from, to, move) {
           const spoken = repMoveSan
             ? `Repertoire deviation. Study move is ${voiceMoveToSpeech(repMoveSan)}.`
             : `Repertoire deviation.`;
-          voiceSpeak(spoken);
+          // V15: await for consistency with every other voiceSpeak call site.
+          // evaluateMove is already async and none of its callers await its
+          // return, so this changes the promise resolve timing without altering
+          // external behavior — voiceSpeaking is set true synchronously inside
+          // voiceSpeak so mic echo suppression works either way.
+          await voiceSpeak(spoken);
         }
         return;
       }
@@ -15244,6 +15279,7 @@ function stopAndReviewContinuation() {
   recordPracticeResult(evalToResult(afterMoveCpWhite), afterMoveCpWhite);
   continuationMode = false;
   silentContinuation = false;
+  if (voiceMode) voiceStop(); // V7: end-of-continuation teardown
   // Finding #10: clear the wrong-move-pending flag on continuation teardown.
   // Normally tryAgainFromContinuationLine clears it, but a user could skip
   // that by clicking Stop & Review (if still reachable) or by allowing the
@@ -16353,6 +16389,12 @@ function startTacticContinuation() {
   contLineBrowsing = false;
   continuationMode = true;
   continuationEvalBarOn = false; // #4: eval bar always starts OFF in continuation
+  // V3: match the other three continuation entry points (startContinuationMode,
+  // launchFilterPractice, startAdvantageContinuation) — voice was missed here,
+  // so users with voice enabled got no voice support during post-tactic
+  // continuation. loadPosition calls voiceStop() on tactic entry, so voice is
+  // reliably off until this hook fires.
+  if (voiceSettings.enabled) voiceStart();
   showMaiaControls();
   updateEvalBar();
   // Check highlight: the tactic may have delivered check — show it before the
@@ -16513,6 +16555,7 @@ async function advanceContinuation(contUci) {
     const wasSilent = silentContinuation;
     continuationMode = false;
     silentContinuation = false;
+    if (voiceMode) voiceStop(); // V7: end-of-continuation teardown
     clearContSession();
     hideMaiaControls();
     hideContStopReview();
@@ -16587,6 +16630,7 @@ async function advanceContinuation(contUci) {
         recordPracticeResult(evalToResult(afterMoveCpWhite), afterMoveCpWhite);
         continuationMode = false;
         silentContinuation = false;
+        if (voiceMode) voiceStop(); // V7: end-of-continuation teardown
         clearContSession();
         hideContStopReview();
         hideMaiaControls();
@@ -16645,6 +16689,7 @@ async function advanceContinuation(contUci) {
     recordPracticeResult(evalToResult(afterMoveCpWhite), afterMoveCpWhite);
     continuationMode = false;
     silentContinuation = false;
+    if (voiceMode) voiceStop(); // V7: end-of-continuation teardown
     clearContSession();
     hideMaiaControls();
     hideContStopReview();
@@ -16670,7 +16715,27 @@ async function advanceContinuation(contUci) {
   // Voice mode: announce opponent's move via TTS
   if (voiceMode) {
     voiceLastOpponentSan = result.san;
+    // V6: the await below yields the event loop for 0.5–1.5s. During that
+    // window the user can (a) drop a piece on the board — onDrop→evaluateMove
+    // mutates gameEngine and flips turn, (b) click Next/Prev — loadPosition
+    // runs voiceStop which cancels the TTS and changes currentMistakeIdx,
+    // (c) click Stop & Review / enter analysis / enter opening filter — these
+    // set continuationMode=false. Without a post-TTS guard, the fall-through
+    // game_over (line 16694) and !userTurn (line 16733) checks read stale
+    // state — in advantage mode they fire finishAdvantage('interrupted'),
+    // destroying the drill; in practice mode they call recordPracticeResult
+    // and end the session prematurely. Capture the pre-TTS position identity
+    // and re-validate on resume; the user's interaction path now owns the
+    // drill state, so bail silently.
+    const v6SessionIdx = currentMistakeIdx;
     await voiceSpeak(voiceMoveToSpeech(result.san));
+    if (!continuationMode) return;
+    if (currentMistakeIdx !== v6SessionIdx) return;
+    const v6M = filteredMistakes[currentMistakeIdx];
+    if (!v6M) return;
+    if (!gameEngine) return; // defensive — clearBoard can null it; guard 2 should catch first but protect against future regressions
+    const v6ExpectedTurn = v6M.playerColor === 'white' ? 'w' : 'b';
+    if (gameEngine.turn() !== v6ExpectedTurn) return;
   }
 
   // Check if game is over after opponent's move
@@ -16686,6 +16751,7 @@ async function advanceContinuation(contUci) {
     const wasSilent2 = silentContinuation;
     continuationMode = false;
     silentContinuation = false;
+    if (voiceMode) voiceStop(); // V7: end-of-continuation teardown
     clearContSession();
     hideMaiaControls();
     hideContStopReview();
@@ -16720,6 +16786,7 @@ async function advanceContinuation(contUci) {
     const wasSilent3 = silentContinuation;
     continuationMode = false;
     silentContinuation = false;
+    if (voiceMode) voiceStop(); // V7: end-of-continuation teardown
     clearContSession();
     hideMaiaControls();
     hideContStopReview();
@@ -17003,6 +17070,13 @@ function retryPosition() {
     contLine = { baseFen: m.fenBefore, moves: [], currentIdx: -1 };
     continuationMode = true;
     silentContinuation = true;
+    // V4: practice retry rebuilds continuation state manually instead of going
+    // through loadPosition — voiceStart() was missed here. After the first
+    // practice game ends, voice auto-stops on the next speech event
+    // (voiceHandleAlternatives gate), so "▶ Play again" would silently start
+    // without voice even with voiceSettings.enabled=true. Match the other
+    // continuation entry points.
+    if (voiceSettings.enabled) voiceStart();
     updateEvalBar();
 
     const fenParts = m.fenBefore.split(' ');
