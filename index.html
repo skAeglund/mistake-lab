@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">In all navigable lines - add a small copy to clipboard button, closes #13. 📋 button added to every navigable line: engine line, continuation, tactic line, repertoire continuation, repertoire lead-up, and per-variation inside position notes. Copy produces clean single-line PGN movetext ("5... Nf6 6. Bg5 Be7" or "1. e4 e5 2. Nf3"), derived from the line's baseFen fullmove counter and side-to-move — no more newlines from copy-pasting the rendered UI. Clipboard API primary, hidden-textarea execCommand fallback for older mobile webviews. Button flashes ✓ for 1.2s on success (or ✕ on both-paths fail) then restores. Engine/cont/tactic buttons reuse btn-ghost styling in the existing nav bar; repCont / repLeadUp / note-variation get a smaller inline .line-copy-btn. Note-variation button only renders when the variation has at least one legal move (nothing to copy otherwise) and doesn't interfere with #11 arrow-key nav — it's a button element, not a .note-move, so the selectors skip it cleanly.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Continuation Practice End - Add option to open full game in analysis in Lichess, closes #10. ♟ Analyze on Lichess button added to every continuation-end feedback surface (Stop & Review, advantage drill end, checkmate/draw/unexpected-turn natural ends) plus the Game Review summary card and the Review Complete state. Clicking POSTs a PGN to https://lichess.org/paste via a dynamic hidden form targeting _blank — Lichess has no GET-URL PGN import, POSTing /paste is the only supported path. PGN wraps contLine.moves with [Event]/[Site]/[Result "*"] headers; when contLine.baseFen ≠ standard start, [Variant "From Position"] + [FEN ...] + [SetUp "1"] are added per PGN 19.6 so Lichess initializes from the correct position. Six continuation-end reviewBtn constructions consolidated into continuationEndActionsHtml() — side effect: non-silent natural ends now also pick up the Lichess button (previously only the practiceEndBtns row showed).</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -13467,6 +13467,91 @@ function copyNoteVariationPgn(btn) {
   copyLineToClipboard(buildPgnMoveText(noteAnchorFen, sans), btn);
 }
 
+// ─── Issue #10: Open continuation practice on Lichess ───
+//
+// Lichess has no GET-URL PGN-import endpoint — POSTing to /paste is the
+// only supported path. Build a full PGN (with "From Position" headers
+// when the continuation didn't start from the standard start) and submit
+// a hidden form in a new tab.
+
+const LICHESS_STANDARD_START_FEN =
+  'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+
+function buildContinuationPgn() {
+  if (!contLine || !contLine.moves || contLine.moves.length === 0) return '';
+  const baseFen = contLine.baseFen || LICHESS_STANDARD_START_FEN;
+  const sans = contLine.moves.map(mv => mv && mv.san).filter(Boolean);
+  if (sans.length === 0) return '';
+  let headers =
+    `[Event "MistakeLab continuation"]\n` +
+    `[Site "https://skaeglund.github.io/mistake-lab"]\n` +
+    `[Result "*"]\n`;
+  if (baseFen !== LICHESS_STANDARD_START_FEN) {
+    // PGN 19.6: SetUp "1" is required when FEN is present so the parser
+    // knows to initialize from FEN rather than the standard start.
+    headers +=
+      `[Variant "From Position"]\n` +
+      `[FEN "${baseFen}"]\n` +
+      `[SetUp "1"]\n`;
+  }
+  const moveText = buildPgnMoveText(baseFen, sans) + ' *';
+  return headers + '\n' + moveText;
+}
+
+function submitPgnToLichess(pgn) {
+  if (!pgn) return false;
+  try {
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = 'https://lichess.org/paste';
+    form.target = '_blank';
+    form.rel = 'noopener noreferrer';
+    form.style.display = 'none';
+    const input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = 'pgn';
+    input.value = pgn;
+    form.appendChild(input);
+    document.body.appendChild(form);
+    form.submit();
+    // Give the browser a moment to consume the form before removing it.
+    setTimeout(() => { if (form.isConnected) form.remove(); }, 2000);
+    return true;
+  } catch (err) {
+    console.warn('[Lichess] submit failed:', err);
+    return false;
+  }
+}
+
+function openContinuationOnLichess(btn) {
+  const pgn = buildContinuationPgn();
+  if (!pgn) return;
+  const ok = submitPgnToLichess(pgn);
+  if (btn) {
+    const prev = btn.innerHTML;
+    btn.innerHTML = ok ? '↗ Opening…' : '✕ Failed';
+    btn.disabled = true;
+    setTimeout(() => {
+      if (btn.isConnected) { btn.innerHTML = prev; btn.disabled = false; }
+    }, 1500);
+  }
+}
+
+// Shared end-of-continuation actions row: "📋 Review Game" (only if
+// any moves carry classification data) + "♟ Analyze on Lichess"
+// (whenever any moves exist). Replaces the per-site reviewBtn
+// construction at each of the six continuation-end feedback points
+// so the Lichess button lands everywhere in one place.
+function continuationEndActionsHtml() {
+  if (!contLine || !contLine.moves || contLine.moves.length === 0) return '';
+  const hasAnnotated = contLine.moves.some(mv => mv.classification);
+  const reviewBtn = hasAnnotated
+    ? `<button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="startContLineReview()">📋 Review Game</button>`
+    : '';
+  const lichessBtn = `<button class="btn btn-ghost btn-sm" style="font-size:12px;" onclick="openContinuationOnLichess(this)" title="Open the full line in Lichess analysis">♟ Analyze on Lichess</button>`;
+  return `<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">${reviewBtn}${lichessBtn}</div>`;
+}
+
 // ─── Engine Line Browser ───
 function buildEngineLine(baseFen, userMove, contUci, cpWhite) {
   // Build a sequence: user's move + engine continuation
@@ -15515,11 +15600,8 @@ function finishAdvantage(outcome) {
 
   const invalidateBtn = `<div style="margin-top:6px;"><button class="btn btn-ghost btn-sm" style="font-size:10px;color:var(--text-muted);border-color:var(--border);" onclick="handleBadMistake()">✕ Bad position</button></div>`;
 
-  // Build review button if we have annotated moves
-  const hasAnnotatedMoves = contLine && contLine.moves.some(mv => mv.classification);
-  const reviewBtn = hasAnnotatedMoves
-    ? `<div style="margin-top:8px;"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="startContLineReview()">📋 Review Game</button></div>`
-    : '';
+  // Issue #10: consolidated Review Game + Analyze on Lichess actions row.
+  const actionsHtml = continuationEndActionsHtml();
 
   showColorFeedback(
     outcome === 'victory' ? '#4caf50'
@@ -15528,7 +15610,7 @@ function finishAdvantage(outcome) {
     outcome === 'victory' ? 'rgba(76,175,80,0.08)'
       : outcome === 'interrupted' ? 'rgba(66,133,244,0.08)'
       : 'rgba(239,95,95,0.08)',
-    title, body + srsInfo + reviewBtn + invalidateBtn
+    title, body + srsInfo + actionsHtml + invalidateBtn
   );
 
   document.getElementById('btnRetry').classList.remove('hidden');
@@ -15626,13 +15708,15 @@ function stopAndReviewContinuation() {
   // silently bails and the click does nothing. All other end-of-continuation
   // call sites (finishContinuation checkmate/draw, turn-mismatch) already
   // include this guard; only this Stop & Review path was missing it.
-  const reviewBtn = contLine && contLine.moves.some(mv => mv.classification)
-    ? `<div style="margin-top:8px;"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="startContLineReview()">📋 Review Game</button></div>`
-    : '';
+  // Issue #10: consolidated Review Game + Analyze on Lichess actions row.
+  // Finding #8 preserved: continuationEndActionsHtml returns '' when the
+  // contLine has no moves, so startContLineReview (which bails when there
+  // are no annotations) can't be reached from a stale button.
+  const actionsHtml = continuationEndActionsHtml();
   showColorFeedback('var(--accent)', 'rgba(66,133,244,0.08)',
     'Continuation ended',
     `${moveCount} moves played.` +
-    reviewBtn +
+    actionsHtml +
     practiceEndBtns()
   );
 
@@ -15865,6 +15949,14 @@ function renderContLineReviewSummary(data) {
   }
 
   const keyMoveCount = data.keyMoves.length;
+  // Issue #10: "Analyze on Lichess" available in the Game Review card so
+  // users can open the same line they're reviewing in Lichess analysis.
+  // Hardcoded button here (not continuationEndActionsHtml) because the
+  // summary card's primary action is ▶ Review key moves, which is distinct
+  // from the Review Game button fired by the continuation-end feedback.
+  const lichessBtn = (contLine && contLine.moves && contLine.moves.length > 0)
+    ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="openContinuationOnLichess(this)" title="Open the full line in Lichess analysis">♟ Lichess</button>`
+    : '';
   const summaryHtml = `
     <div class="feedback-box" style="background:var(--bg-card);border-left:3px solid var(--accent);">
       <div class="feedback-title" style="color:var(--accent)">📋 Game Review</div>
@@ -15873,12 +15965,13 @@ function renderContLineReviewSummary(data) {
         <div style="font-size:20px;font-weight:700;margin:4px 0;">${data.accuracy}%</div>
         <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">${data.totalUserMoves} moves analyzed</div>
         <div style="font-size:12px;line-height:1.8;">${tallyHtml}</div>
-        ${keyMoveCount > 0
-          ? `<div style="margin-top:10px;">
-              <button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="reviewNextKeyMove()">▶ Review ${keyMoveCount} key move${keyMoveCount > 1 ? 's' : ''}</button>
-            </div>`
-          : `<div style="margin-top:8px;font-size:12px;color:var(--text-muted);">No mistakes to review — clean play!</div>`
-        }
+        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+          ${keyMoveCount > 0
+            ? `<button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="reviewNextKeyMove()">▶ Review ${keyMoveCount} key move${keyMoveCount > 1 ? 's' : ''}</button>`
+            : `<span style="font-size:12px;color:var(--text-muted);">No mistakes to review — clean play!</span>`
+          }
+          ${lichessBtn}
+        </div>
         <div style="margin-top:6px;font-size:11px;color:var(--text-muted);">Use ← → to step through all moves</div>
       </div>
     </div>
@@ -16636,13 +16729,20 @@ function handleReviewRetryResult(wpDrop, move, bestMoveSan, isExactBest) {
 
 function showReviewComplete() {
   const container = document.getElementById('feedbackContainer');
+  // Issue #10: "Analyze on Lichess" also available here — the user has just
+  // finished reviewing every key move, which is another natural moment to
+  // export the full line.
+  const lichessBtn = (contLine && contLine.moves && contLine.moves.length > 0)
+    ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="openContinuationOnLichess(this)" title="Open the full line in Lichess analysis">♟ Lichess</button>`
+    : '';
   container.innerHTML = `
     <div class="feedback-box" style="background:var(--bg-card);border-left:3px solid var(--accent);">
       <div class="feedback-title" style="color:var(--accent)">Review Complete</div>
       <div class="feedback-text">
         <div>All key moves reviewed. Use ← → to browse the full line.</div>
-        <div style="margin-top:8px;">
+        <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
           <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="startContLineReview()">↺ Start over</button>
+          ${lichessBtn}
         </div>
       </div>
     </div>
@@ -16885,10 +16985,11 @@ async function advanceContinuation(contUci) {
     clearContSession();
     hideMaiaControls();
     hideContStopReview();
-    const reviewBtn = wasSilent && contLine && contLine.moves.some(mv => mv.classification)
-      ? '<div style="margin-top:8px;"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="startContLineReview()">📋 Review Game</button></div>'
-      : '';
-    const endBtns = reviewBtn + practiceEndBtns();
+    // Issue #10: unified Review Game + Analyze on Lichess actions row.
+    // Review Game appears only when classifications exist (silent mode
+    // populates them); Analyze on Lichess appears whenever moves exist,
+    // so non-silent checkmate/draw ends now pick up the Lichess option too.
+    const endBtns = continuationEndActionsHtml() + practiceEndBtns();
     if (gameEngine.in_checkmate()) {
       recordPracticeResult('win', null);
       showFeedback('correct', 'Checkmate!', 'You delivered checkmate!' + endBtns);
@@ -17082,10 +17183,9 @@ async function advanceContinuation(contUci) {
     hideMaiaControls();
     hideContStopReview();
     const m = filteredMistakes[currentMistakeIdx];
-    const reviewBtn2 = wasSilent2 && contLine && contLine.moves.some(mv => mv.classification)
-      ? '<div style="margin-top:8px;"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="startContLineReview()">📋 Review Game</button></div>'
-      : '';
-    const endBtns2 = reviewBtn2 + practiceEndBtns();
+    // Issue #10: unified actions row (Review Game when classifications exist,
+    // Analyze on Lichess whenever moves exist).
+    const endBtns2 = continuationEndActionsHtml() + practiceEndBtns();
     if (gameEngine.in_checkmate()) {
       recordPracticeResult('loss', null);
       showFeedback('wrong', 'Checkmated', 'The opponent delivered checkmate.' + endBtns2);
@@ -17116,10 +17216,9 @@ async function advanceContinuation(contUci) {
     clearContSession();
     hideMaiaControls();
     hideContStopReview();
-    const reviewBtn3 = wasSilent3 && contLine && contLine.moves.some(mv => mv.classification)
-      ? '<div style="margin-top:8px;"><button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="startContLineReview()">📋 Review Game</button></div>'
-      : '';
-    showFeedback('info', 'Continuation ended', 'Unexpected turn.' + reviewBtn3 + practiceEndBtns());
+    // Issue #10: unified actions row (Review Game when classifications exist,
+    // Analyze on Lichess whenever moves exist).
+    showFeedback('info', 'Continuation ended', 'Unexpected turn.' + continuationEndActionsHtml() + practiceEndBtns());
     if (wasSilent3) renderContLine();
     document.getElementById('btnRetry').classList.remove('hidden');
     document.getElementById('btnHint').classList.add('hidden');
