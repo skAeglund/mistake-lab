@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hint M3: hide btnHint in revealRepertoireAnswer. After the user fails a repertoire drill (3 wrong attempts, or explicit "Show answer"), revealRepertoireAnswer advances gameEngine to the POST-repertoire-move position (20374 `gameEngine.move(expected.san, …)`) and shows the answer feedback. btnHint was still visible from the drill phase; pressing H calls showHint's repertoire branch with `m.repertoireMove.uci` (the move that was just played) and paints `.square-hint` on its from-square — which is now empty on the displayed board because the piece already moved to the to-square. Fix: add `btnHint.classList.add('hidden')` and clearHintHighlights right after the bestMoveArrow is drawn. Paired re-shows already exist: showRepContPrompt at 20644-20645 restores fresh-state btnHint when the user clicks "▶ Continue (random line)" / "▶ All variations" and advanceRepertoireContinuation prompts for the next trie move; Next → loadPosition also re-shows via the repertoire branch at 11540-11545. Matches the end-of-drill hide pattern in finishTacticComplete (12387).</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hint M4: re-apply hint visuals in exitAnalysisMode's non-tactic non-review branch. enterAnalysisMode snapshots hint state only for m.type === 'tactic' (6616–6652); mistake / repertoire / practice items fall through to the else branch at 6862. clearBoardOverlays there wipes `.square-hint` and hintArrow visuals, but hintLevel / hintMove / hintUsed scalars survive. Post-exit the user sees a "💡 Hint (2/2)" blue-tinted button (if level 1) or a disabled "💡 Hint" (if level 2) with NO matching board visual. Level 2 is the real bug: the top-of-showHint guard at 6339 (`if (hintLevel >= 2) return;`) silently swallows further H presses, stranding the user with no way to resurface the hint short of Retry/Prev/Next. Fix: after the existing clearBoardOverlays + showCheckHighlight + startPreAnalysis, re-apply `.square-hint` on hintMove's from-square and reconstruct hintArrow if hintLevel >= 2 — mirrors the tactic-branch restore at 6843–6848. Stale-hint guard: for repContActive / mid-line practice the stored hintMove was computed for a position past m.fenBefore, and the else branch resets gameEngine to m.fenBefore — so fromSq may not hold a piece. gameEngine.get(fromSq) test detects this and fully resets hint state + button styling rather than painting a misleading arrow. No snapshot added on entry because the scalars never mutate in-place (unlike tacticLine which is deep-cloned); the live values are authoritative.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -6872,6 +6872,37 @@ function exitAnalysisMode() {
       showCheckHighlight(gameEngine);
       // Restart pre-analysis
       startPreAnalysis(m.fenBefore);
+      // M4: re-apply progressive hint visuals — clearBoardOverlays wiped
+      // .square-hint and hintArrow but hintLevel / hintMove / hintUsed scalars
+      // survive. Without this the user sees a "💡 Hint (2/2)" blue-tinted
+      // button (hintLevel=1) or disabled "💡 Hint" (hintLevel=2) with no
+      // matching board visual; at level 2 the top-of-showHint guard at 6339
+      // silently swallows further presses, leaving them stuck until they
+      // navigate away. Mirrors the tactic-branch restore at 6843–6848.
+      //
+      // Stale-hint guard: for repContActive / mid-line practice the stored
+      // hintMove was computed for a position past m.fenBefore, so the
+      // fromSq may not hold a piece on the reset board. In that case fully
+      // reset hint state rather than paint a misleading arrow. gameEngine
+      // was just loaded with m.fenBefore above so .get() is authoritative.
+      if (hintLevel >= 1 && hintMove && hintMove.length >= 4) {
+        const fromSq = hintMove.substring(0, 2);
+        if (gameEngine.get(fromSq)) {
+          const fromEl = document.querySelector(`.square-${fromSq}`);
+          if (fromEl) fromEl.classList.add('square-hint');
+          if (hintLevel >= 2) {
+            hintArrow = { from: fromSq, to: hintMove.substring(2, 4) };
+            renderArrows();
+          }
+        } else {
+          // Stale hint — reset all hint state and button styling.
+          hintLevel = 0;
+          hintMove = null;
+          hintArrow = null;
+          const hintBtnReset = document.getElementById('btnHint');
+          if (hintBtnReset) { hintBtnReset.disabled = false; hintBtnReset.textContent = '💡 Hint'; hintBtnReset.style.borderColor = ''; hintBtnReset.style.color = ''; }
+        }
+      }
     }
   }
 
