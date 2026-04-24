@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">SF lifecycle + pre-analysis scan: fix 20 findings. Architecture (13): H1 — serialize initStockfish/initEvalWorker via sfInitPromise/evalSfInitPromise so concurrent callers join one init instead of racing terminate+recreate handshakes (same pattern as tacticSfInitPromise). H2 — sfPendingResolvers/evalSfPendingResolvers Sets; every external terminate now drains pending sfAnalyze/sfAnalyzeAdaptive/evalWorkerAnalyzePosition Promises to null instead of leaving listeners on dead workers (root cause of silentEvalProcessing latching true forever on terminate-mid-search). H3 — handleSfCrash only restarts pre-analysis for plain mistake mode; continuation/tactic/repertoire/analysis/advantage/openingFilter/detectedTacticSolve all use currentSolveFen or have their own search loop, so restarting pre-analysis for m.fenBefore would evict useful hash and fight with sfAnalyze. M1 — phase-1 bestmove detaches its own listener (waitForIdle path previously left it hanging on the worker for the entire wait). M3 — orphanPreAnalysisWaiters() called at loadPosition tactic/repertoire + enterAnalysisMode so hint-button waitForPreAnalysis(20) doesn't hang forever after a mode switch. M4 — removed dead preAnalysisReadyHandler (remnant of removed isready-drain pattern). M5 — evalSfSession++ in inline eval-worker crash handler so queued listener messages bail at session check. M6 — sfSearchActive/evalSfSearchActive = true moved BEFORE postMessage at all 7 launch sites (invariant-order cleanup, no semantic change). L1 — 10s uciok/readyok timeouts guard corrupt-WASM hangs. L2 — sfCrashAttempts cap of 3 retries prevents infinite 500ms crash loops. L3 — preAnalysisListener=null at abandonDetectedTacticSolve and exitEngineLine terminate sites (was stale ref to handler on dead worker). Verification-pass fixes (7): sfAnalyzeAdaptive stable-exit regression — my H2 refactor routed cleanup through removeEventListener, detaching the handler before Stockfish ran to max depth, so bestmove never cleared sfSearchActive and the next caller needlessly terminated an idle worker; fix keeps listener attached after stable exit, bestmove branch self-detaches + clears the flag unconditionally. L2 reset placement — sfCrashAttempts = 0 moved from handleSfCrash recovery setTimeout into initStockfish success path, so a successful init via any caller (evaluateMove wait-loop, showMainApp) resets the counter. H3 mode-flag additions — openingFilterMode and detectedTacticSolveMode added to the exclusion set. stopPreAnalysis null-deref defense — try { if (sfWorker) sfWorker.removeEventListener(...) } catch (_) {} (defensive). Init catch zombie terminate — both initStockfish and initEvalWorker now terminate the unresponsive worker on uciok/readyok timeout instead of leaving its thread alive until the next init's leftover-terminate runs. handleSfCrash nulled preAnalysisListener but not analysisListener — a crash during analysis mode left the latter dangling, and the next exitAnalysisMode → stopAnalysisSearch would throw on sfWorker.removeEventListener(null); added analysisListener = null alongside preAnalysisListener = null. stopAnalysisSearch null-deref defense — same try/catch wrap as stopPreAnalysis.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Engine line arrow-key nav teleports out of alt branches during Show Line, closes #14. Root cause: the keydown handler routes arrow keys to stepReviewBestLine whenever window._reviewBestLine is set, but that function only knows about data.lineMoves (the main line mirror); when the user branches, an alt gets added to engineLine.alternatives and activeAlt points at it, yet stepReviewBestLine → goToReviewLine force-resets engineLine.activeAlt=-1 and loads data.lineMoves[newIdx].fen, teleporting the board onto the main-line position at that index. On-screen ‹ › buttons avoided the bug by calling lineStep directly, which is alt-aware. Fix: in stepReviewBestLine, early-return to lineStep(delta) when engineLine.activeAlt >= 0 so alt navigation goes through the branching-aware path; main-line navigation stays on the review-line path so the feedback-card move list's .active highlight keeps updating via goToReviewLine.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -16661,6 +16661,19 @@ function goToReviewLine(moveIdx, lineIdx) {
 function stepReviewBestLine(delta) {
   const data = window._reviewBestLine;
   if (!data) return;
+  // Issue #14: after the user branches from the shown line, engineLine
+  // (set up in showReviewBestLine) now has an alternative and activeAlt
+  // points at it — but data.lineMoves only mirrors the main line, so
+  // advancing data.currentIdx here would call goToReviewLine which
+  // force-resets engineLine.activeAlt=-1 and teleports the board onto
+  // the main-line FEN at that index. The on-screen ‹ › buttons avoid
+  // this by calling lineStep directly; arrow keys need the same path.
+  // (Main-line stepping stays on this function so the feedback-card
+  // move list's .active highlight keeps updating via goToReviewLine.)
+  if (engineLine && engineLine.activeAlt >= 0) {
+    lineStep(delta);
+    return;
+  }
   data.animating = false; // cancel auto-preview if user steps with ← →
   const currentIdx = data.currentIdx ?? 0;
   const newIdx = currentIdx + delta;
