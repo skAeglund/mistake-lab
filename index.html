@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix selector scope in goToLineMove's feedback-card highlight sync. The feedback-card sync I added in 0adb40c used the selector #feedbackContainer .engine-line-moves .move, which is too broad: renderEngineLine inserts the engineLineBox as a sibling of .feedback-box inside #feedbackContainer (via insertAdjacentElement at line 14453), and engineLineBox also contains a .engine-line-moves div with its own .move spans (main-line moves AND alt-moves — alt moves carry both .move and .alt-move classes). After a branch, renderEngineLine sets .active on the correct engineLineBox move at the canonical highlight spot, then my sync code ran a few lines later and wiped those .active classes because it was iterating ALL matched elements (feedback-card + engineLineBox concatenated) and only highlighting the one at flat index === activeIdx, which is a feedback-card index. The engineLineBox highlight disappeared on every post-branch goToLineMove call. Fix: tighten selector to #feedbackContainer > .feedback-box .engine-line-moves .move so it targets only feedback-card .move elements (engineLineBox is a sibling of .feedback-box, not a descendant, so `> .feedback-box` cleanly excludes it). Also simplified the activeIdx condition — dropped the `idx < engineLine.moves.length` check since the forEach naturally produces the right behavior when activeIdx is out of bounds of the now-scoped fbMoves (all highlights cleared, correct for extension-territory indices beyond data.lineMoves.length). Pre-existing same-selector usages in goToReviewLine, stepReviewBestLine's preFen branch, and animateLinePreview have the identical latent bug; not fixing them here since they're pre-existing (and in practice the preFen and animateLinePreview paths never clash with engineLineBox timing — only goToReviewLine does, and only post-branch). Filing those for potential follow-up.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Review best-line: fix three pre-existing sites with the same overly-broad selector bug. Found during the scan of 0adb40c, noted then as pre-existing and out-of-scope; fixing now on request. All three sites used document.querySelectorAll('#feedbackContainer .engine-line-moves .move') which matches BOTH the feedback-card's move list AND the engineLineBox panel (renderEngineLine inserts engineLineBox as a sibling of .feedback-box inside #feedbackContainer, and both contain a .engine-line-moves > .move tree). The forEach then toggles .active based on flat DOM index, which only correctly indexes feedback-card moves — engineLineBox's .move elements (including intermixed .alt-move spans that carry .move too) got their correct .active classes from renderEngineLine clobbered. Sites: (1) goToReviewLine — post-branch feedback-card clicks clobbered engineLineBox highlight. (2) stepReviewBestLine preFen-return branch — "remove all .active" cleared engineLineBox's highlight by coincidence-correctness (the direct state mutation didn't re-render engineLineBox, so clearing all .active happened to give the right visual even though it went through the wrong code path). (3) animateLinePreview — no active clash in practice (auto-preview runs before any branch) but same buggy pattern. Fix: tighten all three selectors to #feedbackContainer > .feedback-box .engine-line-moves .move — engineLineBox is a direct child of #feedbackContainer but not a descendant of .feedback-box, so `> .feedback-box` cleanly excludes it. For (1) and (2), also add an explicit renderEngineLine() call to rebuild engineLineBox with the correct new .active classes (the broad forEach was "accidentally" doing this in preFen, and not doing it at all correctly in goToReviewLine). Both renderEngineLine calls are guarded on `document.getElementById('engineLineBox')` existing, so they don't premature-materialize the panel on pre-branch feedback-card clicks or pre-branch preFen-returns — engineLineBox's appearance remains tied to the user's first branch, as before. (3) doesn't need the renderEngineLine call since no engineLineBox can exist at that timing. Four querySelectorAll usages of this selector now all scoped tightly; no broad-selector matches remaining in index.html.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -16718,8 +16718,15 @@ async function animateLinePreview(moveIdx, startIdx, endIdx) {
       requestEvalWorkerAnalysis(lm.fen);
     }
 
-    // Update active state in the move list
-    const moves = document.querySelectorAll('#feedbackContainer .engine-line-moves .move');
+    // Update active state in the move list. Selector scoped to
+    // .feedback-box for consistency with the other review-best-line
+    // highlight updates (goToLineMove, goToReviewLine, preFen branch).
+    // In practice the preview runs before any branch has been created
+    // so engineLineBox doesn't yet exist — but tightening here prevents
+    // future timing shifts (long pauses, concurrent branches) from
+    // letting this loop clobber engineLineBox .active classes that
+    // renderEngineLine has set.
+    const moves = document.querySelectorAll('#feedbackContainer > .feedback-box .engine-line-moves .move');
     moves.forEach((el, idx) => el.classList.toggle('active', idx === i));
   }
 
@@ -16741,6 +16748,17 @@ function goToReviewLine(moveIdx, lineIdx) {
   if (engineLine) {
     engineLine.currentIdx = lineIdx;
     engineLine.activeAlt = -1;
+    // Refresh engineLineBox so its own .active highlight reflects the new
+    // main-line position. The feedback-card forEach below is now scoped
+    // to .feedback-box only (tightened selector), so engineLineBox
+    // wouldn't otherwise sync — this call handles that side. Guarded on
+    // existing panel so we don't premature-materialize engineLineBox
+    // just because the user clicked a feedback-card move before any
+    // branch was created; the panel is only meant to appear after the
+    // first branch (created via handleEngineLineBranch).
+    if (document.getElementById('engineLineBox')) {
+      renderEngineLine();
+    }
   }
   const lm = data.lineMoves[lineIdx];
   gameEngine.load(lm.fen);
@@ -16757,8 +16775,11 @@ function goToReviewLine(moveIdx, lineIdx) {
     requestEvalWorkerAnalysis(lm.fen);
   }
 
-  // Update active state in the move list
-  const moves = document.querySelectorAll('#feedbackContainer .engine-line-moves .move');
+  // Update active state in the move list. Selector scoped to
+  // .feedback-box so engineLineBox's own .move elements (with .alt-move
+  // intermixed) aren't clobbered by the flat-index toggle — those are
+  // handled by renderEngineLine above.
+  const moves = document.querySelectorAll('#feedbackContainer > .feedback-box .engine-line-moves .move');
   moves.forEach((el, i) => el.classList.toggle('active', i === lineIdx));
   checkForNote(lm.fen);
 }
@@ -16807,6 +16828,18 @@ function stepReviewBestLine(delta) {
     if (engineLine) {
       engineLine.currentIdx = -1;
       engineLine.activeAlt = -1;
+      // Refresh engineLineBox so the stale .active in its panel clears
+      // along with the feedback-card. The previous code got away with
+      // a broad forEach selector that happened to catch both — but the
+      // broad selector also clobbered engineLineBox at other timings
+      // (post-branch click in goToReviewLine), so the fix is to render
+      // explicitly and scope the forEach tightly below. Guarded on
+      // existing panel: don't create engineLineBox just because we
+      // stepped back to preFen — the panel's materialization is driven
+      // by the first branch, same reasoning as goToReviewLine.
+      if (document.getElementById('engineLineBox')) {
+        renderEngineLine();
+      }
     }
     gameEngine.load(data.preFen);
     boardObj.position(data.preFen, false);
@@ -16814,7 +16847,9 @@ function stepReviewBestLine(delta) {
     bestMoveArrow = null;
     moveClassBadge = null;
     renderArrows();
-    const moves = document.querySelectorAll('#feedbackContainer .engine-line-moves .move');
+    // Selector scoped to .feedback-box — engineLineBox handled by the
+    // renderEngineLine call above.
+    const moves = document.querySelectorAll('#feedbackContainer > .feedback-box .engine-line-moves .move');
     moves.forEach(el => el.classList.remove('active'));
     checkForNote(data.preFen);
     // Finding #5: refresh eval bar for the pre-move position.
