@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Post-merge scan on #10–#13: fix 2 findings. Finding 1 (from #11): deleteNote wipes panel.innerHTML like closeNotePanel/enterNoteEditMode/showNoteViewMode but was the only one of the four that didn't call resetNoteVariationState() — a dangling noteActiveVarParent would survive and silently respond to arrow keys against a detached DOM subtree, latching noteJumpedAway=true and blocking piece drags with no visible panel as the apparent cause. Add the reset. Finding 2 (from #10): continuationEndActionsHtml() unconditionally showed Review Game when classifications existed, but the pre-#10 code in the three advanceContinuation paths (checkmate / checkmated / turn-mismatch) gated on wasSilent — non-silent mode populates classifications too but already showed per-move feedback live, so post-hoc Game Review is noise there. Add wasSilent parameter: advantage (always silent) and stopAndReviewContinuation (silent-only reachable) pass true to match pre-#10 behavior; the three advanceContinuation sites pass their local wasSilent/wasSilent2/wasSilent3. Analyze on Lichess button still appears in all six paths regardless of silent state, which is the intentional widening for #10.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">SF lifecycle + pre-analysis scan: fix 20 findings. Architecture (13): H1 — serialize initStockfish/initEvalWorker via sfInitPromise/evalSfInitPromise so concurrent callers join one init instead of racing terminate+recreate handshakes (same pattern as tacticSfInitPromise). H2 — sfPendingResolvers/evalSfPendingResolvers Sets; every external terminate now drains pending sfAnalyze/sfAnalyzeAdaptive/evalWorkerAnalyzePosition Promises to null instead of leaving listeners on dead workers (root cause of silentEvalProcessing latching true forever on terminate-mid-search). H3 — handleSfCrash only restarts pre-analysis for plain mistake mode; continuation/tactic/repertoire/analysis/advantage/openingFilter/detectedTacticSolve all use currentSolveFen or have their own search loop, so restarting pre-analysis for m.fenBefore would evict useful hash and fight with sfAnalyze. M1 — phase-1 bestmove detaches its own listener (waitForIdle path previously left it hanging on the worker for the entire wait). M3 — orphanPreAnalysisWaiters() called at loadPosition tactic/repertoire + enterAnalysisMode so hint-button waitForPreAnalysis(20) doesn't hang forever after a mode switch. M4 — removed dead preAnalysisReadyHandler (remnant of removed isready-drain pattern). M5 — evalSfSession++ in inline eval-worker crash handler so queued listener messages bail at session check. M6 — sfSearchActive/evalSfSearchActive = true moved BEFORE postMessage at all 7 launch sites (invariant-order cleanup, no semantic change). L1 — 10s uciok/readyok timeouts guard corrupt-WASM hangs. L2 — sfCrashAttempts cap of 3 retries prevents infinite 500ms crash loops. L3 — preAnalysisListener=null at abandonDetectedTacticSolve and exitEngineLine terminate sites (was stale ref to handler on dead worker). Verification-pass fixes (7): sfAnalyzeAdaptive stable-exit regression — my H2 refactor routed cleanup through removeEventListener, detaching the handler before Stockfish ran to max depth, so bestmove never cleared sfSearchActive and the next caller needlessly terminated an idle worker; fix keeps listener attached after stable exit, bestmove branch self-detaches + clears the flag unconditionally. L2 reset placement — sfCrashAttempts = 0 moved from handleSfCrash recovery setTimeout into initStockfish success path, so a successful init via any caller (evaluateMove wait-loop, showMainApp) resets the counter. H3 mode-flag additions — openingFilterMode and detectedTacticSolveMode added to the exclusion set. stopPreAnalysis null-deref defense — try { if (sfWorker) sfWorker.removeEventListener(...) } catch (_) {} (defensive). Init catch zombie terminate — both initStockfish and initEvalWorker now terminate the unresponsive worker on uciok/readyok timeout instead of leaving its thread alive until the next init's leftover-terminate runs. handleSfCrash nulled preAnalysisListener but not analysisListener — a crash during analysis mode left the latter dangling, and the next exitAnalysisMode → stopAnalysisSearch would throw on sfWorker.removeEventListener(null); added analysisListener = null alongside preAnalysisListener = null. stopAnalysisSearch null-deref defense — same try/catch wrap as stopPreAnalysis.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1991,13 +1991,14 @@ let sessionTotal = 0;
 let activeGameId = null;
 let sfWorker = null;
 let sfReady = false;
+let sfInitPromise = null;     // in-flight initStockfish promise — concurrent callers join it
+const sfPendingResolvers = new Set();  // H2: sfAnalyze/sfAnalyzeAdaptive cleanup fns — drained on external terminate
 let preAnalysis = null;       // latest snapshot: { bestCp, bestMove, pvs }
 let preAnalysisFen = null;
 let preAnalysisDepth = 0;
 let preAnalysisComplete = false;
 let preAnalysisWaiters = [];  // [{minDepth, resolve}]
 let preAnalysisListener = null; // current onMsg handler
-let preAnalysisReadyHandler = null; // current readyHandler waiting for readyok
 let preAnalysisPaused = false;
 let preAnalysisSession = 0;     // incremented on each new analysis to invalidate stale handlers
 let sfSearchActive = false;     // true when a go command has been sent and bestmove not yet received
@@ -2028,6 +2029,8 @@ let continuationEvalBarOn = false; // transient: user-toggle during continuation
 // --- Eval bar dedicated Stockfish worker (two-phase: quick depth then deep when idle) ---
 let evalSfWorker = null;
 let evalSfReady = false;
+let evalSfInitPromise = null;    // in-flight initEvalWorker promise — concurrent callers join it
+const evalSfPendingResolvers = new Set();  // H2: evalWorkerAnalyzePosition cleanup fns — drained on external terminate
 let evalSfSearchActive = false;
 let evalSfSession = 0;           // incremented to invalidate stale results
 let evalSfResult = null;         // { fen, cpWhite, depth } — latest eval for displayed position
@@ -3580,55 +3583,132 @@ function disconnectGist() {
 // ─── Stockfish Engine ───
 const SF_PATH = 'engine/stockfish-18-lite-single.js';
 
-async function initStockfish() {
-  // Allow re-initialization: terminate old worker if it exists
-  if (sfWorker) {
-    sfLog('initStockfish', 'terminating existing worker for re-init');
-    sfWorker.terminate();
-    sfWorker = null;
-    sfReady = false;
-    sfSearchActive = false;
+// H2: drain in-flight sfAnalyze/sfAnalyzeAdaptive cleanups with null. Called
+// from every site that terminates sfWorker externally so their Promises
+// resolve instead of hanging on a listener attached to a dead worker.
+// Pattern mirrors tacticSfPendingResolvers at line 3862.
+function drainSfPendingResolvers() {
+  if (sfPendingResolvers.size === 0) return;
+  sfLog('drainSfPendingResolvers', `flushing ${sfPendingResolvers.size} pending`);
+  // Copy and clear first — each cleanup deletes itself from the Set, which
+  // would invalidate an iterator.
+  const pending = [...sfPendingResolvers];
+  sfPendingResolvers.clear();
+  for (const fn of pending) {
+    try { fn(null); } catch (_) {}
   }
-  try {
-    sfWorker = new Worker(SF_PATH);
+}
 
-    // Crash detection: WASM RuntimeError kills the worker permanently
-    sfWorker.addEventListener('error', handleSfCrash);
+// H2: eval-worker counterpart. Drains evalWorkerAnalyzePosition cleanups.
+function drainEvalSfPendingResolvers() {
+  if (evalSfPendingResolvers.size === 0) return;
+  const pending = [...evalSfPendingResolvers];
+  evalSfPendingResolvers.clear();
+  for (const fn of pending) {
+    try { fn(null); } catch (_) {}
+  }
+}
 
-    // Wait for UCI init
-    await new Promise((resolve) => {
-      function handler(e) {
-        if (typeof e.data === 'string' && e.data === 'uciok') {
-          sfWorker.removeEventListener('message', handler);
-          resolve();
-        }
-      }
-      sfWorker.addEventListener('message', handler);
-      sfWorker.postMessage('uci');
-    });
-    sfWorker.postMessage(`setoption name Hash value ${sfHashMB}`);
-    sfWorker.postMessage('isready');
-    await new Promise((resolve) => {
-      function handler(e) {
-        if (typeof e.data === 'string' && e.data === 'readyok') {
-          sfWorker.removeEventListener('message', handler);
-          resolve();
-        }
-      }
-      sfWorker.addEventListener('message', handler);
-    });
-    sfReady = true;
-    sfSearchActive = false;
-    sfLog('initStockfish', 'Stockfish 18 ready');
-  } catch (err) {
-    console.error('Stockfish init failed:', err);
+async function initStockfish() {
+  // H1: concurrent callers join the in-flight init instead of each trying to
+  // terminate+recreate the worker and corrupting each other's handshake.
+  // Fast path: already-ready worker — skip re-init. Callers that genuinely
+  // need a fresh worker terminate + null sfWorker first, so the fast path
+  // only catches redundant init calls after a successful init.
+  if (sfWorker && sfReady) return;
+  if (sfInitPromise) return sfInitPromise;
+
+  sfInitPromise = (async () => {
+    // Any worker still around at this point is either (a) a leftover that the
+    // caller didn't null, or (b) one they just nulled (no-op). Terminate it
+    // either way for a clean slate.
+    if (sfWorker) {
+      sfLog('initStockfish', 'terminating existing worker for re-init');
+      drainSfPendingResolvers();  // H2: flush pending on the worker we're about to kill
+      try { sfWorker.terminate(); } catch (_) {}
+      sfWorker = null;
+    }
     sfReady = false;
+    sfSearchActive = false;
+
+    // Capture the worker LOCALLY so handshake listeners and the identity
+    // check are bound to this specific Worker instance. If an external caller
+    // mutates the global sfWorker (e.g. terminates and sets null), myWorker
+    // still points at the one we're handshaking — and the identity check
+    // after each await detects supersession.
+    let myWorker;
+    try {
+      myWorker = new Worker(SF_PATH);
+      sfWorker = myWorker;
+      myWorker.addEventListener('error', handleSfCrash);
+
+      // L1: 10s timeout on uciok await. Guards against corrupt WASM loads
+      // that never fire uciok and would otherwise hang the init forever.
+      await new Promise((resolve, reject) => {
+        const to = setTimeout(() => reject(new Error('uciok timeout')), 10000);
+        function handler(e) {
+          if (typeof e.data === 'string' && e.data === 'uciok') {
+            clearTimeout(to);
+            myWorker.removeEventListener('message', handler);
+            resolve();
+          }
+        }
+        myWorker.addEventListener('message', handler);
+        myWorker.postMessage('uci');
+      });
+
+      // If someone swapped sfWorker out while we were awaiting uciok,
+      // stop. The replacement's own init (serialized via this same promise)
+      // will handle readiness.
+      if (sfWorker !== myWorker) { sfLog('initStockfish', 'superseded during uciok'); return; }
+
+      myWorker.postMessage(`setoption name Hash value ${sfHashMB}`);
+      myWorker.postMessage('isready');
+
+      await new Promise((resolve, reject) => {
+        const to = setTimeout(() => reject(new Error('readyok timeout')), 10000);
+        function handler(e) {
+          if (typeof e.data === 'string' && e.data === 'readyok') {
+            clearTimeout(to);
+            myWorker.removeEventListener('message', handler);
+            resolve();
+          }
+        }
+        myWorker.addEventListener('message', handler);
+      });
+
+      if (sfWorker !== myWorker) { sfLog('initStockfish', 'superseded during readyok'); return; }
+      sfReady = true;
+      sfSearchActive = false;
+      sfCrashAttempts = 0;  // L2: successful init resets the crash-retry counter
+      sfLog('initStockfish', 'Stockfish 18 ready');
+    } catch (err) {
+      console.error('Stockfish init failed:', err?.message || err);
+      // Only reset sfReady + terminate the zombie worker if we're still the
+      // active init — don't clobber a later successful init that raced with us.
+      // Without the terminate, an unresponsive myWorker (uciok/readyok timeout)
+      // keeps its thread alive until the next initStockfish leftover-terminate
+      // runs, which may be seconds later.
+      if (sfWorker === myWorker) {
+        try { if (myWorker) myWorker.terminate(); } catch (_) {}
+        sfWorker = null;
+        sfReady = false;
+      }
+    }
+  })();
+
+  try {
+    await sfInitPromise;
+  } finally {
+    sfInitPromise = null;
   }
 }
 
 let sfCrashRecovering = false;
+let sfCrashAttempts = 0;                  // L2: successive failed recovery attempts (reset on success)
+const SF_CRASH_MAX_ATTEMPTS = 3;          // after this many failures in a row, give up auto-recovery
 function handleSfCrash(err) {
-  sfLog('CRASH', `Stockfish worker crashed: ${err?.message || err}`);
+  sfLog('CRASH', `Stockfish worker crashed: ${err?.message || err} (attempt ${sfCrashAttempts + 1}/${SF_CRASH_MAX_ATTEMPTS})`);
   console.error('[SF:CRASH] Worker error:', err);
   sfReady = false;
   sfSearchActive = false;
@@ -3638,7 +3718,15 @@ function handleSfCrash(err) {
   preAnalysisWaiters = [];
   preAnalysisComplete = true;
   preAnalysisListener = null;
-  preAnalysisReadyHandler = null;
+  // analysisListener points at a handler on the dying worker. Without nulling
+  // here, a crash during analysis mode would leave the ref dangling, and the
+  // next exitAnalysisMode → stopAnalysisSearch would do
+  // sfWorker.removeEventListener(...) on a null sfWorker and throw.
+  analysisListener = null;
+  // H2 + M5: same treatment for sfAnalyze/sfAnalyzeAdaptive Promises.
+  // Previously these hung permanently on crash — listener on the dead worker
+  // never fires, no error handler was registered at the call site.
+  drainSfPendingResolvers();
 
   // Terminate the dead worker
   if (sfWorker) {
@@ -3646,21 +3734,44 @@ function handleSfCrash(err) {
     sfWorker = null;
   }
 
+  // L2: give up after SF_CRASH_MAX_ATTEMPTS consecutive failures. Permanent
+  // failures (corrupt WASM, SAB permission revoked, OOM) would otherwise
+  // loop every 500ms forever.
+  if (sfCrashAttempts >= SF_CRASH_MAX_ATTEMPTS) {
+    sfLog('CRASH', 'max recovery attempts exceeded — giving up');
+    console.error('[SF:CRASH] Stockfish has crashed repeatedly and auto-recovery is disabled. Reload the page to try again.');
+    return;
+  }
+
   // Auto-restart after a brief delay (avoid tight loop if init itself crashes)
   if (!sfCrashRecovering) {
     sfCrashRecovering = true;
+    sfCrashAttempts++;
     sfLog('CRASH', 'scheduling auto-recovery in 500ms');
     setTimeout(async () => {
       sfCrashRecovering = false;
       sfLog('CRASH', 'attempting re-initialization');
       await initStockfish();
-      // Restart analysis for the current position if one is loaded
-      if (sfReady && currentMistakeIdx >= 0) {
-        const m = filteredMistakes[currentMistakeIdx];
-        if (m) {
-          sfLog('CRASH', `restarting analysis for current position idx=${currentMistakeIdx}`);
-          startPreAnalysis(m.fenBefore);
-        }
+      if (!sfReady) return;
+      // H3: only restart pre-analysis for plain Mistake mode. Tactics and
+      // repertoire items don't use pre-analysis (it would fight sfAnalyze on
+      // wrong-move engine-line building). Continuation/advantage/practice are
+      // on currentSolveFen, not m.fenBefore — pre-analysis for the wrong
+      // position evicts hash that's useful for the real position. Analysis
+      // mode has its own search loop (startAnalysisSearch) and would
+      // interfere. Silent-continuation's internal evaluator (processQueue-
+      // OnMainWorker) will pick up on its next iteration via the sfReady
+      // condition once we return.
+      if (currentMistakeIdx < 0) return;
+      const m = filteredMistakes[currentMistakeIdx];
+      if (!m) return;
+      const inOtherMode = continuationMode || tacticMode || repertoireMode || analysisMode || advantageMode || openingFilterMode || detectedTacticSolveMode;
+      const isMistakeType = m.type === 'mistake';
+      if (isMistakeType && !inOtherMode) {
+        sfLog('CRASH', `restarting pre-analysis for current mistake idx=${currentMistakeIdx}`);
+        startPreAnalysis(m.fenBefore);
+      } else {
+        sfLog('CRASH', `skipping pre-analysis restart (type=${m.type} continuation=${continuationMode} tactic=${tacticMode} repertoire=${repertoireMode} analysis=${analysisMode} advantage=${advantageMode} openingFilter=${openingFilterMode} detectedTactic=${detectedTacticSolveMode}) — sfReady, next user action will reclaim`);
       }
     }, 500);
   }
@@ -3676,50 +3787,98 @@ function depthAdj(d) {
 // Phase 2: deep depth 30 — starts only after phase 1 completes AND main worker is idle.
 // Stockfish hash persists between phases, so phase 2 benefits from phase 1 work.
 async function initEvalWorker() {
-  if (evalSfWorker) {
-    evalSfWorker.terminate();
-    evalSfWorker = null;
-  }
-  evalSfReady = false;
-  evalSfSearchActive = false;
-  evalSfPhase = 0;
-  try {
-    evalSfWorker = new Worker(SF_PATH);
-    evalSfWorker.addEventListener('error', (err) => {
-      console.error('[EvalWorker] crash:', err?.message || err);
-      evalSfReady = false;
-      evalSfSearchActive = false;
-      evalSfPhase = 0;
-      clearInterval(evalSfPhase2PollTimer);
-      evalSfPhase2PollTimer = null;
-      if (evalSfWorker) { try { evalSfWorker.terminate(); } catch (_) {} evalSfWorker = null; }
-    });
-    await new Promise((resolve) => {
-      function handler(e) {
-        if (typeof e.data === 'string' && e.data === 'uciok') {
-          evalSfWorker.removeEventListener('message', handler);
-          resolve();
-        }
-      }
-      evalSfWorker.addEventListener('message', handler);
-      evalSfWorker.postMessage('uci');
-    });
-    evalSfWorker.postMessage(`setoption name Hash value ${Math.max(16, Math.round(sfHashMB / 4))}`);
-    evalSfWorker.postMessage('isready');
-    await new Promise((resolve) => {
-      function handler(e) {
-        if (typeof e.data === 'string' && e.data === 'readyok') {
-          evalSfWorker.removeEventListener('message', handler);
-          resolve();
-        }
-      }
-      evalSfWorker.addEventListener('message', handler);
-    });
-    evalSfReady = true;
-    evalSfSearchActive = false;
-  } catch (err) {
-    console.error('[EvalWorker] init failed:', err);
+  // H1: serialize concurrent init calls — the eval worker is accessed from
+  // both the eval-bar path (evalWorkerAnalyze) and the silent-eval queue
+  // (evalWorkerAnalyzePosition), both of which terminate+reinit on entry.
+  // Without serialization they corrupt each other's handshake in the same
+  // way the main worker did.
+  if (evalSfWorker && evalSfReady) return;
+  if (evalSfInitPromise) return evalSfInitPromise;
+
+  evalSfInitPromise = (async () => {
+    if (evalSfWorker) {
+      drainEvalSfPendingResolvers();  // H2: flush before killing leftover worker
+      try { evalSfWorker.terminate(); } catch (_) {}
+      evalSfWorker = null;
+    }
     evalSfReady = false;
+    evalSfSearchActive = false;
+    evalSfPhase = 0;
+
+    let myWorker;
+    try {
+      myWorker = new Worker(SF_PATH);
+      evalSfWorker = myWorker;
+      myWorker.addEventListener('error', (err) => {
+        console.error('[EvalWorker] crash:', err?.message || err);
+        // Only react if we're still the live worker — a later successful
+        // init that raced with us must not be clobbered here.
+        if (evalSfWorker !== myWorker) return;
+        evalSfReady = false;
+        evalSfSearchActive = false;
+        evalSfPhase = 0;
+        // M5: bump session so any already-queued listener message or
+        // deferred handler from the dying worker bails at its session
+        // check (mirrors handleTacticSfCrash's tacticSfSession++).
+        evalSfSession++;
+        clearInterval(evalSfPhase2PollTimer);
+        evalSfPhase2PollTimer = null;
+        // H2 + M5: flush pending evalWorkerAnalyzePosition Promises so they
+        // resolve null instead of hanging — mirrors handleTacticSfCrash's
+        // tacticSfPendingResolvers drain at line 3787.
+        drainEvalSfPendingResolvers();
+        try { myWorker.terminate(); } catch (_) {}
+        evalSfWorker = null;
+      });
+
+      // L1: 10s timeouts guard corrupt-WASM hangs (same as main worker).
+      await new Promise((resolve, reject) => {
+        const to = setTimeout(() => reject(new Error('uciok timeout')), 10000);
+        function handler(e) {
+          if (typeof e.data === 'string' && e.data === 'uciok') {
+            clearTimeout(to);
+            myWorker.removeEventListener('message', handler);
+            resolve();
+          }
+        }
+        myWorker.addEventListener('message', handler);
+        myWorker.postMessage('uci');
+      });
+
+      if (evalSfWorker !== myWorker) return;  // superseded
+
+      myWorker.postMessage(`setoption name Hash value ${Math.max(16, Math.round(sfHashMB / 4))}`);
+      myWorker.postMessage('isready');
+
+      await new Promise((resolve, reject) => {
+        const to = setTimeout(() => reject(new Error('readyok timeout')), 10000);
+        function handler(e) {
+          if (typeof e.data === 'string' && e.data === 'readyok') {
+            clearTimeout(to);
+            myWorker.removeEventListener('message', handler);
+            resolve();
+          }
+        }
+        myWorker.addEventListener('message', handler);
+      });
+
+      if (evalSfWorker !== myWorker) return;  // superseded
+      evalSfReady = true;
+      evalSfSearchActive = false;
+    } catch (err) {
+      console.error('[EvalWorker] init failed:', err?.message || err);
+      if (evalSfWorker === myWorker) {
+        try { if (myWorker) myWorker.terminate(); } catch (_) {}
+        evalSfWorker = null;
+        evalSfReady = false;
+      }
+    }
+  })();
+
+  try {
+    await evalSfInitPromise;
+  } finally {
+    evalSfInitPromise = null;
   }
 }
 
@@ -3965,9 +4124,9 @@ function evalWorkerStartPhase2(fen, session, sideToMove) {
   evalSfWorker._evalListener = listener;
   evalSfWorker.addEventListener('message', listener);
 
+  evalSfSearchActive = true;  // M6: set BEFORE postMessage to match invariant
   evalSfWorker.postMessage(`position fen ${fen}`);
   evalSfWorker.postMessage(`go depth ${depth}`);
-  evalSfSearchActive = true;
 }
 
 /** Poll for main worker idle, then start phase 2. */
@@ -3997,6 +4156,7 @@ async function evalWorkerAnalyze(fen) {
 
   // Must terminate if a search is running (can't send stop)
   if (evalSfSearchActive && evalSfWorker) {
+    drainEvalSfPendingResolvers();  // H2: flush any pending evalWorkerAnalyzePosition promises
     evalSfWorker.terminate();
     evalSfWorker = null;
     evalSfReady = false;
@@ -4005,6 +4165,10 @@ async function evalWorkerAnalyze(fen) {
   }
   if (!evalSfReady) await initEvalWorker();
   if (!evalSfReady || !evalSfWorker) return;
+  // H1: init is now serialized; a sibling (evalWorkerAnalyzePosition) may
+  // have resumed first and posted go. If session changed, we're stale anyway.
+  if (session !== evalSfSession) return;
+  if (evalSfSearchActive) return;
 
   const sideToMove = fen.split(' ')[1]; // 'w' or 'b'
   const depth = depthAdj(EVAL_WORKER_PHASE1_DEPTH);
@@ -4033,6 +4197,12 @@ async function evalWorkerAnalyze(fen) {
         updateEvalBar();
       }
     } else if (line.startsWith('bestmove')) {
+      // M1: detach self here. Phase 2's own entry removes the previous
+      // listener, but evalWorkerWaitForIdle's polling path doesn't —
+      // without this, phase-1 sits attached on the worker for the
+      // duration of the wait (harmless but surprising).
+      try { evalSfWorker.removeEventListener('message', listener); } catch (_) {}
+      if (evalSfWorker && evalSfWorker._evalListener === listener) evalSfWorker._evalListener = null;
       evalSfSearchActive = false;
       evalSfPhase = 0;
       // Phase 1 complete — transition to phase 2
@@ -4049,9 +4219,9 @@ async function evalWorkerAnalyze(fen) {
   evalSfWorker._evalListener = listener;
   evalSfWorker.addEventListener('message', listener);
 
+  evalSfSearchActive = true;  // M6: set BEFORE postMessage to match invariant
   evalSfWorker.postMessage(`position fen ${fen}`);
   evalSfWorker.postMessage(`go depth ${depth}`);
-  evalSfSearchActive = true;
 }
 
 /** Debounced request — call this from navigation handlers. */
@@ -4070,6 +4240,11 @@ function stopEvalWorkerSearch() {
   evalSfCurrentFen = null;
   evalSfPhase = 0;
   if (evalSfSearchActive && evalSfWorker) {
+    // H2: drain before terminate — any evalWorkerAnalyzePosition Promise
+    // currently awaiting bestmove would otherwise hang with its listener on
+    // a dead worker, latching silentEvalProcessing=true until the next
+    // loadPosition reset.
+    drainEvalSfPendingResolvers();
     evalSfWorker.terminate();
     evalSfWorker = null;
     evalSfReady = false;
@@ -4079,67 +4254,101 @@ function stopEvalWorkerSearch() {
 
 // ─── Silent eval queue: deep re-evaluation of continuation moves ───
 function evalWorkerAnalyzePosition(fen, depth, multiPv) {
-  return new Promise(async (resolve) => {
-    // Terminate any running eval worker search
-    if (evalSfSearchActive && evalSfWorker) {
-      evalSfWorker.terminate();
-      evalSfWorker = null;
-      evalSfReady = false;
-      evalSfSearchActive = false;
-      evalSfPhase = 0;
-    }
-    if (!evalSfReady) await initEvalWorker();
-    if (!evalSfReady || !evalSfWorker) { resolve(null); return; }
-
-    // Clear any eval bar state so we don't conflict
-    clearTimeout(evalSfDebounceTimer);
-    clearInterval(evalSfPhase2PollTimer);
-    evalSfPhase2PollTimer = null;
-    const session = ++evalSfSession;
-    evalSfPhase = 0;
-
-    const collected = {};
-    if (evalSfWorker._evalListener) {
-      evalSfWorker.removeEventListener('message', evalSfWorker._evalListener);
-    }
-
-    const listener = (e) => {
-      if (session !== evalSfSession) return;
-      const line = typeof e.data === 'string' ? e.data : '';
-      if (line.startsWith('info') && line.includes(' pv ')) {
-        const dM = line.match(/depth (\d+)/);
-        const cpM = line.match(/score cp (-?\d+)/);
-        const mateM = line.match(/score mate (-?\d+)/);
-        const pvM = line.match(/ pv (.+)/);
-        const mpvM = line.match(/multipv (\d+)/);
-        const d = parseInt(dM?.[1] || '0');
-        const pvNum = parseInt(mpvM?.[1] || '1');
-        let cp = 0;
-        if (cpM) cp = parseInt(cpM[1]);
-        else if (mateM) cp = parseInt(mateM[1]) > 0 ? 10000 : -10000;
-        const moves = pvM?.[1]?.trim() || '';
-        if (!collected[pvNum] || d >= collected[pvNum].depth) {
-          collected[pvNum] = { cp, moves, depth: d, firstMove: moves.split(' ')[0] };
-        }
-      }
-      if (line.startsWith('bestmove')) {
-        evalSfWorker.removeEventListener('message', listener);
-        evalSfWorker._evalListener = null;
+  return new Promise((resolve) => {
+    (async () => {
+      // Terminate any running eval worker search. Drain H2 siblings first so
+      // their Promises resolve to null instead of hanging on a listener that
+      // terminate is about to detach implicitly (along with the worker).
+      if (evalSfSearchActive && evalSfWorker) {
+        drainEvalSfPendingResolvers();
+        evalSfWorker.terminate();
+        evalSfWorker = null;
+        evalSfReady = false;
         evalSfSearchActive = false;
-        const bm = line.split(' ')[1];
-        const pvs = Object.keys(collected)
-          .sort((a, b) => parseInt(a) - parseInt(b))
-          .map(k => collected[k]);
-        resolve({ bestMove: bm, pvs, fen });
+        evalSfPhase = 0;
       }
-    };
-    evalSfWorker._evalListener = listener;
-    evalSfWorker.addEventListener('message', listener);
+      if (!evalSfReady) await initEvalWorker();
+      if (!evalSfReady || !evalSfWorker) { resolve(null); return; }
+      // H1: a sibling (evalWorkerAnalyze for eval bar) may have resumed first
+      // and posted go during our serialized init wait. Bail — processSilent-
+      // EvalQueue handles null by skipping the item.
+      if (evalSfSearchActive) { resolve(null); return; }
 
-    evalSfWorker.postMessage(`setoption name MultiPV value ${multiPv}`);
-    evalSfWorker.postMessage(`position fen ${fen}`);
-    evalSfWorker.postMessage(`go depth ${depthAdj(depth)}`);
-    evalSfSearchActive = true;
+      // Clear any eval bar state so we don't conflict
+      clearTimeout(evalSfDebounceTimer);
+      clearInterval(evalSfPhase2PollTimer);
+      evalSfPhase2PollTimer = null;
+      const session = ++evalSfSession;
+      evalSfPhase = 0;
+
+      const collected = {};
+      if (evalSfWorker._evalListener) {
+        evalSfWorker.removeEventListener('message', evalSfWorker._evalListener);
+      }
+
+      // H2: settled/cleanup pattern mirrors tacticWorkerAnalyzePosition
+      // (line 3853). Adding cleanup to evalSfPendingResolvers lets external
+      // terminate sites (stopEvalWorkerSearch, resetGame, crash handler,
+      // another evalWorkerAnalyzePosition's own terminate step above) drain
+      // our Promise with null instead of leaving the listener on a dead
+      // worker — which was the root cause of the silent-eval queue latching
+      // silentEvalProcessing=true forever.
+      let settled = false;
+      const cleanup = (result) => {
+        if (settled) return;
+        settled = true;
+        evalSfPendingResolvers.delete(cleanup);
+        // Only detach the listener if it's still the active one on the
+        // current worker. If the worker was terminated externally, the ref
+        // we hold is to a dead object — removeEventListener is a no-op on
+        // a post-terminate Worker but wrap in try/catch regardless.
+        try {
+          if (evalSfWorker && evalSfWorker._evalListener === listener) {
+            evalSfWorker.removeEventListener('message', listener);
+            evalSfWorker._evalListener = null;
+          }
+        } catch (_) {}
+        resolve(result);
+      };
+      evalSfPendingResolvers.add(cleanup);
+
+      const listener = (e) => {
+        if (settled) return;
+        if (session !== evalSfSession) return;
+        const line = typeof e.data === 'string' ? e.data : '';
+        if (line.startsWith('info') && line.includes(' pv ')) {
+          const dM = line.match(/depth (\d+)/);
+          const cpM = line.match(/score cp (-?\d+)/);
+          const mateM = line.match(/score mate (-?\d+)/);
+          const pvM = line.match(/ pv (.+)/);
+          const mpvM = line.match(/multipv (\d+)/);
+          const d = parseInt(dM?.[1] || '0');
+          const pvNum = parseInt(mpvM?.[1] || '1');
+          let cp = 0;
+          if (cpM) cp = parseInt(cpM[1]);
+          else if (mateM) cp = parseInt(mateM[1]) > 0 ? 10000 : -10000;
+          const moves = pvM?.[1]?.trim() || '';
+          if (!collected[pvNum] || d >= collected[pvNum].depth) {
+            collected[pvNum] = { cp, moves, depth: d, firstMove: moves.split(' ')[0] };
+          }
+        }
+        if (line.startsWith('bestmove')) {
+          evalSfSearchActive = false;
+          const bm = line.split(' ')[1];
+          const pvs = Object.keys(collected)
+            .sort((a, b) => parseInt(a) - parseInt(b))
+            .map(k => collected[k]);
+          cleanup({ bestMove: bm, pvs, fen });
+        }
+      };
+      evalSfWorker._evalListener = listener;
+      evalSfWorker.addEventListener('message', listener);
+
+      evalSfSearchActive = true;  // M6: set BEFORE postMessage to match invariant
+      evalSfWorker.postMessage(`setoption name MultiPV value ${multiPv}`);
+      evalSfWorker.postMessage(`position fen ${fen}`);
+      evalSfWorker.postMessage(`go depth ${depthAdj(depth)}`);
+    })();
   });
 }
 
@@ -5228,10 +5437,12 @@ function abandonDetectedTacticSolve() {
 
   // Abort any in-flight SF analysis from wrong-move engine-line building
   if (sfSearchActive && sfWorker) {
+    drainSfPendingResolvers();  // H2: flush sfAnalyze/sfAnalyzeAdaptive Promises
     try { sfWorker.terminate(); } catch (_) {}
     sfWorker = null;
     sfReady = false;
     sfSearchActive = false;
+    preAnalysisListener = null;  // L3: stale ref to handler on dead worker
     initStockfish();
   }
 
@@ -5356,79 +5567,102 @@ async function processQueueOnMainWorker() {
 }
 
 function sfAnalyze(fen, depth = 16, multiPv = 1) {
-  return new Promise(async (resolve) => {
-    // ── Eval cache check ──
-    const cached = evalCacheGet(fen, depthAdj(depth), multiPv);
-    if (cached) {
-      sfLog('sfAnalyze', `CACHE HIT depth=${cached.depth} bestMove=${cached.bestMove} fen=${fen.split(' ').slice(0,2).join(' ')}…`);
-      const pvs = cached.pvs.map(pv => ({
-        cp: pv.cp, moves: pv.uciLine || pv.move, depth: cached.depth, firstMove: pv.move
-      }));
-      resolve({ bestMove: cached.bestMove, pvs, fen });
-      return;
-    }
-
-    if (sfSearchActive) {
-      // Never send 'stop' to this WASM build — terminate and recreate
-      sfLog('sfAnalyze', `terminating worker (search was active) before analyzing fen=${fen.split(' ').slice(0,2).join(' ')}…`);
-      sfWorker.terminate();
-      sfWorker = null;
-      sfReady = false;
-      sfSearchActive = false;
-      preAnalysisListener = null;
-      preAnalysisReadyHandler = null;
-      await initStockfish();
-    }
-    if (!sfReady) { sfLog('sfAnalyze', 'SF not ready, resolving null'); resolve(null); return; }
-
-    sfLog('sfAnalyze', `START fen=${fen.split(' ').slice(0,2).join(' ')}… depth=${depth} mpv=${multiPv}`);
-
-    const collected = {};
-
-    sfWorker.postMessage(`setoption name MultiPV value ${multiPv}`);
-    sfWorker.postMessage(`position fen ${fen}`);
-    sfWorker.postMessage(`go depth ${depthAdj(depth)}`);
-    sfSearchActive = true;
-
-    function handler(e) {
-      const line = e.data;
-      if (typeof line !== 'string') return;
-
-      if (line.startsWith('info') && line.includes(' pv ')) {
-        const dM = line.match(/depth (\d+)/);
-        const cpM = line.match(/score cp (-?\d+)/);
-        const mateM = line.match(/score mate (-?\d+)/);
-        const pvM = line.match(/ pv (.+)/);
-        const mpvM = line.match(/multipv (\d+)/);
-        const d = parseInt(dM?.[1] || '0');
-        const pvNum = parseInt(mpvM?.[1] || '1');
-        let cp = 0;
-        if (cpM) cp = parseInt(cpM[1]);
-        else if (mateM) cp = parseInt(mateM[1]) > 0 ? 10000 : -10000;
-        const moves = pvM?.[1]?.trim() || '';
-        if (!collected[pvNum] || d >= collected[pvNum].depth) {
-          collected[pvNum] = { cp, moves, depth: d, firstMove: moves.split(' ')[0] };
-        }
+  return new Promise((resolve) => {
+    (async () => {
+      // ── Eval cache check ──
+      const cached = evalCacheGet(fen, depthAdj(depth), multiPv);
+      if (cached) {
+        sfLog('sfAnalyze', `CACHE HIT depth=${cached.depth} bestMove=${cached.bestMove} fen=${fen.split(' ').slice(0,2).join(' ')}…`);
+        const pvs = cached.pvs.map(pv => ({
+          cp: pv.cp, moves: pv.uciLine || pv.move, depth: cached.depth, firstMove: pv.move
+        }));
+        resolve({ bestMove: cached.bestMove, pvs, fen });
+        return;
       }
-      if (line.startsWith('bestmove')) {
-        sfWorker.removeEventListener('message', handler);
+
+      if (sfSearchActive) {
+        // Never send 'stop' to this WASM build — terminate and recreate
+        sfLog('sfAnalyze', `terminating worker (search was active) before analyzing fen=${fen.split(' ').slice(0,2).join(' ')}…`);
+        // H2: drain siblings before terminate — their listeners die with
+        // the worker; resolve them null so their async frames unblock.
+        drainSfPendingResolvers();
+        sfWorker.terminate();
+        sfWorker = null;
+        sfReady = false;
         sfSearchActive = false;
-        const bm = line.split(' ')[1];
-        const pvs = Object.keys(collected)
-          .sort((a, b) => parseInt(a) - parseInt(b))
-          .map(k => collected[k]);
-        sfLog('sfAnalyze', `COMPLETE bestmove=${bm} maxDepth=${pvs[0]?.depth} fen=${fen.split(' ').slice(0,2).join(' ')}…`);
-        // Store in eval cache
-        const finalDepth = pvs[0]?.depth || 0;
-        if (finalDepth >= EVAL_CACHE_MIN_DEPTH) {
-          evalCacheStore(fen, finalDepth, bm, pvs[0]?.cp ?? 0,
-            pvs.map(pv => ({ cp: pv.cp, move: pv.firstMove, san: uciToSan(fen, pv.firstMove), uciLine: pv.moves })),
-            multiPv);
-        }
-        resolve({ bestMove: bm, pvs, fen });
+        preAnalysisListener = null;
+        await initStockfish();
+        // H1: init is now serialized; a sibling awaiting the same init may have
+        // resumed first and posted go. Bail — callers of sfAnalyze already
+        // handle null (silent-eval watchdog, review-line error feedback,
+        // continuation Stockfish-fallback "could not determine" path).
+        if (sfSearchActive) { sfLog('sfAnalyze', 'post-init: worker claimed by sibling, resolving null'); resolve(null); return; }
       }
-    }
-    sfWorker.addEventListener('message', handler);
+      if (!sfReady) { sfLog('sfAnalyze', 'SF not ready, resolving null'); resolve(null); return; }
+
+      sfLog('sfAnalyze', `START fen=${fen.split(' ').slice(0,2).join(' ')}… depth=${depth} mpv=${multiPv}`);
+
+      const collected = {};
+      // H2: settled/cleanup pattern mirrors tacticWorkerAnalyzePosition.
+      // Registering cleanup in sfPendingResolvers lets every external
+      // terminate of sfWorker resolve us null instead of hanging a listener
+      // on a dead worker.
+      let settled = false;
+      let handler; // forward ref — handler is declared below but closure captures the mutable slot
+      const cleanup = (result) => {
+        if (settled) return;
+        settled = true;
+        sfPendingResolvers.delete(cleanup);
+        try { if (sfWorker && handler) sfWorker.removeEventListener('message', handler); } catch (_) {}
+        resolve(result);
+      };
+      sfPendingResolvers.add(cleanup);
+
+      sfSearchActive = true;  // M6: set BEFORE postMessage to match invariant
+      sfWorker.postMessage(`setoption name MultiPV value ${multiPv}`);
+      sfWorker.postMessage(`position fen ${fen}`);
+      sfWorker.postMessage(`go depth ${depthAdj(depth)}`);
+
+      handler = (e) => {
+        if (settled) return;
+        const line = e.data;
+        if (typeof line !== 'string') return;
+
+        if (line.startsWith('info') && line.includes(' pv ')) {
+          const dM = line.match(/depth (\d+)/);
+          const cpM = line.match(/score cp (-?\d+)/);
+          const mateM = line.match(/score mate (-?\d+)/);
+          const pvM = line.match(/ pv (.+)/);
+          const mpvM = line.match(/multipv (\d+)/);
+          const d = parseInt(dM?.[1] || '0');
+          const pvNum = parseInt(mpvM?.[1] || '1');
+          let cp = 0;
+          if (cpM) cp = parseInt(cpM[1]);
+          else if (mateM) cp = parseInt(mateM[1]) > 0 ? 10000 : -10000;
+          const moves = pvM?.[1]?.trim() || '';
+          if (!collected[pvNum] || d >= collected[pvNum].depth) {
+            collected[pvNum] = { cp, moves, depth: d, firstMove: moves.split(' ')[0] };
+          }
+        }
+        if (line.startsWith('bestmove')) {
+          sfSearchActive = false;
+          const bm = line.split(' ')[1];
+          const pvs = Object.keys(collected)
+            .sort((a, b) => parseInt(a) - parseInt(b))
+            .map(k => collected[k]);
+          sfLog('sfAnalyze', `COMPLETE bestmove=${bm} maxDepth=${pvs[0]?.depth} fen=${fen.split(' ').slice(0,2).join(' ')}…`);
+          // Store in eval cache
+          const finalDepth = pvs[0]?.depth || 0;
+          if (finalDepth >= EVAL_CACHE_MIN_DEPTH) {
+            evalCacheStore(fen, finalDepth, bm, pvs[0]?.cp ?? 0,
+              pvs.map(pv => ({ cp: pv.cp, move: pv.firstMove, san: uciToSan(fen, pv.firstMove), uciLine: pv.moves })),
+              multiPv);
+          }
+          cleanup({ bestMove: bm, pvs, fen });
+        }
+      };
+      sfWorker.addEventListener('message', handler);
+    })();
   });
 }
 
@@ -5437,106 +5671,140 @@ function sfAnalyzeAdaptive(fen, { minDepth = 16, maxDepth = 22, stableCount = 2,
   // Apply mobile depth offset
   minDepth = depthAdj(minDepth);
   maxDepth = depthAdj(maxDepth);
-  return new Promise(async (resolve) => {
-    if (sfSearchActive) {
-      sfLog('sfAnalyzeAdaptive', `terminating worker (search was active)`);
-      sfWorker.terminate();
-      sfWorker = null;
-      sfReady = false;
-      sfSearchActive = false;
-      preAnalysisListener = null;
-      preAnalysisReadyHandler = null;
-      await initStockfish();
-    }
-    if (!sfReady) { resolve(null); return; }
-
-    sfLog('sfAnalyzeAdaptive', `START fen=${fen.split(' ').slice(0,2).join(' ')}… minD=${minDepth} maxD=${maxDepth} stable=${stableCount}`);
-
-    const collected = {};
-    let lastBestMove = null;
-    let lastDepthSeen = 0;
-    let stableTransitions = 0; // consecutive depth transitions with unchanged best move
-    let resolved = false;
-    let unstable = false; // true after best move changes at least once past minDepth
-
-    sfWorker.postMessage('setoption name MultiPV value 1');
-    sfWorker.postMessage(`position fen ${fen}`);
-    sfWorker.postMessage(`go depth ${maxDepth}`);
-    sfSearchActive = true;
-
-    function handler(e) {
-      const line = e.data;
-      if (typeof line !== 'string') return;
-
-      if (line.startsWith('info') && line.includes(' pv ')) {
-        const dM = line.match(/depth (\d+)/);
-        const cpM = line.match(/score cp (-?\d+)/);
-        const mateM = line.match(/score mate (-?\d+)/);
-        const pvM = line.match(/ pv (.+)/);
-        const d = parseInt(dM?.[1] || '0');
-        let cp = 0;
-        if (cpM) cp = parseInt(cpM[1]);
-        else if (mateM) cp = parseInt(mateM[1]) > 0 ? 10000 : -10000;
-        const moves = pvM?.[1]?.trim() || '';
-        const firstMove = moves.split(' ')[0];
-
-        if (!collected[1] || d >= collected[1].depth) {
-          collected[1] = { cp, moves, depth: d, firstMove };
-        }
-
-        // Check stability on every info line after minDepth
-        if (d >= minDepth && !resolved) {
-          const isNewDepth = d > lastDepthSeen;
-
-          if (firstMove !== lastBestMove) {
-            // Best move changed (mid-depth or at transition) — reset stability
-            if (lastBestMove !== null) unstable = true;
-            stableTransitions = 0;
-            lastBestMove = firstMove;
-          } else if (isNewDepth) {
-            // Same best move at a new depth transition — increment
-            stableTransitions++;
-          }
-
-          if (isNewDepth) lastDepthSeen = d;
-
-          // Show arrow only after instability detected
-          if (onUpdate && firstMove && unstable) onUpdate(d, firstMove, cp, moves);
-
-          // Stable for N consecutive depth transitions
-          if (stableTransitions >= stableCount) {
-            resolved = true;
-            sfLog('sfAnalyzeAdaptive', `STABLE EXIT at depth ${d} bestMove=${firstMove} stableTransitions=${stableTransitions}`);
-            // Store in eval cache
-            if (d >= EVAL_CACHE_MIN_DEPTH) {
-              evalCacheStore(fen, d, firstMove, cp,
-                [{ cp, move: firstMove, san: uciToSan(fen, firstMove), uciLine: collected[1]?.moves || '' }], 1);
-            }
-            resolve({ bestMove: firstMove, pvs: [collected[1]], fen, earlyExit: true, exitDepth: d });
-          }
-        }
-      }
-
-      if (line.startsWith('bestmove')) {
-        sfWorker.removeEventListener('message', handler);
+  return new Promise((resolve) => {
+    (async () => {
+      if (sfSearchActive) {
+        sfLog('sfAnalyzeAdaptive', `terminating worker (search was active)`);
+        // H2: drain siblings before terminate.
+        drainSfPendingResolvers();
+        sfWorker.terminate();
+        sfWorker = null;
+        sfReady = false;
         sfSearchActive = false;
-        if (!resolved) {
+        preAnalysisListener = null;
+        await initStockfish();
+        // H1: same post-init claim check as sfAnalyze.
+        if (sfSearchActive) { sfLog('sfAnalyzeAdaptive', 'post-init: worker claimed by sibling, resolving null'); resolve(null); return; }
+      }
+      if (!sfReady) { resolve(null); return; }
+
+      sfLog('sfAnalyzeAdaptive', `START fen=${fen.split(' ').slice(0,2).join(' ')}… minD=${minDepth} maxD=${maxDepth} stable=${stableCount}`);
+
+      const collected = {};
+      let lastBestMove = null;
+      let lastDepthSeen = 0;
+      let stableTransitions = 0; // consecutive depth transitions with unchanged best move
+      let unstable = false; // true after best move changes at least once past minDepth
+
+      // H2: settled/cleanup replaces the local `resolved` flag and adds drain
+      // registration. Unlike sfAnalyze (where cleanup fires only on bestmove),
+      // this function can cleanup EARLY at the stable-exit path while the
+      // Stockfish search keeps running. We must therefore keep the listener
+      // attached after cleanup so the eventual bestmove clears sfSearchActive
+      // — otherwise the flag stays stuck and the next caller needlessly
+      // terminates an idle worker. The bestmove branch below self-detaches
+      // the listener and clears the flag unconditionally.
+      let settled = false;
+      let handler;
+      const cleanup = (result) => {
+        if (settled) return;
+        settled = true;
+        sfPendingResolvers.delete(cleanup);
+        // Do NOT removeEventListener here — the listener must remain attached
+        // to catch the eventual bestmove after stable exit. The bestmove
+        // branch self-detaches.
+        resolve(result);
+      };
+      sfPendingResolvers.add(cleanup);
+
+      sfSearchActive = true;  // M6: set BEFORE postMessage to match invariant
+      sfWorker.postMessage('setoption name MultiPV value 1');
+      sfWorker.postMessage(`position fen ${fen}`);
+      sfWorker.postMessage(`go depth ${maxDepth}`);
+
+      handler = (e) => {
+        const line = e.data;
+        if (typeof line !== 'string') return;
+
+        // bestmove always finalizes: clear sfSearchActive and detach, whether
+        // or not we already stable-exited. After that, if settled (stable
+        // exit already resolved), nothing more to do.
+        if (line.startsWith('bestmove')) {
+          sfSearchActive = false;
+          try { if (sfWorker) sfWorker.removeEventListener('message', handler); } catch (_) {}
+          if (settled) return;
           const bm = line.split(' ')[1];
           const pvs = Object.keys(collected)
             .sort((a, b) => parseInt(a) - parseInt(b))
             .map(k => collected[k]);
           sfLog('sfAnalyzeAdaptive', `FULL DEPTH bestmove=${bm} depth=${pvs[0]?.depth}`);
-          // Store in eval cache
           const fd = pvs[0]?.depth || 0;
           if (fd >= EVAL_CACHE_MIN_DEPTH) {
             evalCacheStore(fen, fd, bm, pvs[0]?.cp ?? 0,
               pvs.map(pv => ({ cp: pv.cp, move: pv.firstMove, san: uciToSan(fen, pv.firstMove), uciLine: pv.moves })), 1);
           }
-          resolve({ bestMove: bm, pvs, fen });
+          cleanup({ bestMove: bm, pvs, fen });
+          return;
         }
-      }
-    }
-    sfWorker.addEventListener('message', handler);
+
+        // After stable exit, we keep the listener attached (per above comment)
+        // but skip stability processing on subsequent info lines.
+        if (settled) return;
+
+        if (line.startsWith('info') && line.includes(' pv ')) {
+          const dM = line.match(/depth (\d+)/);
+          const cpM = line.match(/score cp (-?\d+)/);
+          const mateM = line.match(/score mate (-?\d+)/);
+          const pvM = line.match(/ pv (.+)/);
+          const d = parseInt(dM?.[1] || '0');
+          let cp = 0;
+          if (cpM) cp = parseInt(cpM[1]);
+          else if (mateM) cp = parseInt(mateM[1]) > 0 ? 10000 : -10000;
+          const moves = pvM?.[1]?.trim() || '';
+          const firstMove = moves.split(' ')[0];
+
+          if (!collected[1] || d >= collected[1].depth) {
+            collected[1] = { cp, moves, depth: d, firstMove };
+          }
+
+          // Check stability on every info line after minDepth
+          if (d >= minDepth) {
+            const isNewDepth = d > lastDepthSeen;
+
+            if (firstMove !== lastBestMove) {
+              // Best move changed (mid-depth or at transition) — reset stability
+              if (lastBestMove !== null) unstable = true;
+              stableTransitions = 0;
+              lastBestMove = firstMove;
+            } else if (isNewDepth) {
+              // Same best move at a new depth transition — increment
+              stableTransitions++;
+            }
+
+            if (isNewDepth) lastDepthSeen = d;
+
+            // Show arrow only after instability detected
+            if (onUpdate && firstMove && unstable) onUpdate(d, firstMove, cp, moves);
+
+            // Stable for N consecutive depth transitions
+            if (stableTransitions >= stableCount) {
+              sfLog('sfAnalyzeAdaptive', `STABLE EXIT at depth ${d} bestMove=${firstMove} stableTransitions=${stableTransitions}`);
+              // Store in eval cache
+              if (d >= EVAL_CACHE_MIN_DEPTH) {
+                evalCacheStore(fen, d, firstMove, cp,
+                  [{ cp, move: firstMove, san: uciToSan(fen, firstMove), uciLine: collected[1]?.moves || '' }], 1);
+              }
+              // Note: we DO NOT send stop to SF (WASM crashes); the search
+              // runs to max depth. bestmove will arrive later and will clear
+              // sfSearchActive + detach us. cleanup() here just resolves the
+              // Promise and marks settled — the listener stays attached.
+              cleanup({ bestMove: firstMove, pvs: [collected[1]], fen, earlyExit: true, exitDepth: d });
+            }
+          }
+        }
+      };
+      sfWorker.addEventListener('message', handler);
+    })();
   });
 }
 
@@ -5618,12 +5886,13 @@ function startPreAnalysis(fen) {
   if (sfSearchActive) {
     // Never send 'stop' to this WASM build — terminate and recreate worker
     sfLog('startPreAnalysis', `session=${session} terminating worker (search was active)`);
+    // H2: drain siblings — their bestmove listeners die with the worker.
+    drainSfPendingResolvers();
     sfWorker.terminate();
     sfWorker = null;
     sfReady = false;
     sfSearchActive = false;
     preAnalysisListener = null;
-    preAnalysisReadyHandler = null;
 
     // Async reinit + search start
     (async () => {
@@ -5634,6 +5903,16 @@ function startPreAnalysis(fen) {
       }
       if (!sfReady) {
         sfLog('startPreAnalysis', `session=${session} SF not ready after reinit, aborting`);
+        return;
+      }
+      // H1: init is now serialized (sfInitPromise), so a sibling caller
+      // (sfAnalyze / sfAnalyzeAdaptive / analyzePosition) that was awaiting
+      // the same init can resume first and post go before us. Reclaim by
+      // recursing — bumps session, so the sibling's completion (if it ever
+      // delivers) is ignored via the session-mismatch check in its handler.
+      if (sfSearchActive) {
+        sfLog('startPreAnalysis', `session=${session} post-init: worker was claimed during init, reclaiming`);
+        startPreAnalysis(fen);
         return;
       }
       launchPreAnalysisSearch(fen, session);
@@ -5654,6 +5933,12 @@ function startPreAnalysis(fen) {
         sfLog('startPreAnalysis', `session=${session} SF not ready after reinit, aborting`);
         return;
       }
+      // H1: see sfSearchActive branch above — same reclaim logic.
+      if (sfSearchActive) {
+        sfLog('startPreAnalysis', `session=${session} post-init: worker was claimed during init, reclaiming`);
+        startPreAnalysis(fen);
+        return;
+      }
       launchPreAnalysisSearch(fen, session);
     })();
     return;
@@ -5667,10 +5952,10 @@ function launchPreAnalysisSearch(fen, session) {
   sfLog('startPreAnalysis', `session=${session} BEGIN SEARCH: go depth ${depthAdj(30)} for fen=${fen.split(' ').slice(0,2).join(' ')}…`);
   const collected = {};
 
+  sfSearchActive = true;  // M6: set BEFORE postMessage to match invariant
   sfWorker.postMessage('setoption name MultiPV value 3');
   sfWorker.postMessage(`position fen ${fen}`);
   sfWorker.postMessage(`go depth ${depthAdj(30)}`);
-  sfSearchActive = true;
 
   function handler(e) {
     const line = e.data;
@@ -5748,24 +6033,32 @@ function launchPreAnalysisSearch(fen, session) {
   }
 
   preAnalysisListener = handler;
-  preAnalysisReadyHandler = null;
   sfWorker.addEventListener('message', handler);
 }
 
 function stopPreAnalysis() {
-  const hadReady = !!preAnalysisReadyHandler;
-  const hadListener = !!preAnalysisListener;
-  if (hadReady || hadListener) {
-    sfLog('stopPreAnalysis', `removing handlers: readyHandler=${hadReady} listener=${hadListener} session=${preAnalysisSession} fen=${preAnalysisFen?.split(' ').slice(0,2).join(' ')}…`);
-  }
-  if (preAnalysisReadyHandler) {
-    sfWorker.removeEventListener('message', preAnalysisReadyHandler);
-    preAnalysisReadyHandler = null;
-  }
   if (preAnalysisListener) {
-    sfWorker.removeEventListener('message', preAnalysisListener);
+    sfLog('stopPreAnalysis', `removing handler session=${preAnalysisSession} fen=${preAnalysisFen?.split(' ').slice(0,2).join(' ')}…`);
+    // Defensive: sfWorker should be non-null while preAnalysisListener is
+    // set, but never null-deref if the invariant is violated by some future
+    // code path.
+    try { if (sfWorker) sfWorker.removeEventListener('message', preAnalysisListener); } catch (_) {}
     preAnalysisListener = null;
   }
+}
+
+// M3: resolve any queued preAnalysisWaiters with null. Call at transitions
+// that leave the mistake flow without a matching startPreAnalysis (which
+// would also null-resolve them at 5655) — loadPosition tactic/repertoire,
+// enterAnalysisMode. The main waiter-producing caller is showHint at 6358,
+// which awaits waitForPreAnalysis(20); without this drain, switching to
+// a tactic/repertoire/analysis item mid-hint-wait leaves the hint's async
+// function suspended forever on a never-resolving Promise.
+function orphanPreAnalysisWaiters() {
+  if (preAnalysisWaiters.length === 0) return;
+  sfLog('orphanPreAnalysisWaiters', `resolving ${preAnalysisWaiters.length} waiters with null`);
+  preAnalysisWaiters.forEach(w => { try { w.resolve(null); } catch (_) {} });
+  preAnalysisWaiters = [];
 }
 
 function resolveWaiters() {
@@ -6000,6 +6293,7 @@ function togglePauseAnalysis() {
       stopPreAnalysis();
       // Terminate the worker so it stops using CPU
       if (sfWorker) {
+        drainSfPendingResolvers();  // H2: flush pending sfAnalyze Promises
         sfWorker.terminate();
         sfWorker = null;
         sfReady = false;
@@ -6148,6 +6442,7 @@ async function showHint() {
       preAnalysisPaused = true;
       stopPreAnalysis();
       if (sfWorker) {
+        drainSfPendingResolvers();  // H2: flush pending sfAnalyze Promises
         sfWorker.terminate();
         sfWorker = null;
         sfReady = false;
@@ -6417,6 +6712,7 @@ function enterAnalysisMode() {
 
   // Exit any engine line / continuation / tactic state
   stopPreAnalysis();
+  orphanPreAnalysisWaiters();  // M3: null out hint/evaluateMove waiters — we're leaving mistake mode
   if (engineLine) exitEngineLine();
   if (continuationMode) {
     continuationMode = false;
@@ -6707,7 +7003,10 @@ function analysisFlipBoard() {
 // ─── Analysis Stockfish Loop ───
 function stopAnalysisSearch() {
   if (analysisListener) {
-    sfWorker.removeEventListener('message', analysisListener);
+    // Defensive: if the worker was terminated externally (crash, loadPosition,
+    // etc.) without the caller nulling analysisListener first, sfWorker may be
+    // null or a different worker than the one this listener was attached to.
+    try { if (sfWorker) sfWorker.removeEventListener('message', analysisListener); } catch (_) {}
     analysisListener = null;
   }
   analysisSession++;
@@ -6755,10 +7054,10 @@ function startAnalysisSearch(fen) {
     if (session !== analysisSession) return;
     if (!sfReady) return;
     const collected = {};
+    sfSearchActive = true;  // M6: set BEFORE postMessage to match invariant
     sfWorker.postMessage('setoption name MultiPV value 3');
     sfWorker.postMessage(`position fen ${fen}`);
     sfWorker.postMessage(`go depth ${depthAdj(30)}`);
-    sfSearchActive = true;
 
     function handler(e) {
       const line = e.data;
@@ -6831,6 +7130,7 @@ function startAnalysisSearch(fen) {
   };
 
   if (sfSearchActive) {
+    drainSfPendingResolvers();  // H2: flush siblings before terminate
     sfWorker.terminate();
     sfWorker = null;
     sfReady = false;
@@ -6839,12 +7139,19 @@ function startAnalysisSearch(fen) {
     (async () => {
       await initStockfish();
       if (session !== analysisSession) return;
+      if (!sfReady) return;
+      // H1: sibling caller may have claimed the worker during our serialized
+      // init wait. Reclaim via recursion — bumps analysisSession so the
+      // sibling's later session-check discards any work it completes.
+      if (sfSearchActive) { startAnalysisSearch(fen); return; }
       launch();
     })();
   } else if (!sfReady) {
     (async () => {
       await initStockfish();
       if (session !== analysisSession) return;
+      if (!sfReady) return;
+      if (sfSearchActive) { startAnalysisSearch(fen); return; }
       launch();
     })();
   } else {
@@ -11233,6 +11540,7 @@ function loadPosition(globalIdx, skipAnimation = false) {
   silentEvalProcessing = false;
   silentEvalMainProcessing = false;
   if (evalSfSearchActive && evalSfWorker) {
+    drainEvalSfPendingResolvers();  // H2: flush any pending silent-eval Promises
     evalSfWorker.terminate();
     evalSfWorker = null;
     evalSfReady = false;
@@ -11348,7 +11656,9 @@ function loadPosition(globalIdx, skipAnimation = false) {
     // But clean up any running search from the previous position so
     // sfAnalyze works cleanly if the user makes a wrong move.
     stopPreAnalysis();
+    orphanPreAnalysisWaiters();  // M3: null out hint-button waiters from the prior mistake
     if (sfSearchActive && sfWorker) {
+      drainSfPendingResolvers();  // H2: flush sfAnalyze Promises before kill
       sfWorker.terminate();
       sfWorker = null;
       sfReady = false;
@@ -11414,7 +11724,9 @@ function loadPosition(globalIdx, skipAnimation = false) {
       </div>
     `;
     stopPreAnalysis();
+    orphanPreAnalysisWaiters();  // M3: null out hint-button waiters from the prior mistake
     if (sfSearchActive && sfWorker) {
+      drainSfPendingResolvers();  // H2: flush sfAnalyze Promises
       sfWorker.terminate();
       sfWorker = null;
       sfReady = false;
@@ -14246,10 +14558,12 @@ function exitEngineLine() {
   // abandonDetectedTacticSolve. initStockfish returns immediately; the
   // next SF consumer waits on sfReady before posting `go`.
   if (sfSearchActive && sfWorker) {
+    drainSfPendingResolvers();  // H2: flush pending sfAnalyze Promises (branch/extension analyses)
     try { sfWorker.terminate(); } catch (_) {}
     sfWorker = null;
     sfReady = false;
     sfSearchActive = false;
+    preAnalysisListener = null;  // L3: stale ref to handler on dead worker
     initStockfish();
   }
   clearHighlights();
