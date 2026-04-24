@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Review best-line: fix pre-existing arrow-key teleport on main-line nav. stepReviewBestLine was treating data.currentIdx as the authoritative arrow-key cursor, but four write paths update engineLine.currentIdx without syncing data.currentIdx: (1) goToMainLineMove — user clicks a main-line move in the engineLineBox panel; (2) handleEngineLineBranch's alt→main switch — user drags a move matching the main-line next while inside an alt, snapping back to main; (3) handleEngineLineBranch's same-move advance — user drags the next best move while on main line, advancing engineLine; (4) any future goToLineMove caller that doesn't route through goToReviewLine. After any of these, pressing ← or → would read stale data.currentIdx, advance by delta from there, and call goToReviewLine which loads data.lineMoves[newIdx].fen — teleporting the board away from wherever the user actually was. (Path 1 is the most common — the engineLineBox panel is the primary way to jump around an engine line.) Fix: in stepReviewBestLine's main-line branch (activeAlt === -1), read engineLine.currentIdx as the source of truth instead of data.currentIdx. The board itself tracks engineLine.currentIdx via goToLineMove's boardObj.position call, so that's ground truth. Fall through to data.currentIdx only when engineLine is absent (e.g. exitEngineLine cleared it but _reviewBestLine was left behind) — same behavior as before. All four write paths are now caught by a single read-side change, and any new goToLineMove caller added later inherits the fix automatically. Not filing as a separate issue since it wasn't reported — surfaced during the post-merge scan and mentioned as out-of-scope then, fixed now on request. Cosmetic sibling issue (feedback-card move-list .active highlight stays stale on the old data.currentIdx until the next goToReviewLine call) left as-is; it's a milder UX quirk and the arrow-key teleport was the actual correctness bug.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Review best-line: sync feedback-card .active highlight and data.currentIdx from goToLineMove. Cosmetic follow-up to the arrow-key teleport fix (4841ec1): during a Show Line session, any direct engineLine navigation path — goToMainLineMove (engineLineBox main-line click), handleEngineLineBranch's alt→main switch, handleEngineLineBranch's same-move advance, goToAltLineMove, extendEngineLine's auto-advance — left the feedback-card move list's .active highlight stuck on whatever index goToReviewLine or the initial showReviewBestLine render had set, and also left data.currentIdx stale (the previous commit fixed the teleport symptom by preferring engineLine.currentIdx at the read site in stepReviewBestLine, but the stale highlight remained visible). Fix: goToLineMove now mirrors engineLine.currentIdx into window._reviewBestLine.currentIdx (only when on pure main line — in alts the position isn't in data.lineMoves so there's nothing meaningful to store), and updates the #feedbackContainer .engine-line-moves .move elements' .active class to match. Alt exploration and preFen (idx === -1) both clear the feedback-card highlight, matching goToReviewLine's own model of "active iff on main line at a valid index." Handles all four desync paths with a single site update; goToReviewLine's existing direct update and stepReviewBestLine's preFen-return branch's direct clear both skip goToLineMove, so no double-writes. Gated on window._reviewBestLine so non-review engineLine navigation (wrong-move browsing during plain drill) is unaffected — no feedback-card in that context anyway.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -14537,6 +14537,33 @@ function goToLineMove(idx, animate = true) {
   // Re-render move list to update active highlights
   renderEngineLine();
 
+  // Keep the review best-line state in lockstep with engineLine. goToReviewLine
+  // updates both data.currentIdx and the feedback-card .active highlight on
+  // feedback-card clicks, but direct engineLine navigation — goToMainLineMove,
+  // handleEngineLineBranch's alt→main switch / same-move advance,
+  // goToAltLineMove, extendEngineLine auto-advance — bypasses goToReviewLine
+  // and used to leave the feedback-card highlight stuck on the last
+  // goToReviewLine index, plus data.currentIdx stale (the teleport fix
+  // earlier in stepReviewBestLine compensates at the read site, but syncing
+  // here makes any other future reader of data.currentIdx safe too).
+  //
+  // data.currentIdx: only mirror engineLine.currentIdx on the main line;
+  // in an alt the position isn't in data.lineMoves so there's nothing
+  // meaningful to store (leave whatever was last set on main — it'll be
+  // re-synced the next time activeAlt returns to -1).
+  //
+  // Feedback-card highlight: active iff we're on pure main line at a
+  // valid index (matches goToReviewLine's own model, which only runs for
+  // main-line clicks). Alt exploration or preFen (idx === -1) clears
+  // all highlights.
+  if (window._reviewBestLine) {
+    if (engineLine.activeAlt === -1) {
+      window._reviewBestLine.currentIdx = idx;
+    }
+    const fbMoves = document.querySelectorAll('#feedbackContainer .engine-line-moves .move');
+    const activeIdx = (engineLine.activeAlt === -1 && idx >= 0 && idx < engineLine.moves.length) ? idx : -1;
+    fbMoves.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
+  }
   // Update eval bar with the active path's evaluation (immediate fallback)
   if (idx === -1) {
     // EL11: at baseFen (idx=-1) the line's cpWhite is the eval AFTER the
