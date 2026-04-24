@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hint H1: gate silent-mode contLine browse hint-button on !silentContinuation. goToContLineMove (15054–15075) previously re-showed btnHint unconditionally when browsing to a user-turn position during contLineBrowsing + continuationMode. In advantage mode this let the user press H on a browsed position, set hintUsed=true via the waitForPreAnalysis path, and then have finishAdvantage (15975) downgrade what would have been an Easy grade to Hard(hint). Filter practice had the same button-leak with no SRS penalty (recordPracticeResult ignores hintUsed). The click-to-move truncate-branch at 11302 and the onDrop truncate-branch at 12048 both already gate on !silentContinuation; this goToContLineMove site was the asymmetric one. Fix: in the isUserTurn arm, positively hide btnHint when silentContinuation is true (matches the opponent-turn arm's hide-on-browse pattern) and only re-show with the fresh-state styling when !silentContinuation. hintLevel / hintMove / hintArrow resets are unchanged — those are always correct at zero. startPreAnalysis(currentSolveFen) is also unchanged because silent-mode play still needs pre-analysis to classify user moves if they drop a piece on the browsed position (truncate-and-branch).</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hint H2: hide btnHint on note-variation jump. jumpBoardToNoteFen (21673) replaces gameEngine with the note's variation FEN and latches noteJumpedAway=true to block drag/tap, but previously left btnHint visible. Pressing H in any drill (mistake / repertoire / repContActive / drill-mode tactic — jumpToNoteMove's `if (tacticMode || continuationMode) return` gate excludes tactics-in-progress and active continuation but mistake drill and solo repertoire drill and repContActive all pass through) would run showHint against the drill position's hint data and paint `.square-hint` / hintArrow on squares whose pieces don't exist on the variation board. Same failure class as tactic-mode's browsingLine guard at 6331 but triggered by a different entry point. Fix: in the noteJumpedAway=true arm, positively hide btnHint and clearHintHighlights, and reset the progressive-hint scalars (hintLevel / hintMove / hintArrow) so whichever reset path clears noteJumpedAway — Retry/Prev/Next → loadPosition for mistake/tactic/continuation drills, noteVariationStep's anchor-return for repertoireDrillMode — gets a clean hint cycle on re-show. hintUsed is left alone because the user did use a hint on the drill position and SRS grading should still reflect that. Paired re-show added to noteVariationStep's repertoireDrillMode anchor-return branch (21779) so the user isn't left with a hidden button after ←-stepping back to the anchor without a full reset.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -21693,6 +21693,22 @@ function jumpBoardToNoteFen(fen, fromSq, toSq) {
     // drill evaluation path.
     if (!analysisMode && !openingFilterMode) {
       noteJumpedAway = true;
+      // H2: the drill's hint data (pre-analysis best move / m.repertoireMove /
+      // tacticMoves[stepIdx]) is computed against the drill position, not
+      // the variation — pressing H would paint `.square-hint` / hintArrow
+      // against squares that don't correspond to anything meaningful on the
+      // variation board. Hide the button for the duration of the jump and
+      // reset the progressive-hint scalars so whichever reset path clears
+      // noteJumpedAway (Retry/Prev/Next → loadPosition, or the repertoire-
+      // drill anchor-return branch in noteVariationStep) gets a clean hint
+      // cycle on re-show. hintUsed is left alone — the user did use a hint
+      // on the drill position and the grade should still reflect that.
+      hintLevel = 0;
+      hintMove = null;
+      hintArrow = null;
+      clearHintHighlights();
+      const hintBtn = document.getElementById('btnHint');
+      if (hintBtn) hintBtn.classList.add('hidden');
     }
     return true;
   } catch (err) {
@@ -21776,7 +21792,14 @@ function noteVariationStep(delta) {
     // repertoire loop where the same position stays in play until
     // correctly answered. Scoped to repertoireDrillMode to preserve the
     // existing semantics for plain mistake browsing.
-    if (repertoireDrillMode) noteJumpedAway = false;
+    if (repertoireDrillMode) {
+      noteJumpedAway = false;
+      // H2: paired with the jumpBoardToNoteFen hide — we're back on the drill
+      // position, so restore btnHint to its fresh-state styling. Other drill
+      // types reach this reset via Retry/Prev/Next → loadPosition.
+      const hintBtn = document.getElementById('btnHint');
+      if (hintBtn) { hintBtn.classList.remove('hidden'); hintBtn.disabled = false; hintBtn.textContent = '💡 Hint'; hintBtn.style.borderColor = ''; hintBtn.style.color = ''; }
+    }
     return true;
   }
   const el = clickables[newIdx];
