@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hint M2: reset hint scalars and `.square-hint` on tryDetectedTactic entry. The detected-tactic solve is usually entered from a game-review retry feedback card — startReviewRetry resets hintUsed=false, but if the user pressed H during the retry before clicking "🎯 Try", hintLevel / hintMove / hintArrow and the `.square-hint` CSS class on a prior-context square can all leak into the ephemeral solve. tryDetectedTactic (5232) previously reset tacticHintUsed (5273) and re-styled btnHint to fresh state, but didn't touch the five pieces of progressive-hint state. Symptoms: `hintLevel >= 2` (level-2 press) made the top-of-showHint guard at 6323 silently swallow every H press on the detected tactic; `hintLevel === 1` made the first H press draw the arrow directly, skipping the piece-highlight phase; stale `.square-hint` from pre-solve context could persist visually since clearHighlights / clearArrows / boardObj.position don't touch the square-container class. Fix: add `hintLevel = 0; hintMove = null; hintUsed = false; hintArrow = null; clearHintHighlights();` alongside the existing board reset, matching the pattern used by loadPosition (11517–11519) and startReviewRetry (17093–17096). clearArrows just above already nulls hintArrow redundantly — the explicit assignment keeps the block self-contained and makes intent obvious.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hint M3: hide btnHint in revealRepertoireAnswer. After the user fails a repertoire drill (3 wrong attempts, or explicit "Show answer"), revealRepertoireAnswer advances gameEngine to the POST-repertoire-move position (20374 `gameEngine.move(expected.san, …)`) and shows the answer feedback. btnHint was still visible from the drill phase; pressing H calls showHint's repertoire branch with `m.repertoireMove.uci` (the move that was just played) and paints `.square-hint` on its from-square — which is now empty on the displayed board because the piece already moved to the to-square. Fix: add `btnHint.classList.add('hidden')` and clearHintHighlights right after the bestMoveArrow is drawn. Paired re-shows already exist: showRepContPrompt at 20644-20645 restores fresh-state btnHint when the user clicks "▶ Continue (random line)" / "▶ All variations" and advanceRepertoireContinuation prompts for the next trie move; Next → loadPosition also re-shows via the repertoire branch at 11540-11545. Matches the end-of-drill hide pattern in finishTacticComplete (12387).</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -20377,6 +20377,18 @@ function revealRepertoireAnswer(m, expected, isLastItem, userPlayedSan) {
   renderArrows();
   showLastMoveHighlight(expected.uci.slice(0, 2), expected.uci.slice(2, 4));
   showCheckHighlightDeferred(gameEngine);
+
+  // M3: the board now shows the POST-repertoire-move position. btnHint was
+  // still visible from the drill phase; pressing H here runs the repertoire
+  // branch of showHint with m.repertoireMove.uci and lands `.square-hint`
+  // on a from-square that's now empty (the piece already moved to the
+  // to-square). Hide the button — showRepContPrompt and loadPosition both
+  // re-show it with fresh styling on their respective reset paths
+  // ("▶ Continue" → advanceRepertoireContinuation → showRepContPrompt, or
+  // Next → loadPosition).
+  const hintBtnReveal = document.getElementById('btnHint');
+  if (hintBtnReveal) hintBtnReveal.classList.add('hidden');
+  clearHintHighlights();
 
   const contAvailable = getRepertoireContinuations(gameEngine.fen()).length > 0;
   const contBtns = contAvailable
