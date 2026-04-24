@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Review best-line: fix three pre-existing sites with the same overly-broad selector bug. Found during the scan of 0adb40c, noted then as pre-existing and out-of-scope; fixing now on request. All three sites used document.querySelectorAll('#feedbackContainer .engine-line-moves .move') which matches BOTH the feedback-card's move list AND the engineLineBox panel (renderEngineLine inserts engineLineBox as a sibling of .feedback-box inside #feedbackContainer, and both contain a .engine-line-moves > .move tree). The forEach then toggles .active based on flat DOM index, which only correctly indexes feedback-card moves — engineLineBox's .move elements (including intermixed .alt-move spans that carry .move too) got their correct .active classes from renderEngineLine clobbered. Sites: (1) goToReviewLine — post-branch feedback-card clicks clobbered engineLineBox highlight. (2) stepReviewBestLine preFen-return branch — "remove all .active" cleared engineLineBox's highlight by coincidence-correctness (the direct state mutation didn't re-render engineLineBox, so clearing all .active happened to give the right visual even though it went through the wrong code path). (3) animateLinePreview — no active clash in practice (auto-preview runs before any branch) but same buggy pattern. Fix: tighten all three selectors to #feedbackContainer > .feedback-box .engine-line-moves .move — engineLineBox is a direct child of #feedbackContainer but not a descendant of .feedback-box, so `> .feedback-box` cleanly excludes it. For (1) and (2), also add an explicit renderEngineLine() call to rebuild engineLineBox with the correct new .active classes (the broad forEach was "accidentally" doing this in preFen, and not doing it at all correctly in goToReviewLine). Both renderEngineLine calls are guarded on `document.getElementById('engineLineBox')` existing, so they don't premature-materialize the panel on pre-branch feedback-card clicks or pre-branch preFen-returns — engineLineBox's appearance remains tied to the user's first branch, as before. (3) doesn't need the renderEngineLine call since no engineLineBox can exist at that timing. Four querySelectorAll usages of this selector now all scoped tightly; no broad-selector matches remaining in index.html.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hint H1: gate silent-mode contLine browse hint-button on !silentContinuation. goToContLineMove (15054–15075) previously re-showed btnHint unconditionally when browsing to a user-turn position during contLineBrowsing + continuationMode. In advantage mode this let the user press H on a browsed position, set hintUsed=true via the waitForPreAnalysis path, and then have finishAdvantage (15975) downgrade what would have been an Easy grade to Hard(hint). Filter practice had the same button-leak with no SRS penalty (recordPracticeResult ignores hintUsed). The click-to-move truncate-branch at 11302 and the onDrop truncate-branch at 12048 both already gate on !silentContinuation; this goToContLineMove site was the asymmetric one. Fix: in the isUserTurn arm, positively hide btnHint when silentContinuation is true (matches the opponent-turn arm's hide-on-browse pattern) and only re-show with the fresh-state styling when !silentContinuation. hintLevel / hintMove / hintArrow resets are unchanged — those are always correct at zero. startPreAnalysis(currentSolveFen) is also unchanged because silent-mode play still needs pre-analysis to classify user moves if they drop a piece on the browsed position (truncate-and-branch).</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -15065,7 +15065,23 @@ function goToContLineMove(idx) {
       hintMove = null;
       hintArrow = null;
       clearHintHighlights();
-      if (hintBtn) { hintBtn.classList.remove('hidden'); hintBtn.disabled = false; hintBtn.textContent = '💡 Hint'; hintBtn.style.borderColor = ''; hintBtn.style.color = ''; }
+      // H1: silent continuation (advantage / filter practice) hides hints
+      // during live play — honour that policy when browsing mid-line too.
+      // Previously this unconditionally re-showed the button, which in
+      // advantage mode let the user press H, set hintUsed=true, and have
+      // finishAdvantage (15975) downgrade their Easy grade to Hard(hint).
+      // Practice mode has the same button-leak with no SRS penalty. The
+      // sibling click-to-move branch at ~11302 and the onDrop truncate-branch
+      // at ~12048 both correctly gate on !silentContinuation; this site was
+      // the asymmetric one. startPreAnalysis still runs because silent-mode
+      // play needs it to classify user moves on a truncate-and-branch drop.
+      if (hintBtn) {
+        if (silentContinuation) {
+          hintBtn.classList.add('hidden');
+        } else {
+          hintBtn.classList.remove('hidden'); hintBtn.disabled = false; hintBtn.textContent = '💡 Hint'; hintBtn.style.borderColor = ''; hintBtn.style.color = '';
+        }
+      }
       startPreAnalysis(currentSolveFen);
     } else {
       // Opponent's turn — hide hint
