@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Review best-line: sync feedback-card .active highlight and data.currentIdx from goToLineMove. Cosmetic follow-up to the arrow-key teleport fix (4841ec1): during a Show Line session, any direct engineLine navigation path — goToMainLineMove (engineLineBox main-line click), handleEngineLineBranch's alt→main switch, handleEngineLineBranch's same-move advance, goToAltLineMove, extendEngineLine's auto-advance — left the feedback-card move list's .active highlight stuck on whatever index goToReviewLine or the initial showReviewBestLine render had set, and also left data.currentIdx stale (the previous commit fixed the teleport symptom by preferring engineLine.currentIdx at the read site in stepReviewBestLine, but the stale highlight remained visible). Fix: goToLineMove now mirrors engineLine.currentIdx into window._reviewBestLine.currentIdx (only when on pure main line — in alts the position isn't in data.lineMoves so there's nothing meaningful to store), and updates the #feedbackContainer .engine-line-moves .move elements' .active class to match. Alt exploration and preFen (idx === -1) both clear the feedback-card highlight, matching goToReviewLine's own model of "active iff on main line at a valid index." Handles all four desync paths with a single site update; goToReviewLine's existing direct update and stepReviewBestLine's preFen-return branch's direct clear both skip goToLineMove, so no double-writes. Gated on window._reviewBestLine so non-review engineLine navigation (wrong-move browsing during plain drill) is unaffected — no feedback-card in that context anyway.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix selector scope in goToLineMove's feedback-card highlight sync. The feedback-card sync I added in 0adb40c used the selector #feedbackContainer .engine-line-moves .move, which is too broad: renderEngineLine inserts the engineLineBox as a sibling of .feedback-box inside #feedbackContainer (via insertAdjacentElement at line 14453), and engineLineBox also contains a .engine-line-moves div with its own .move spans (main-line moves AND alt-moves — alt moves carry both .move and .alt-move classes). After a branch, renderEngineLine sets .active on the correct engineLineBox move at the canonical highlight spot, then my sync code ran a few lines later and wiped those .active classes because it was iterating ALL matched elements (feedback-card + engineLineBox concatenated) and only highlighting the one at flat index === activeIdx, which is a feedback-card index. The engineLineBox highlight disappeared on every post-branch goToLineMove call. Fix: tighten selector to #feedbackContainer > .feedback-box .engine-line-moves .move so it targets only feedback-card .move elements (engineLineBox is a sibling of .feedback-box, not a descendant, so `> .feedback-box` cleanly excludes it). Also simplified the activeIdx condition — dropped the `idx < engineLine.moves.length` check since the forEach naturally produces the right behavior when activeIdx is out of bounds of the now-scoped fbMoves (all highlights cleared, correct for extension-territory indices beyond data.lineMoves.length). Pre-existing same-selector usages in goToReviewLine, stepReviewBestLine's preFen branch, and animateLinePreview have the identical latent bug; not fixing them here since they're pre-existing (and in practice the preFen and animateLinePreview paths never clash with engineLineBox timing — only goToReviewLine does, and only post-branch). Filing those for potential follow-up.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -14556,12 +14556,20 @@ function goToLineMove(idx, animate = true) {
   // valid index (matches goToReviewLine's own model, which only runs for
   // main-line clicks). Alt exploration or preFen (idx === -1) clears
   // all highlights.
+  //
+  // Selector must be scoped to `> .feedback-box`: engineLineBox gets
+  // inserted as a sibling of .feedback-box inside #feedbackContainer
+  // (see renderEngineLine's insertAdjacentElement), and its own
+  // .engine-line-moves .move elements would otherwise match a naive
+  // `#feedbackContainer .engine-line-moves .move` query and get their
+  // .active classes clobbered — renderEngineLine runs a few lines
+  // above and already set the correct highlights there.
   if (window._reviewBestLine) {
     if (engineLine.activeAlt === -1) {
       window._reviewBestLine.currentIdx = idx;
     }
-    const fbMoves = document.querySelectorAll('#feedbackContainer .engine-line-moves .move');
-    const activeIdx = (engineLine.activeAlt === -1 && idx >= 0 && idx < engineLine.moves.length) ? idx : -1;
+    const fbMoves = document.querySelectorAll('#feedbackContainer > .feedback-box .engine-line-moves .move');
+    const activeIdx = (engineLine.activeAlt === -1 && idx >= 0) ? idx : -1;
     fbMoves.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
   }
   // Update eval bar with the active path's evaluation (immediate fallback)
