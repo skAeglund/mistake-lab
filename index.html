@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hint L1+L2+L3: low-severity hint-state fixes across three reset sites. (L1) abandonDetectedTacticSolve (5429) previously cleared hintLevel and hintArrow but not hintMove or hintUsed. Restored review state usually hides btnHint via snap.btnVisibility so the leak was inert — but inconsistent with the canonical reset pattern used by loadPosition / startReviewRetry / tryDetectedTactic. (L2) ignorePracticeRepertoire (15730) cleared hintLevel / hintMove but not hintArrow or hintUsed; hintArrow is nulled as a side effect of clearHintHighlights above, hintUsed is inert today because filter-practice isn't SRS-graded (recordPracticeResult ignores it) — latent bug if practice ever becomes graded. (L3) retryPosition's practice branch (18029) wiped visuals via clearBoardOverlays and hid btnHint, but hintLevel / hintMove / hintUsed scalars survived. Reachable leak: during practice play a repertoire deviation banner can show btnHint; if the user pressed H there and then clicked Retry, the next deviation banner in the retried session inherits the stale state — first H press acts as second press (arrow drawn from stale hintMove on a different-position board). Fix in all three: add the four-scalar reset (hintLevel / hintMove / hintUsed / hintArrow) to match the canonical pattern. Batched per workflow rules (independent trivial reset-site fixes across distinct subsystems, no shared state, no flow interaction). L4 dropped (silent no-op on off-trie repContActive position unreachable in normal flow — advanceRepertoireContinuation only plays opponent moves that are in the trie via getRepertoireContinuations).</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hint M4 follow-up: gate hint-visual re-apply on btnHint visibility. Post-hoc scan of the 8-commit hint batch surfaced a cosmetic interaction between M3 and M4: several code paths hide btnHint without resetting hintLevel / hintMove / hintUsed (M3 revealRepertoireAnswer 20456; finishAdvantage 16119; handleEvalResult wrong-move / good-move / inaccuracy branches at 13616 / 13632 / 13646; stopAndReviewContinuation 16204; others). If the user pressed A from any of those states and then exited analysis, M4's unconditional re-apply would paint `.square-hint` on a board where btnHint is hidden — the user can't interact with the highlight, and the hint no longer represents the current feedback state. Pre-existing "exit loses post-reveal state" bug is the root cause; M4 exposed it as a stray highlight. Fix: wrap the re-apply-or-stale-reset block in an `hintBtnVisible` check. When btnHint is hidden, skip both re-apply and stale-reset — the scalars stay set and will be cleaned up by whichever code path re-shows btnHint next (showRepContPrompt 20759; loadPosition 11596; retryPosition branches; etc. — all do their own four-scalar reset). Preserves M4's original intent (restore hint when btnHint is available for interaction) while closing the cross-commit cosmetic issue. hintBtnReset variable folded into hintBtnCheck since one lookup now serves both branches.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -6893,7 +6893,22 @@ function exitAnalysisMode() {
       // fromSq may not hold a piece on the reset board. In that case fully
       // reset hint state rather than paint a misleading arrow. gameEngine
       // was just loaded with m.fenBefore above so .get() is authoritative.
-      if (hintLevel >= 1 && hintMove && hintMove.length >= 4) {
+      //
+      // M4-follow-up: additionally gate on btnHint being visible. Several
+      // end-of-drill / mid-drill code paths hide btnHint without resetting
+      // the hint scalars (M3 revealRepertoireAnswer; finishAdvantage;
+      // handleEvalResult wrong-move / good-move / inaccuracy branches at
+      // 13616/13632/13646; stopAndReviewContinuation; etc.) — if the user
+      // pressed A from any of those states and then exits, re-applying the
+      // hint visual would paint `.square-hint` on a board where btnHint is
+      // hidden (user can't interact with the highlight) and the hint no
+      // longer represents the current feedback state. The scalars stay set
+      // for whichever code path re-shows btnHint next (showRepContPrompt,
+      // loadPosition on Next, retryPosition, etc.) — those all reset
+      // scalars themselves.
+      const hintBtnCheck = document.getElementById('btnHint');
+      const hintBtnVisible = hintBtnCheck && !hintBtnCheck.classList.contains('hidden');
+      if (hintBtnVisible && hintLevel >= 1 && hintMove && hintMove.length >= 4) {
         const fromSq = hintMove.substring(0, 2);
         if (gameEngine.get(fromSq)) {
           const fromEl = document.querySelector(`.square-${fromSq}`);
@@ -6907,8 +6922,7 @@ function exitAnalysisMode() {
           hintLevel = 0;
           hintMove = null;
           hintArrow = null;
-          const hintBtnReset = document.getElementById('btnHint');
-          if (hintBtnReset) { hintBtnReset.disabled = false; hintBtnReset.textContent = '💡 Hint'; hintBtnReset.style.borderColor = ''; hintBtnReset.style.color = ''; }
+          if (hintBtnCheck) { hintBtnCheck.disabled = false; hintBtnCheck.textContent = '💡 Hint'; hintBtnCheck.style.borderColor = ''; hintBtnCheck.style.color = ''; }
         }
       }
     }
