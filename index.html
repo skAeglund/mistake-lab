@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hint M1: call clearHintHighlights at the entry of every evaluate* function. evaluateMove (12914) and evaluateTacticMove (12132) already do this; evaluateRepertoireMove, evaluateRepertoireContinuationMove, and evaluateRepContRetryMove previously didn't. onDrop runs clearArrows before dispatching which wipes hintArrow via the IMP-004 follow-up, but `.square-hint` is a CSS class on the square container and neither clearArrows nor boardObj.position touches it — so after the user pressed hint and played the suggested move, the pulsing blue overlay sat under `.square-lastmove` for ~200ms between drop and feedback. Visual only (no state corruption, no grading impact), but inconsistent with the other two evaluators. Three matching one-liner additions with explanatory comments. Pattern now uniform across all five evaluate* entry points in the drill surface.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hint M2: reset hint scalars and `.square-hint` on tryDetectedTactic entry. The detected-tactic solve is usually entered from a game-review retry feedback card — startReviewRetry resets hintUsed=false, but if the user pressed H during the retry before clicking "🎯 Try", hintLevel / hintMove / hintArrow and the `.square-hint` CSS class on a prior-context square can all leak into the ephemeral solve. tryDetectedTactic (5232) previously reset tacticHintUsed (5273) and re-styled btnHint to fresh state, but didn't touch the five pieces of progressive-hint state. Symptoms: `hintLevel >= 2` (level-2 press) made the top-of-showHint guard at 6323 silently swallow every H press on the detected tactic; `hintLevel === 1` made the first H press draw the arrow directly, skipping the piece-highlight phase; stale `.square-hint` from pre-solve context could persist visually since clearHighlights / clearArrows / boardObj.position don't touch the square-container class. Fix: add `hintLevel = 0; hintMove = null; hintUsed = false; hintArrow = null; clearHintHighlights();` alongside the existing board reset, matching the pattern used by loadPosition (11517–11519) and startReviewRetry (17093–17096). clearArrows just above already nulls hintArrow redundantly — the explicit assignment keeps the block self-contained and makes intent obvious.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -5284,6 +5284,22 @@ function tryDetectedTactic(listIdx) {
   clearHighlights();
   clearLastMoveHighlight();
   clearArrows();
+  // M2: reset progressive-hint scalars and .square-hint before the solve.
+  // The entry context is usually a game-review retry feedback card, where
+  // the user may have pressed H (hintLevel 1 or 2, hintMove set). Without
+  // this, stale `hintLevel >= 2` makes the top-of-showHint guard at 6323
+  // silently swallow the first H press on the detected tactic, and
+  // `hintLevel === 1` makes first press act as second press (draws arrow
+  // without the piece-highlight phase). tacticHintUsed is already reset
+  // above at 5273; the four globals need the same treatment. clearArrows
+  // above already nulls hintArrow, but .square-hint is a square-container
+  // CSS class untouched by clearHighlights / clearArrows / boardObj.position
+  // — call clearHintHighlights explicitly.
+  hintLevel = 0;
+  hintMove = null;
+  hintUsed = false;
+  hintArrow = null;
+  clearHintHighlights();
   moveClassBadge = null;
   bestMoveArrow = null;
   showCheckHighlight(gameEngine);
