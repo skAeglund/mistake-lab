@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">RepertoireCheck: allow clickable variation lines in notes without corrupting the drill, closes #18. Three gates previously blocked clickable-line navigation while repertoireDrillMode was active: (a) renderVariationTokens set the `disabled` class and stripped onclick when drillActive was true; (b) jumpToNoteMove early-returned on repertoireDrillMode; (c) there was no way to re-enable drag/tap after exploring a variation short of hitting Prev/Next/Retry, which is fine for one-shot mistake drills but breaks the RepertoireCheck loop where the user is supposed to keep trying the same position until correct. Fix: (a) drop repertoireDrillMode from the drillActive set — clickable variations are allowed there; tactic/continuation stay blocked because their grading is move-by-move and exploring would orphan mid-solve state. (b) drop repertoireDrillMode from the jumpToNoteMove early-return. (c) in noteVariationStep's newIdx === -1 anchor-return branch, clear noteJumpedAway when repertoireDrillMode is active — the board is back on the drill position (noteAnchorFen == gameEngine.fen() at openNotePanel time) so drag/tap can be re-enabled safely, scoped to repertoire mode to preserve the existing Prev/Next/Retry-triggered-unlatch semantics for plain mistake browsing. Known MVP limitation: repertoireDrillStartTime is not adjusted for exploration time, so looking at a variation and coming back counts against the timing bucket (< 3s Easy / < 15s Good / ≥ 15s Hard); this naturally discourages using notes as a hint without adding any "did you cheat" detection, which the RepertoireCheck grading can't enforce anyway. If this becomes a real problem we can pause/resume the timer in a follow-up.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Post-merge scan on #14-#18: fix 2 findings in the #15 analysis-notes wiring. The original commit (ddf9766) added updateNoteButton() at three canonical position-change sites in analysis mode — analysisGoToNode, enterAnalysisMode, exitAnalysisMode — but the scan turned up two more places where analysisTreeCurrent gets reassigned without going through analysisGoToNode: (1) analysisPvPlay — the loop that plays a PV line into the tree walks node-by-node and doesn't call analysisGoToNode (because it's already built up analysisEngine/board iteratively, so resetting from node.fen would be redundant); (2) analysisOnDrop — the drag/drop handler that creates or reuses a child node and advances analysisTreeCurrent by one. Tap-to-move in analysis mode routes through analysisOnDrop too (via the tap handler at line 11131), so fixing that one path covers both input modes. Without these two additions the 📝 note indicator would stay stale after playing a PV line or making a move in analysis, reverting only on the next arrow-key step or tree-node click. Other commits (#14, #16, #17, #18) scanned clean; one pre-existing bug noted out of scope (#14 area: engineLine.currentIdx vs _reviewBestLine.currentIdx can desync when the user clicks a main-line move in the engineLineBox panel rather than the feedback-card, producing a teleport on the next arrow-key).</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -7356,6 +7356,13 @@ function analysisPvPlay(pvIdx, moveIdx) {
     showLastMoveHighlight(from, to);
   }
   renderAnalysisTree();
+  // Issue #15 follow-up: the loop above advanced analysisTreeCurrent
+  // through each PV move without a single canonical position-change call
+  // (analysisGoToNode is NOT used here because it resets
+  // analysisEngine/board from node.fen, which we've already built up
+  // iteratively). Note indicator would otherwise reflect the pre-play
+  // position until the next arrow-key step or tree-node click.
+  updateNoteButton();
   startAnalysisSearch(analysisEngine.fen());
 }
 
@@ -7384,6 +7391,11 @@ function analysisOnDrop(source, target) {
   showLastMoveHighlight(source, target);
   showCheckHighlight(analysisEngine);
   renderAnalysisTree();
+  // Issue #15 follow-up: dragging or tap-moving in analysis also shifts
+  // analysisTreeCurrent but doesn't route through analysisGoToNode, so
+  // the note indicator needs an explicit refresh (same reason as
+  // analysisPvPlay above).
+  updateNoteButton();
   startAnalysisSearch(newFen);
   return undefined;
 }
