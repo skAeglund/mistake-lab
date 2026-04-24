@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Post-merge scan on #14-#18: fix 2 findings in the #15 analysis-notes wiring. The original commit (ddf9766) added updateNoteButton() at three canonical position-change sites in analysis mode — analysisGoToNode, enterAnalysisMode, exitAnalysisMode — but the scan turned up two more places where analysisTreeCurrent gets reassigned without going through analysisGoToNode: (1) analysisPvPlay — the loop that plays a PV line into the tree walks node-by-node and doesn't call analysisGoToNode (because it's already built up analysisEngine/board iteratively, so resetting from node.fen would be redundant); (2) analysisOnDrop — the drag/drop handler that creates or reuses a child node and advances analysisTreeCurrent by one. Tap-to-move in analysis mode routes through analysisOnDrop too (via the tap handler at line 11131), so fixing that one path covers both input modes. Without these two additions the 📝 note indicator would stay stale after playing a PV line or making a move in analysis, reverting only on the next arrow-key step or tree-node click. Other commits (#14, #16, #17, #18) scanned clean; one pre-existing bug noted out of scope (#14 area: engineLine.currentIdx vs _reviewBestLine.currentIdx can desync when the user clicks a main-line move in the engineLineBox panel rather than the feedback-card, producing a teleport on the next arrow-key).</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Review best-line: fix pre-existing arrow-key teleport on main-line nav. stepReviewBestLine was treating data.currentIdx as the authoritative arrow-key cursor, but four write paths update engineLine.currentIdx without syncing data.currentIdx: (1) goToMainLineMove — user clicks a main-line move in the engineLineBox panel; (2) handleEngineLineBranch's alt→main switch — user drags a move matching the main-line next while inside an alt, snapping back to main; (3) handleEngineLineBranch's same-move advance — user drags the next best move while on main line, advancing engineLine; (4) any future goToLineMove caller that doesn't route through goToReviewLine. After any of these, pressing ← or → would read stale data.currentIdx, advance by delta from there, and call goToReviewLine which loads data.lineMoves[newIdx].fen — teleporting the board away from wherever the user actually was. (Path 1 is the most common — the engineLineBox panel is the primary way to jump around an engine line.) Fix: in stepReviewBestLine's main-line branch (activeAlt === -1), read engineLine.currentIdx as the source of truth instead of data.currentIdx. The board itself tracks engineLine.currentIdx via goToLineMove's boardObj.position call, so that's ground truth. Fall through to data.currentIdx only when engineLine is absent (e.g. exitEngineLine cleared it but _reviewBestLine was left behind) — same behavior as before. All four write paths are now caught by a single read-side change, and any new goToLineMove caller added later inherits the fix automatically. Not filing as a separate issue since it wasn't reported — surfaced during the post-merge scan and mentioned as out-of-scope then, fixed now on request. Cosmetic sibling issue (feedback-card move-list .active highlight stays stale on the old data.currentIdx until the next goToReviewLine call) left as-is; it's a milder UX quirk and the arrow-key teleport was the actual correctness bug.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -16745,7 +16745,23 @@ function stepReviewBestLine(delta) {
     return;
   }
   data.animating = false; // cancel auto-preview if user steps with ← →
-  const currentIdx = data.currentIdx ?? 0;
+  // Pre-existing desync: data.currentIdx was treated as the authoritative
+  // arrow-key cursor, but four write paths update engineLine.currentIdx
+  // without syncing data.currentIdx — (1) goToMainLineMove (engineLineBox
+  // main-line click), (2) handleEngineLineBranch's alt→main switch,
+  // (3) handleEngineLineBranch's same-move advance, and (4) any future
+  // goToLineMove caller that doesn't go through goToReviewLine. After any
+  // of these, pressing ← or → here would advance from the stale
+  // data.currentIdx and goToReviewLine would teleport the board to that
+  // index. The board itself tracks engineLine.currentIdx (via
+  // goToLineMove's boardObj.position call) so that's the ground truth;
+  // prefer it when engineLine is present and on the main line. Fall
+  // through to data.currentIdx only when engineLine is absent (e.g.
+  // exitEngineLine cleared it but _reviewBestLine was somehow left
+  // behind) — same behavior as before.
+  const currentIdx = (engineLine && engineLine.activeAlt === -1)
+    ? engineLine.currentIdx
+    : (data.currentIdx ?? 0);
   const newIdx = currentIdx + delta;
   if (newIdx < -1 || newIdx >= data.lineMoves.length) return;
   if (newIdx === -1) {
