@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hint H2: hide btnHint on note-variation jump. jumpBoardToNoteFen (21673) replaces gameEngine with the note's variation FEN and latches noteJumpedAway=true to block drag/tap, but previously left btnHint visible. Pressing H in any drill (mistake / repertoire / repContActive / drill-mode tactic — jumpToNoteMove's `if (tacticMode || continuationMode) return` gate excludes tactics-in-progress and active continuation but mistake drill and solo repertoire drill and repContActive all pass through) would run showHint against the drill position's hint data and paint `.square-hint` / hintArrow on squares whose pieces don't exist on the variation board. Same failure class as tactic-mode's browsingLine guard at 6331 but triggered by a different entry point. Fix: in the noteJumpedAway=true arm, positively hide btnHint and clearHintHighlights, and reset the progressive-hint scalars (hintLevel / hintMove / hintArrow) so whichever reset path clears noteJumpedAway — Retry/Prev/Next → loadPosition for mistake/tactic/continuation drills, noteVariationStep's anchor-return for repertoireDrillMode — gets a clean hint cycle on re-show. hintUsed is left alone because the user did use a hint on the drill position and SRS grading should still reflect that. Paired re-show added to noteVariationStep's repertoireDrillMode anchor-return branch (21779) so the user isn't left with a hidden button after ←-stepping back to the anchor without a full reset.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hint H3 + L5: hide btnHint during repertoire lead-up; full reset + re-show on transition. startRepertoireFromBeginning (21052) and replayRepertoireBeginning (21127) both set repLeadUpActive=true and replace gameEngine with a lead-up baseFen, but previously left btnHint visible. Pressing H during an interactive lead-up or animated replay would run showHint's repertoire branch (repContActive is false during lead-up, so it falls to m.repertoireMove.uci — the FINAL deviation's move) and paint .square-hint / hintArrow against squares on whichever earlier lead-up position was being displayed. Same failure class as H2 (jump-to-note-variation) and tactic-mode's browsingLine guard at 6331, via a different entry point. Fix: on lead-up entry (both functions), positively hide btnHint and reset hintLevel / hintMove / hintArrow. clearBoardOverlays called just above already wiped .square-hint / hintArrow visuals; the scalar reset prevents level-1/2 state from leaking into post-transition drill state. transitionFromLeadUpToDrill (21377) previously only reset hintLevel / hintUsed — extended to the full four-scalar reset plus clearHintHighlights plus btnHint re-show with fresh-state styling (matching the loadPosition repertoire-branch pattern at 11540–11545). Closes L5 transitively (L5 was the asymmetric partial-reset in this same function, only reachable if H was pressed during lead-up — which is H3 itself; fixing both in one pass is cleaner than two separate commits).</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -21118,6 +21118,16 @@ function startRepertoireFromBeginning() {
   clearBoardOverlays();
   clearLastMoveHighlight();
   showCheckHighlight(gameEngine);
+  // H3: hide btnHint for the duration of the lead-up. showHint's repertoire
+  // branch uses m.repertoireMove.uci (the FINAL deviation's move) — pressing
+  // H during an interactive lead-up or a mid-animation replay would paint
+  // the deviation's from-square on whatever earlier lead-up position is
+  // currently displayed. transitionFromLeadUpToDrill re-shows it.
+  hintLevel = 0;
+  hintMove = null;
+  hintArrow = null;
+  const hintBtn = document.getElementById('btnHint');
+  if (hintBtn) hintBtn.classList.add('hidden');
 
   // Show line display and update info
   renderRepLeadUpLine();
@@ -21173,6 +21183,14 @@ function replayRepertoireBeginning() {
   clearBoardOverlays();
   clearLastMoveHighlight();
   showCheckHighlight(gameEngine);
+  // H3: hide btnHint for the duration of the animated lead-up replay.
+  // Paired with startRepertoireFromBeginning's hide and the re-show in
+  // transitionFromLeadUpToDrill. See H3a comment for rationale.
+  hintLevel = 0;
+  hintMove = null;
+  hintArrow = null;
+  const hintBtn = document.getElementById('btnHint');
+  if (hintBtn) hintBtn.classList.add('hidden');
   renderRepLeadUpLine();
 
   // Auto-advance through moves with lerped timing (0.33s → 0.75s)
@@ -21380,8 +21398,19 @@ function transitionFromLeadUpToDrill() {
   repertoireDrillStartTime = Date.now();
   currentAttempts = 0;
   srsRecorded = false;
+  // H3 + L5: restore btnHint with fresh-state styling (paired with the
+  // hides in startRepertoireFromBeginning / replayRepertoireBeginning) and
+  // fully reset the progressive-hint scalars. Previously only hintLevel /
+  // hintUsed were reset here, leaving hintMove / hintArrow and the stale
+  // button state (e.g. "💡 Hint (2/2)" blue tint, or disabled=true from a
+  // level-2 press) to leak from the pre-lead-up context.
   hintLevel = 0;
   hintUsed = false;
+  hintMove = null;
+  hintArrow = null;
+  clearHintHighlights();
+  const hintBtn = document.getElementById('btnHint');
+  if (hintBtn) { hintBtn.classList.remove('hidden'); hintBtn.disabled = false; hintBtn.textContent = '💡 Hint'; hintBtn.style.borderColor = ''; hintBtn.style.color = ''; }
 
   updateRepLeadUpInfo();
   // Keep the line display visible for context
