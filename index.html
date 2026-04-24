@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Engine line arrow-key nav teleports out of alt branches during Show Line, closes #14. Root cause: the keydown handler routes arrow keys to stepReviewBestLine whenever window._reviewBestLine is set, but that function only knows about data.lineMoves (the main line mirror); when the user branches, an alt gets added to engineLine.alternatives and activeAlt points at it, yet stepReviewBestLine → goToReviewLine force-resets engineLine.activeAlt=-1 and loads data.lineMoves[newIdx].fen, teleporting the board onto the main-line position at that index. On-screen ‹ › buttons avoided the bug by calling lineStep directly, which is alt-aware. Fix: in stepReviewBestLine, early-return to lineStep(delta) when engineLine.activeAlt >= 0 so alt navigation goes through the branching-aware path; main-line navigation stays on the review-line path so the feedback-card move list's .active highlight keeps updating via goToReviewLine.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Opening Filter: dragging unavailable after clickable-line in note, closes #16. Root cause: noteJumpedAway is latched on when a user clicks a clickable variation inside a note (jumpBoardToNoteFen, IMP-007), so subsequent drill-board drag/tap evaluations are blocked while gameEngine points at the variation position. But onDragStart's guard for that latch ran at the top of the function — before the analysisMode/openingFilterMode bypass branches — so entering Opening Filter (or Analysis mode) with the latch still set blocked drags even though both modes have their own authoritative engine (filterChess / analysisEngine) and never touch gameEngine. Tap-to-move was unaffected because its mode-bypass branches already sit above the noteJumpedAway check. enterOpeningFilter also never cleared the flag on entry. Fix: (1) reorder onDragStart so the noteJumpedAway guard runs after the analysisMode + openingFilterMode branches (mirrors the tap-handler layout and matches the pre-existing comment in jumpBoardToNoteFen that explicitly excludes these two modes from the block). (2) reset noteJumpedAway/noteActiveVarParent/noteActiveVarIdx in enterOpeningFilter so a stale arrow-key stepper can't fire against a DOM the filter no longer shows. Both changes together also cover the secondary report (continuation practice launched from the filter couldn't select a piece) because practice inherits the flag state cleared in (2) and runs through the now-reordered drag path.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -9656,6 +9656,17 @@ function enterOpeningFilter() {
   clearContSession();
   contLineBrowsing = false;
   contLineSubtitle = '';
+  // Issue #16: clickable-line inside a note latches noteJumpedAway = true
+  // so the drill's onDragStart/tap-to-move ignore moves from the jumped-to
+  // variation position (see jumpBoardToNoteFen comments). That latch is
+  // meaningless in opening filter — filterChess is the authoritative
+  // engine here — and leaving it set blocks drag-to-select. Clear the
+  // companion noteActiveVar* state too so a stale arrow-key stepper from
+  // the previous session doesn't fire against a DOM the filter no longer
+  // shows.
+  noteJumpedAway = false;
+  noteActiveVarParent = null;
+  noteActiveVarIdx = -1;
   buildFenIndex();
   ensurePMI();
   openingFilterMode = true;
@@ -11777,11 +11788,6 @@ function onDragStart(source, piece) {
   // surface — blocking drags keeps a held touch from picking up a piece
   // while the user is laying out an arrow.
   if (mobileDrawMode) return false;
-  // IMP-007: after a click into a note's variation, the board is showing a
-  // variation position rather than the drill position; gameEngine has been
-  // reloaded to match. Any piece move here would flow into evaluateMove
-  // against the stale mistake/drill context, producing a bogus verdict.
-  if (noteJumpedAway) return false;
   // Analysis mode — allow any move for the side to move
   if (analysisMode && analysisEngine) {
     if (analysisEngine.game_over()) return false;
@@ -11801,6 +11807,24 @@ function onDragStart(source, piece) {
     selectSquare(source);
     return true;
   }
+  // Issue #16: noteJumpedAway guard must come AFTER the analysis /
+  // openingFilter bypass branches above — those modes have their own
+  // engines (analysisEngine / filterChess) and don't evaluate moves against
+  // the drill's stale gameEngine, so the reason for the guard (see comment
+  // below) doesn't apply there. Keeping it in its old position blocked
+  // drags in filter practice and in-app analysis whenever the user had
+  // clicked a clickable-line inside a note earlier in the session, because
+  // jumpBoardToNoteFen only skips setting the flag when ALREADY in those
+  // modes — it has no way to clear a pre-existing latch on later entry.
+  // Tap-to-move already has those branches above the guard at lines 11068
+  // and 11088, so drag is the only path that was still affected.
+  //
+  // IMP-007 rationale (preserved): after a click into a note's variation,
+  // the board is showing a variation position rather than the drill
+  // position; gameEngine has been reloaded to match. Any piece move here
+  // would flow into evaluateMove against the stale mistake/drill context,
+  // producing a bogus verdict.
+  if (noteJumpedAway) return false;
   // Allow moves during engine line browsing (for branching)
   if (browsingLine && engineLine) {
     const fen = getEngineLineFen();
