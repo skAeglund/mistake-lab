@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hint H3 + L5: hide btnHint during repertoire lead-up; full reset + re-show on transition. startRepertoireFromBeginning (21052) and replayRepertoireBeginning (21127) both set repLeadUpActive=true and replace gameEngine with a lead-up baseFen, but previously left btnHint visible. Pressing H during an interactive lead-up or animated replay would run showHint's repertoire branch (repContActive is false during lead-up, so it falls to m.repertoireMove.uci — the FINAL deviation's move) and paint .square-hint / hintArrow against squares on whichever earlier lead-up position was being displayed. Same failure class as H2 (jump-to-note-variation) and tactic-mode's browsingLine guard at 6331, via a different entry point. Fix: on lead-up entry (both functions), positively hide btnHint and reset hintLevel / hintMove / hintArrow. clearBoardOverlays called just above already wiped .square-hint / hintArrow visuals; the scalar reset prevents level-1/2 state from leaking into post-transition drill state. transitionFromLeadUpToDrill (21377) previously only reset hintLevel / hintUsed — extended to the full four-scalar reset plus clearHintHighlights plus btnHint re-show with fresh-state styling (matching the loadPosition repertoire-branch pattern at 11540–11545). Closes L5 transitively (L5 was the asymmetric partial-reset in this same function, only reachable if H was pressed during lead-up — which is H3 itself; fixing both in one pass is cleaner than two separate commits).</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hint M1: call clearHintHighlights at the entry of every evaluate* function. evaluateMove (12914) and evaluateTacticMove (12132) already do this; evaluateRepertoireMove, evaluateRepertoireContinuationMove, and evaluateRepContRetryMove previously didn't. onDrop runs clearArrows before dispatching which wipes hintArrow via the IMP-004 follow-up, but `.square-hint` is a CSS class on the square container and neither clearArrows nor boardObj.position touches it — so after the user pressed hint and played the suggested move, the pulsing blue overlay sat under `.square-lastmove` for ~200ms between drop and feedback. Visual only (no state corruption, no grading impact), but inconsistent with the other two evaluators. Three matching one-liner additions with explanatory comments. Pattern now uniform across all five evaluate* entry points in the drill surface.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -20255,6 +20255,12 @@ function evaluateRepertoireMove(source, target, move) {
   const m = filteredMistakes[currentMistakeIdx];
   if (!m || m.type !== 'repertoire') return;
 
+  // M1: match the entry clear in evaluateMove (12914) and evaluateTacticMove
+  // (12132). onDrop clears hintArrow via clearArrows but not the `.square-hint`
+  // class on the from-square, so without this the pulsing blue overlay sits
+  // under `.square-lastmove` for the ~200ms between drop and feedback.
+  clearHintHighlights();
+
   const playedUci = source + target + (move.promotion || '');
   const expected = m.repertoireMove;
   const isCorrect = isRepertoireCorrectForItem(m, move.san, playedUci);
@@ -20672,6 +20678,11 @@ function showRepContPrompt(repertoireMove, extraInfo) {
 }
 
 function evaluateRepertoireContinuationMove(source, target, move) {
+  // M1: match the entry clear in evaluateMove / evaluateTacticMove /
+  // evaluateRepertoireMove. See the sibling comment in evaluateRepertoireMove
+  // for the rationale — same 200ms stale `.square-hint` window.
+  clearHintHighlights();
+
   // If browsing back in the line, truncate and resume live play
   if (repContBrowsing && repContLine) {
     repContLine.moves.length = repContLine.currentIdx + 1;
@@ -20858,6 +20869,13 @@ function advanceRepContRetry() {
 }
 
 function evaluateRepContRetryMove(source, target, move) {
+  // M1: match the entry clear in evaluateMove / evaluateTacticMove /
+  // evaluateRepertoireMove / evaluateRepertoireContinuationMove. Same 200ms
+  // stale `.square-hint` window if the user pressed hint during repContRetry
+  // (showHint's repertoire branch + repContActive=true supports it via
+  // trieFirst).
+  clearHintHighlights();
+
   // Check against the trie for this position
   gameEngine.undo();
   const beforePosKey = fenPositionKey(gameEngine.fen());
