@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hint M4: re-apply hint visuals in exitAnalysisMode's non-tactic non-review branch. enterAnalysisMode snapshots hint state only for m.type === 'tactic' (6616–6652); mistake / repertoire / practice items fall through to the else branch at 6862. clearBoardOverlays there wipes `.square-hint` and hintArrow visuals, but hintLevel / hintMove / hintUsed scalars survive. Post-exit the user sees a "💡 Hint (2/2)" blue-tinted button (if level 1) or a disabled "💡 Hint" (if level 2) with NO matching board visual. Level 2 is the real bug: the top-of-showHint guard at 6339 (`if (hintLevel >= 2) return;`) silently swallows further H presses, stranding the user with no way to resurface the hint short of Retry/Prev/Next. Fix: after the existing clearBoardOverlays + showCheckHighlight + startPreAnalysis, re-apply `.square-hint` on hintMove's from-square and reconstruct hintArrow if hintLevel >= 2 — mirrors the tactic-branch restore at 6843–6848. Stale-hint guard: for repContActive / mid-line practice the stored hintMove was computed for a position past m.fenBefore, and the else branch resets gameEngine to m.fenBefore — so fromSq may not hold a piece. gameEngine.get(fromSq) test detects this and fully resets hint state + button styling rather than painting a misleading arrow. No snapshot added on entry because the scalars never mutate in-place (unlike tacticLine which is deep-cloned); the live values are authoritative.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hint L1+L2+L3: low-severity hint-state fixes across three reset sites. (L1) abandonDetectedTacticSolve (5429) previously cleared hintLevel and hintArrow but not hintMove or hintUsed. Restored review state usually hides btnHint via snap.btnVisibility so the leak was inert — but inconsistent with the canonical reset pattern used by loadPosition / startReviewRetry / tryDetectedTactic. (L2) ignorePracticeRepertoire (15730) cleared hintLevel / hintMove but not hintArrow or hintUsed; hintArrow is nulled as a side effect of clearHintHighlights above, hintUsed is inert today because filter-practice isn't SRS-graded (recordPracticeResult ignores it) — latent bug if practice ever becomes graded. (L3) retryPosition's practice branch (18029) wiped visuals via clearBoardOverlays and hid btnHint, but hintLevel / hintMove / hintUsed scalars survived. Reachable leak: during practice play a repertoire deviation banner can show btnHint; if the user pressed H there and then clicked Retry, the next deviation banner in the retried session inherits the stale state — first H press acts as second press (arrow drawn from stale hintMove on a different-position board). Fix in all three: add the four-scalar reset (hintLevel / hintMove / hintUsed / hintArrow) to match the canonical pattern. Batched per workflow rules (independent trivial reset-site fixes across distinct subsystems, no shared state, no flow interaction). L4 dropped (silent no-op on off-trie repContActive position unreachable in normal flow — advanceRepertoireContinuation only plays opponent moves that are in the trie via getRepertoireContinuations).</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -5444,7 +5444,15 @@ function abandonDetectedTacticSolve() {
   tacticHintUsed = false;
   tacticLine = null;
   currentAttempts = 0;
+  // L1: complete hint reset (previously only hintLevel / hintArrow were
+  // cleared; hintMove and hintUsed leaked). Pattern now matches every
+  // other hint reset site (loadPosition 11562–11567, startReviewRetry,
+  // tryDetectedTactic 5298–5303). The restored review state usually hides
+  // btnHint via snap.btnVisibility below, so previous leakage was inert —
+  // but inconsistent with the canonical reset pattern.
   hintLevel = 0;
+  hintMove = null;
+  hintUsed = false;
   hintArrow = null;
   clearHintHighlights();
   // Wrong-move engine line can be left open from a failed attempt; clear it
@@ -15726,8 +15734,16 @@ function ignorePracticeRepertoire() {
   const hintBtn = document.getElementById('btnHint');
   if (hintBtn) hintBtn.classList.add('hidden');
   clearHintHighlights();
+  // L2: complete hint reset. Previously hintLevel / hintMove were cleared
+  // but hintArrow and hintUsed leaked. hintArrow is cleared by
+  // clearHintHighlights above (it nulls the variable as a side effect),
+  // so the explicit assignment is defensive; hintUsed has no effect today
+  // because filter-practice results aren't SRS-graded (recordPracticeResult
+  // ignores it) — latent bug if practice ever becomes graded.
   hintLevel = 0;
   hintMove = null;
+  hintArrow = null;
+  hintUsed = false;
 }
 
 function savePracticeMistake(moveIdx) {
@@ -18020,6 +18036,23 @@ function retryPosition() {
     // exitContLineReview is a safe no-op when no review state is present.
     exitContLineReview();
     currentAttempts = 0;
+    // L3: reset progressive hint scalars. clearBoardOverlays below wipes
+    // .square-hint and hintArrow visuals, and btnHint is hidden a few lines
+    // down (18083/equiv) — but hintLevel / hintMove / hintUsed survive.
+    // Reachable leak: during practice play a repertoire deviation banner
+    // can show btnHint, and if the user pressed H there (setting
+    // hintLevel=1 or 2 and hintMove), then clicked Retry, the next
+    // deviation banner in the retried session inherits the stale state —
+    // first H press acts as second press (arrow drawn from stale hintMove
+    // on a different-position board). Resetting here is consistent with
+    // the tactic/advantage branch above (which goes through loadPosition
+    // → its own reset at 11562–11567). hintArrow is additionally cleared
+    // by clearHintHighlights below but assigning explicitly keeps the
+    // block self-contained.
+    hintLevel = 0;
+    hintMove = null;
+    hintUsed = false;
+    hintArrow = null;
     practiceRepIgnored = false;
     explorerApiNotified = false;
     continuationMode = false;
