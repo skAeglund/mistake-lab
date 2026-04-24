@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Opening Filter: dragging unavailable after clickable-line in note, closes #16. Root cause: noteJumpedAway is latched on when a user clicks a clickable variation inside a note (jumpBoardToNoteFen, IMP-007), so subsequent drill-board drag/tap evaluations are blocked while gameEngine points at the variation position. But onDragStart's guard for that latch ran at the top of the function — before the analysisMode/openingFilterMode bypass branches — so entering Opening Filter (or Analysis mode) with the latch still set blocked drags even though both modes have their own authoritative engine (filterChess / analysisEngine) and never touch gameEngine. Tap-to-move was unaffected because its mode-bypass branches already sit above the noteJumpedAway check. enterOpeningFilter also never cleared the flag on entry. Fix: (1) reorder onDragStart so the noteJumpedAway guard runs after the analysisMode + openingFilterMode branches (mirrors the tap-handler layout and matches the pre-existing comment in jumpBoardToNoteFen that explicitly excludes these two modes from the block). (2) reset noteJumpedAway/noteActiveVarParent/noteActiveVarIdx in enterOpeningFilter so a stale arrow-key stepper can't fire against a DOM the filter no longer shows. Both changes together also cover the secondary report (continuation practice launched from the filter couldn't select a piece) because practice inherits the flag state cleared in (2) and runs through the now-reordered drag path.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Analysis mode: enable position notes and Copy line as PGN, closes #15, closes #17. Two features that were previously carved out of analysis mode, batched because both only touch the analysis-panel surface and share no state. #15 Notes: (a) getCurrentNoteFen() now has an analysisMode branch that returns analysisEngine.fen() (falling back to analysisTreeCurrent.fen), placed before the engineLine branch as a defense-in-depth ordering even though enterAnalysisMode already tears engineLine down. (b) updateNoteButton() called from analysisGoToNode (canonical position-change — covers both click and ← → stepping), enterAnalysisMode (reflects start position), and exitAnalysisMode (resyncs to whichever drill state gets restored). (c) N key handler added inside the analysisMode keyboard branch at the top of the document keydown listener; without it, N was unreachable because that branch always returns. saveNote/checkForNote/openNotePanel/noteAnchorFen all already flow through getCurrentNoteFen, so no further wiring needed — keyed on fenPositionKey (first 4 FEN fields) so a note created in analysis shows up at the same position encountered later in drill/review, and vice versa. #17 Copy PGN: new copyAnalysisLinePgn helper walks parent pointers from analysisTreeCurrent up to the tree root, unshifts SANs into an array, and passes analysisTree.fen as baseFen to buildPgnMoveText so lines starting mid-game get the right "N..." prefix. "Selected line" is unambiguously the path root→current; sibling branches are not included (per Anders's answer to question #2). 📋 button added to .analysis-controls row, mirroring the engine-line copy button at line 14063.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1825,6 +1825,7 @@
         <button class="btn btn-ghost btn-sm" onclick="analysisLineStep(-1)">‹</button>
         <button class="btn btn-ghost btn-sm" onclick="analysisLineStep(1)">›</button>
         <button class="btn btn-ghost btn-sm" onclick="exitAnalysisMode()" style="border-color:var(--red);color:var(--red)">✕ Exit</button>
+        <button class="btn btn-ghost btn-sm" onclick="copyAnalysisLinePgn(this)" title="Copy line as PGN" aria-label="Copy line as PGN">📋</button>
         <span class="hint">← → navigate · make moves to explore</span>
       </div>
     </div>
@@ -6751,6 +6752,11 @@ function enterAnalysisMode() {
   // Render tree (seeded with full game if entering from review, else empty)
   renderAnalysisTree();
 
+  // Issue #15: refresh the note indicator so the 📝 button's .has-note
+  // class matches the analysis start position (keyed on analysisEngine.fen
+  // via getCurrentNoteFen's analysisMode branch).
+  updateNoteButton();
+
   // Start analysis
   startAnalysisSearch(analysisTreeCurrent.fen);
 }
@@ -6872,6 +6878,11 @@ function exitAnalysisMode() {
   if (staleEngineLineBox && !engineLine) staleEngineLineBox.remove();
   updateEvalBar();
   updateLineNavBar();
+  // Issue #15: resync the note indicator to whatever drill position got
+  // restored above (review-snapshot / tactic-snapshot / fallback). Without
+  // this, the 📝 .has-note marker still reflects the last analysis
+  // position the user navigated to before hitting Exit.
+  updateNoteButton();
 }
 
 function captureBoardHighlights() {
@@ -7479,6 +7490,10 @@ function analysisGoToNode(nodeId) {
   showCheckHighlight(analysisEngine);
 
   renderAnalysisTree();
+  // Issue #15: refresh note indicator for the new analysis position.
+  // getCurrentNoteFen's analysisMode branch returns analysisEngine.fen(),
+  // so updateNoteButton now reflects notes attached to this exact FEN.
+  updateNoteButton();
   startAnalysisSearch(node.fen);
 }
 
@@ -13787,6 +13802,25 @@ function copyRepLeadUpLinePgn(btn) {
   if (!repLeadUpLine) return;
   const sans = repLeadUpLine.moves.map(mv => mv && mv.san).filter(Boolean);
   copyLineToClipboard(buildPgnMoveText(repLeadUpLine.baseFen, sans), btn);
+}
+
+// Issue #17: copy the currently-selected analysis line as PGN. "Selected
+// line" is unambiguously the path from analysisTree (root) down to
+// analysisTreeCurrent — sibling branches are not included. Walks parent
+// pointers because the tree stores children as a forward array but no
+// cached path from root; unshifting into sans avoids an extra reverse.
+// buildPgnMoveText takes care of move numbering from the root fen's
+// halfmove-turn + fullmove fields, so lines that start mid-game render
+// with the correct "N..." prefix.
+function copyAnalysisLinePgn(btn) {
+  if (!analysisMode || !analysisTree || !analysisTreeCurrent) return;
+  const sans = [];
+  let n = analysisTreeCurrent;
+  while (n && n.parent) {
+    if (n.san) sans.unshift(n.san);
+    n = n.parent;
+  }
+  copyLineToClipboard(buildPgnMoveText(analysisTree.fen, sans), btn);
 }
 
 // Copy the legal prefix of a note-embedded clickable variation. The
@@ -21268,6 +21302,16 @@ function exploreRepertoireGap(gapIdx) {
 // ─── Position Notes ───
 function getCurrentNoteFen() {
   // Get the FEN of the position currently displayed on the board
+  // Issue #15: analysis mode has its own engine; the board tracks
+  // analysisEngine.fen() (kept in sync with analysisTreeCurrent by
+  // analysisGoToNode / analysisOnDrop). This must come before the
+  // engineLine branch below — although enterAnalysisMode calls
+  // exitEngineLine, a defensive ordering here keeps the right answer
+  // even if some future path enters analysis with engineLine still set.
+  if (analysisMode) {
+    if (analysisEngine) return analysisEngine.fen();
+    if (analysisTreeCurrent) return analysisTreeCurrent.fen;
+  }
   if (engineLine) {
     if (engineLine.currentIdx === -1) return engineLine.baseFen;
     const fen = typeof getEngineLineFen === 'function' ? getEngineLineFen() : null;
@@ -22072,6 +22116,13 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowLeft') { analysisLineStep(-1); e.preventDefault(); }
     if (e.key === 'ArrowRight') { analysisLineStep(1); e.preventDefault(); }
     if (e.key === 'f' || e.key === 'F') analysisFlipBoard();
+    // Issue #15: allow the note-panel toggle inside analysis mode; the
+    // rest of the document-level shortcut block below this return is
+    // unreachable here, so 'n' has to be handled up top.
+    if (e.key === 'n' || e.key === 'N') {
+      const nb = document.getElementById('btnNote');
+      if (nb && !nb.classList.contains('hidden')) toggleNotePanel();
+    }
     return;
   }
   // Opening filter mode — arrow keys undo/redo, block other shortcuts
