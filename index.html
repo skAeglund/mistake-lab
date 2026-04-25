@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync M6: flush pending progress + eval cache syncs before disconnectGist clears credentials. Without this, any mutation in the 3s debounce window before disconnect (or in flight during a 3s sync delay) was silently dropped: the timer would fire after gistToken='' and syncToGist's first guard (if (!gistToken || !gistId || !gistData) return) returned early without writing. Repro: drill a position to the SRS Easy grade, then immediately open Settings → Disconnect within 3s — the SRS update for that position never reached Gist. The fix runs the same best-effort fire-and-forget syncToGist that logout already does at line 8700, but for the disconnect path which previously had nothing equivalent. Eval cache gets the same treatment: a pending evalCacheSyncTimer firing post-disconnect would see !isGistConfigured() and early-return, leaving the entries in LS-only forever (or until a future re-connect, which routes through saveSettingsGist's L12-A force-sync). Flushing now means the user's work lands on the account they're disconnecting from, which is the principle-of-least-surprise behavior. Both flushes gated on the appropriate dirty/timer signals so they're no-ops when there's nothing to flush. Side note discovered while writing the comment: my earlier pattern study assumed evalCacheDirty was reset by syncEvalCacheToGist's early return — it's not, dirty is preserved across the early-return path, which is correct. Found during the Cloud Sync / Gist scan; H1 + L5 already landed; M2 next.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync M2: study-comment cleanup deletion is now sync-triggering and runs even when allComments is empty. Two compounding bugs in the previous loadRepertoireTrie code path: (1) the cleanup loop deleted stale source:'study' notes from gistData.notes for positions no longer in any study, but the debounceSyncToGist call was gated on imported>0 — so deletions in a load with no new comments to import (the typical re-load case once a study has been seen) stayed in-memory only, and an unrelated mutation had to coincidentally trigger sync to flush them. (2) the outer `if (allComments.size > 0 && gistData)` guard skipped the entire block — including cleanup — when the user removed their last study, leaving stale source:'study' entries permanently in Gist with no path to ever delete them. Repro: import a study with comments, observe notes appear; remove the study from Settings; reload; notes still there forever. Fix tracks cleaned count alongside imported, fires sync on either >0, and widens the outer guard to `if (gistData)` so cleanup runs even on empty-allComments loads. The import branch is unchanged (still iterates allComments which may be empty, no-op when so). Side note: study notes are intentionally re-overwritten on each load (the existing.source !== 'study' guard preserves user-created notes but allows study-source notes to be refreshed) — so source comment edits propagate; only structural changes (study removed, position dropped from a chapter) needed the cleanup path. Found during the Cloud Sync / Gist scan; H1 + L5 + M6 already landed; M1 (eval cache read-merge-write) next.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -19614,8 +19614,15 @@ async function loadRepertoireTrie() {
   repertoireTrie = mergedTrie;
   console.log(`[Repertoire] Merged trie: ${mergedTrie.size} positions`);
 
-  // Import study comments as position notes (don't overwrite user-created notes)
-  if (allComments.size > 0 && gistData) {
+  // Import study comments as position notes (don't overwrite user-created notes).
+  // Cleanup of stale source:'study' notes runs even when allComments is empty,
+  // because removing the last study leaves stale entries no other path will
+  // ever clean up. Both import and cleanup individually trigger debounceSyncToGist
+  // so a pure-cleanup pass (e.g., user deletes a study with notes) propagates
+  // the deletions to Gist; before the fix, cleanup was gated on imported>0
+  // and an unrelated mutation had to ride along to flush, otherwise next
+  // session's loadFromGist brought the stale notes back in a permanent loop.
+  if (gistData) {
     if (!gistData.notes) gistData.notes = {};
     let imported = 0;
     for (const [posKey, commentData] of allComments) {
@@ -19633,13 +19640,16 @@ async function loadRepertoireTrie() {
       imported++;
     }
     // Clean up study notes for positions no longer in any study
+    let cleaned = 0;
     for (const [key, note] of Object.entries(gistData.notes)) {
       if (note.source === 'study' && !allComments.has(key)) {
         delete gistData.notes[key];
+        cleaned++;
       }
     }
-    if (imported > 0) {
-      console.log(`[Repertoire] Imported ${imported} study comments as notes`);
+    if (imported > 0 || cleaned > 0) {
+      if (imported > 0) console.log(`[Repertoire] Imported ${imported} study comments as notes`);
+      if (cleaned > 0) console.log(`[Repertoire] Cleaned ${cleaned} stale study notes`);
       debounceSyncToGist();
     }
   }
