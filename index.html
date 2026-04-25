@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Extraction L12-A: no-Gist → Gist mid-session race in saveSettingsGist. The L12 commit fixed the airplane → online race in openSettings's airplaneToggle.onchange — when a debounced LS-only eval cache timer was pending, the timer firing would mark evalCacheDirty=0 without those entries ever reaching Gist. Same shape exists for the no-Gist → Gist transition: a user starting a session without Gist credentials accumulates eval cache entries via the LS-only branch in debounceEvalCacheSync, then configures Gist via Settings → Save & Sync. saveSettingsGist sets gistToken/gistId, calls loadFromGist (which calls loadEvalCacheFromGist — read-only, merges Gist entries into in-memory but does NOT push), and returns. The pending LS-only timer still fires later, marks evalCacheDirty=0, but those entries were never sent to Gist, so the next syncEvalCacheToGist returns early at evalCacheDirty===0 and the entries stay local-only. Found while doing a fresh-eyes audit of the L8-L12 push (e837083). Fix: after loadFromGist, if isGistConfigured() AND evalCacheDirty>0, cancel the pending evalCacheSyncTimer and force-sync to Gist. Mirrors the airplane→online toggle's existing fix exactly. Also audited the L1-L6 push (7aa037a) — no issues found there beyond what was already addressed in implementation: L1 fingerprint shape addition is correct, L2's flushPendingSyncs hoisting and bfcache handling verified, L3 SEED near-full hit's interaction with resolveWaiters/waitForPreAnalysis correct (preAnalysisComplete=true gates immediate resolve regardless of depth; near-full hit early-return prevents spurious cache rewrite), L5 reset is success-path only, L6 LS fallback's skip of getCompletedSet consolidation is harmless because getCompletedSet merges LS+gistData on every call. L8-L12 also clean: L8's break is semantically correct (matches buildOpeningIndex's existing pattern), L9's flag-reset-only-no-session-bump is correct (failed setup left no late-completion to mismatch), L10's merged.length>0 gate is defensively correct (mergeGames cannot return empty when input has games, but defensive-anyway), L11's knownUsernamesSig ordering verified in fast path AND cold start (knownUsernames fully populated before extractAllMistakes in both), L12 main path correct.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync H1: route saveNote/deleteNote through debounceSyncToGist instead of an inline setTimeout(syncToGist, 3000) scheduler. The bypass had three consequences. First, _gistProgressDirtyLocal was never set, so cache-first phase 2's `if (freshProgress && !_gistProgressDirtyLocal)` replacement guard at line 8834 saw "no local changes" and could clobber gistData with stale freshProgress within the 3s timer window — the subsequent timer firing then PATCHed the clobbered version to Gist, permanently losing the note both locally and remotely. Repro: open app (cache-first fast path renders from LS), within ~500ms-3s add or delete a note, observe phase 2's gistRead resolve and replace gistData. Second, in airplane mode the inline scheduler skipped the LS-write branch that debounceSyncToGist runs unconditionally for airplane (line 2854) — the 3s timer fired, syncToGist returned early on airplaneMode, and the note was never persisted to localStorage. Tab close in airplane mode → note vaporized. Third, the dirty-flag invariant was broken globally: any future read path that gates on !_gistProgressDirtyLocal would have to know this exception. The fix collapses to a single debounceSyncToGist() call at each site (saveNote line 22617, deleteNote line 22645). Same 3s timing in non-airplane Gist-configured mode, gains all three protections. The if (isGistConfigured()) wrapper is also removed because debounceSyncToGist handles non-configured mode internally (sets dirty=true unconditionally, returns at the no-token guard) — which is the correct behavior for note-save in standalone-mode-then-Gist-configured flows: the dirty flag now reflects the no-Gist-but-mutated state for any future no-Gist→Gist merge logic to consume. Found during the Cloud Sync / Gist scan (full report still in chat, queued items M1-M6 H2 H3 plus L1-L8 follow). H1 lands first because it's surgical, eliminates an active data-loss vector for an existing feature, and doesn't depend on M4 read-merge-write infrastructure that the other items require.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -22612,11 +22612,12 @@ function saveNote() {
     updated: now
   };
 
-  // Trigger sync
-  if (isGistConfigured()) {
-    clearTimeout(syncDebounceTimer);
-    syncDebounceTimer = setTimeout(() => syncToGist(), 3000);
-  }
+  // Trigger sync — route through debounceSyncToGist so _gistProgressDirtyLocal
+  // gets set (otherwise cache-first phase 2 at line 8834 may clobber gistData
+  // with stale freshProgress within the 3s timer window) and so airplane mode
+  // takes the LS-write branch (the inline scheduler skipped it, leaving
+  // airplane-mode notes in-memory only and lost on tab close).
+  debounceSyncToGist();
 
   // Switch to view mode with the saved note
   noteEditMode = false;
@@ -22641,11 +22642,8 @@ function deleteNote() {
 
   delete gistData.notes[key];
 
-  // Trigger sync
-  if (isGistConfigured()) {
-    clearTimeout(syncDebounceTimer);
-    syncDebounceTimer = setTimeout(() => syncToGist(), 3000);
-  }
+  // Trigger sync — see saveNote comment above for the dirty-flag rationale.
+  debounceSyncToGist();
 
   notePanelOpen = false;
   noteEditMode = false;
