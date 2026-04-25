@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync H2 + M3 + cache-first phase-2 merge: the three-piece package that closes the cross-device blind-PATCH race AND the OS-kill-during-3s-debounce race AND the cross-session LS-state-loss race. Each piece is unsafe without the others, so they ship together. H2 (read-merge-write in syncToGist): the previous PATCH wrote in-memory gistData straight over the remote file — every periodic sync, every logout flush, every disconnect flush, every airplane-off transition, every pagehide/beforeunload teardown silently overwrote whatever positions/notes/repertoire/practice entries another device had written since this device's last load. The fix calls gistRead first, deep-copies gistData as localSnapshot, runs mergeGistData(localSnapshot, remote || empty) for per-field timestamp arbitration (positions[pid] newer lastSeen wins for completed/lastSeen/srs; notes[posKey] newer 'updated' wins; repertoire arrays union dedupe by id/positionKey/string; practiceScoreboard concat with ts-dedupe; practiceMistakes/Tactics dedupe by their existing dedup keys), assigns merged to gistData, and PATCHes. On gistRead failure: refuse to write — progress data is non-recomputable so a blind-PATCH fallback risks overwriting cross-device state; the next mutation's debounceSyncToGist re-attempts. The opposite trade-off applies for eval cache (M1 still writes blindly on read failure because eval entries are recomputable from FEN). M3 (debounceSyncToGist writes LS unconditionally): the previous behavior wrote LS only in airplane mode, leaving a 3s window in non-airplane mode where mutations existed only in memory — OS-kill during that window (frequent on mobile under memory pressure) lost FSRS srs state, lastSeen, invalidations, notes, custom deviations, dismissed positions, practice scoreboard, practice mistakes/tactics. Only 'completed' survived via the separate getCompletedKey() LS write recordReview does. The new branch writes GIST_PROGRESS_CACHE_KEY on every mutation regardless of airplane, plus a persistent GIST_PROGRESS_DIRTY_LS_KEY='1' sentinel so the next session knows LS state has unsynced mutations even if no in-memory mutation occurs that session. Cache-first phase 2 merge: the previous code had two branches gated on _gistProgressDirtyLocal — replace gistData with freshProgress when no local mutations (clobbered any LS-persisted-but-not-Gist-synced state from prior crashes — M3's LS write would have been useless without this fix), skip-with-LS-cache-bump when local mutations existed (discarded cross-device updates whenever the user touched anything this session). New code unconditionally merges via mergeGistData(deep-copy of LS-loaded gistData, freshProgress) and triggers debounceSyncToGist when the dirty flag is true so LS-pending state from prior crashes flows upstream even if the user makes zero mutations this session. Persisted dirty flag: GIST_PROGRESS_DIRTY_LS_KEY survives tab kills, OS sleeps, browser restarts. Set in debounceSyncToGist alongside the LS write; removed in syncToGist's success path; restored at every LS-load site (cache-first phase 1, loadFromGist airplane branch, loadFromGist L6 catch fallback) via the new restoreDirtyFlagFromLS() helper so the in-memory _gistProgressDirtyLocal correctly reflects "LS state has unsynced mutations from a prior session" for L5's airplane-off auto-push gate AND phase 2's post-merge sync trigger. Race tightness: the deep-copy localSnapshot in both syncToGist and phase 2 merge is atomic (synchronous JS, no await between snapshot and merge), so user mutations that land in a later event-loop tick go into the post-merge gistData and get picked up by the next debounce-fired sync rather than being silently dropped. KNOWN LIMITATION still inherited from mergeGistData: union semantics for dismissed/customDeviations/studies arrays don't disambiguate "remote previously had X, local explicitly removed it" from "never had X" — across long-disconnected sessions, a restoreDismissedRepertoire on Device A could be undone by a sync round-trip with Device B's old dismissed list. Per-array _clearedAt timestamps are the proper fix and remain deferred. Found during the Cloud Sync / Gist scan; H1 + L5 + M6 + M2 + M1 + M4+M5 already landed; H3 (cold-start no-fallback Gist failure guard) and the L items next.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync H3 + L2 + L3: cold-start no-fallback Gist failure now surfaces clearly to the user instead of being silently overwritten with 'Synced'. Three coupled fixes in one commit because H3's status flag is meaningless without L2 (showMainApp's inline 'ok'/'Synced' set was unconditionally overriding any earlier 'error' state) and L2's natural fix is L3 (consolidate the duplicate status logic into updateSyncStatusForAirplane). H3 (cold-start guard): when fetchGames' Gist-configured cold-start path calls await loadFromGist() and that returns false (network failure during initial load AND no GIST_PROGRESS_CACHE_KEY in localStorage to fall back to via L6 — true cold start on a new device with transient connectivity), gistData stays null. Pre-H2 this caused total remote-progress-loss on the next syncToGist (blind PATCH'd an empty fresh gistData over Gist's existing state) but H2's read-merge-write closed that vector — syncToGist now refuses to write on read failure. The remaining issue was UX: extractAllMistakes ran against null gistData (no invalidations / notes / practice items in queue this session), the user saw an empty queue, and showMainApp set the status to 'Synced' anyway, suggesting everything was fine. Now fetchGames captures loadFromGist's return value and on false sets a clear 'Progress unavailable — refresh when online' status; the user knows to refresh once connectivity is restored. L2 (status preservation): updateSyncStatusForAirplane now reads dot.classList.contains('error') and short-circuits when an error state is already set, so the 'Progress unavailable' label H3 sets survives the showMainApp call that happens immediately after. Reading the actual DOM rather than tracking a parallel JS variable prevents drift between intended and shown state. L3 (consolidation): the inline status logic in showMainApp (`if (airplaneMode) ... else if (isGistConfigured()) setSyncStatus('ok', 'Synced')`) was a near-verbatim duplicate of updateSyncStatusForAirplane — replaced with a call to the now-error-preserving function so future status-state additions (e.g., a 'reconnecting' state) don't have to be added in two places. Side benefit: removes the brief pre-phase-2 'Synced' flash that happened in the cache-first fast path between phase 1's setSyncStatus('syncing', ...) and phase 2's start. Found during the Cloud Sync / Gist scan; H1 + L5 + M6 + M2 + M1 + M4+M5 + H2+M3+phase-2-merge already landed; L1 (dead constant) + L4 (description clobber) + L6 (silent quota errors) + L7 (keepalive) + L8 (schema-init duplication) remain as low-priority cleanup items.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3167,6 +3167,18 @@ function setSyncStatus(state, label) {
 }
 
 function updateSyncStatusForAirplane() {
+  // L2+L3: this is the single source of truth for "what status should the
+  // indicator show given the current configured state?" — used both by the
+  // airplane toggle and by showMainApp post-fetchGames. Preserves an existing
+  // 'error' state because the caller may have set it intentionally (e.g.,
+  // H3's cold-start progress-load failure path) and the unconditional
+  // 'ok'/'Synced' override would mislead the user into thinking everything
+  // is fine when their progress data didn't load. The dot.classList.contains
+  // check reads the actual DOM rather than tracking a parallel JS variable
+  // so there's no risk of drift between "what we think we set" and "what's
+  // actually shown."
+  const dot = document.getElementById('syncDot');
+  if (dot && dot.classList.contains('error')) return;
   if (airplaneMode) {
     setSyncStatus('off', '✈ Offline');
   } else if (isGistConfigured()) {
@@ -9275,7 +9287,24 @@ async function fetchGames(autoUsername) {
 
         btn.textContent = `Analyzing ${allGames.length} games…`;
         await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-        await loadFromGist();
+        // H3: track whether progress actually loaded. If loadFromGist returns
+        // false (network failed AND no LS cache to fall back to — true cold-
+        // start on a new device with transient connectivity), gistData stays
+        // null. extractAllMistakes will run against null gistData (no
+        // invalidations / notes / practice items in the queue this session).
+        // Without H2's read-merge-write, the next syncToGist would PATCH a
+        // fresh empty gistData over Gist and wipe remote progress; H2 closes
+        // that data-loss vector but the UX gap remains: the user sees an
+        // empty queue without understanding why. Surface a distinct status
+        // label so it's clear this is a network failure, not a "no progress
+        // yet" state, and so the user knows to refresh once connectivity is
+        // restored. The 'error' state is preserved across showMainApp's
+        // inline status reset (L2 — see updateSyncStatusForAirplane caller).
+        const progressLoaded = await loadFromGist();
+        if (!progressLoaded) {
+          console.warn('[fetchGames] Cold-start progress load failed and no LS fallback — running with empty progress this session');
+          setSyncStatus('error', 'Progress unavailable — refresh when online');
+        }
         extractAllMistakes();
         applyFilters();
         showMainApp();
@@ -11251,13 +11280,11 @@ function showMainApp() {
   document.getElementById('syncStatus').classList.remove('hidden');
   document.body.classList.add('mobile-browsing');
 
-  if (airplaneMode) {
-    setSyncStatus('off', '✈ Offline');
-  } else if (isGistConfigured()) {
-    setSyncStatus('ok', 'Synced');
-  } else {
-    setSyncStatus('off', 'Not synced');
-  }
+  // L3: consolidate to the single source of truth in updateSyncStatusForAirplane,
+  // which now also preserves any 'error' state from prior async failures (H3
+  // cold-start no-fallback, gistRead network failure, sync rejection, etc.) so
+  // the user sees the actual state instead of a misleading 'Synced'.
+  updateSyncStatusForAirplane();
 
   sessionTotal = filteredMistakes.length;
   sessionCompleted = 0;
