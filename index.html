@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Extraction L1+L2+L3+L5+L6: low-priority follow-ups to the H+M batch. L1 — buildGameFingerprint included tacticsLen and hasClocks but not analysis.length, so a game whose analysis is later upgraded from partial to full (rare — server analysis upgrade, analyzer rerun with deeper search) would short-circuit at the cached length and never see the appended moves. extractMistakesForGame iterates only up to analysis.length and the cache key didn't reflect the change. Fix: add analysisLen to the fingerprint shape; bump MISTAKES_CACHE_VERSION 7 → 8 so existing caches are invalidated and rebuilt with the new shape. L2 — eval cache flush only fired on beforeunload, but mobile browsers reliably fire pagehide while often skipping beforeunload, so the 15s debounce window of in-memory writes was lost when the app was backgrounded and OS-killed on mobile. Extract the flush logic to flushPendingSyncs() shared between handlers. Two follow-up edge cases addressed: (a) on desktop both handlers may fire in sequence (beforeunload first, then pagehide), so without a guard the second call would re-fire syncToGist (clearTimeout doesn't null the variable, syncEvalCacheToGist is async so evalCacheDirty may still be >0 when the second call arrives) — added _flushPendingSyncsFired flag; (b) pagehide can also fire when the page goes into bfcache (e.persisted=true) on mobile and pageshow restores it later, in which case flushing during the bfcache hop is wasteful and would burn the dual-fire flag for the rest of the session — gate pagehide flush on !e.persisted, and reset the flag on pageshow(persisted=true). saveContSession is still called unconditionally on pagehide regardless of persisted (cheap, non-destructive). L3 — startPreAnalysis SEED only treated cached entries at full target depth (depthAdj(30)) and multiPv 3 as full hits; everything else fell through to terminate-and-reinit-and-deepen even when the cached depth was 28 or 29 (only 1-2 plies short). The terminate-reinit cost (drainSfPendingResolvers, async initStockfish, setoption Hash, isready) is typically >100ms and a 2-ply deepening from 28 buys very little — at depths >20 Stockfish bestMove generally agrees and multiPv breadth (which the cache already has at 3) is what matters for Great/Miss classification. Add isNearFullHit branch: cachedEval.depth >= targetDepth - 2 AND mpv >= 3 → treat as full hit, skip relaunch. Verified safe across mobile depthAdj range (max offset 6 → target 24 → threshold 22 still above EVAL_CACHE_MIN_DEPTH=20). Deliberately not applied to startAnalysisSearch (analysis mode) — the user wants the live deepening progress visible in the depth tag. L5 — _gistProgressDirtyLocal was set to true by debounceSyncToGist but never reset, so once any local change triggered a sync the flag stayed true for the rest of the session. Currently background sync is one-shot per session (only fired by the cache-first phase 2 in fetchGames), so the leak doesn't manifest as a user-visible bug today, but any future code path that adds another background-sync trigger inherits a permanently-true flag and the !_gistProgressDirtyLocal gate in fetchGames would never fire correctly on subsequent triggers. Fix: reset _gistProgressDirtyLocal = false inside syncToGist's try-after-gistWrite-success path (not in catch — failed sync should leave the flag dirty so retry sees it). Defensive — keeps the invariant correct rather than relying on the flag never being read again. L6 — cold-start path in fetchGames calls await loadFromGist(); extractAllMistakes(); applyFilters(); showMainApp() unconditionally. If loadFromGist throws on the network layer, the catch returns false, gistData stays null (no LS fallback in the non-airplane try-catch), and extractAllMistakes runs with no invalidations / notes / practice items in the queue this session — and any local changes during the session would write to a fresh empty gistData, overwriting cloud state on the next successful sync. Fast path already had a localStorage-backed fallback before its own gistRead call. Cold start did not. Fix: in loadFromGist's catch block, attempt the same localStorage cache restore that airplane mode already does (parse cached gistData, run migrations, also load eval cache from LS so cold-start-with-network-failure still gets the eval cache it would have gotten from a successful loadEvalCacheFromGist). Returns true if the LS restore succeeds. Status indicator is left on "Load failed" — user should be aware they're on stale data. L4 (syncEvalCacheToGist blind overwrite) deliberately deferred — twin of M4, both belong in the planned Cloud Sync scan for consistency.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Extraction L8+L9+L10+L11+L12: data-integrity hardening — break-on-bad-SAN; opening-index setup-throw flag-reset; index invalidation on allGames mutation; mistakes cache invalidates on knownUsernames change; airplane-mode eval cache LS write debounced. L8 — extractMistakesForGame's main loop calls chess.move(san, {sloppy:true}) and used `if (!moveResult) continue;` on failure. But chess didn't advance, so the next iteration's chess.move(moves[i+1]) tries to play move i+1 from the same position — almost always fails too, and moveStats/fens/the rest of the analysis silently truncate for the remainder of the game with phantom holes. Switch to `break` so the prefix that legitimately played is preserved cleanly at the failure point. Matches the pattern already used in buildOpeningIndex's twin chess.move loop. Audited all four chess.move(san) failure-handling sites; only this one was buggy (the other three are single-move calls with explicit return). L9 — doBuildOpeningIndex's setup phase (allGames.slice, Map allocations, positionMoveIndex/gameFenIndex assignment) runs synchronously between pmiBuilding=true (set in buildOpeningIndex before calling) and processBatch's try-catch. Anything that throws there (extremely unlikely — would require allGames being non-array or Map allocation failing — but defensively any future code that adds setup work could throw) leaves the build flags stuck at true forever; subsequent buildOpeningIndex calls early-return at line 9692 and the opening explorer dies for the rest of the session. Wrap the setup in try-catch that resets pmiBuilding/fenIndexBuilding on synchronous throw. Switched const→let for variables now assigned inside the try block; verified safe (original only mutated lastRenderT, others are write-once). L10 — when allGames is replaced (cache-first games-changed branch, standalone-path fresh fetch), the lazy opening indices need to be invalidated AND any in-flight build aborted. Previously: cache-first branch reset positionMoveIndex/gameFenIndex to empty Maps but didn't bump openingBuildSession, so the in-flight build with the old allGames snapshot would complete its work into its local pmi/newFenIndex, see buildSession === openingBuildSession at the end, and overwrite the freshly-reset indices with stale data. Standalone-path fresh fetch was worse — replaced allGames at line 8934 (allGames = merged) without any index invalidation at all. Introduce invalidateOpeningIndices() helper: resets indices + bumps openingBuildSession + clears build flags. Routed both call sites through it (cache-first games-changed branch; standalone-path fresh fetch gated on merged.length>0). The session bump makes the in-flight build's completion check fail so the late arrival is dropped and the next opening-explorer access kicks off a clean rebuild. Pairs with logout's existing session bump pattern. L11 — knownUsernames affects detectPlayerColor's output, which is then baked into each cached mistake's playerColor. If the user adds another platform username (chess.com alias added after a Lichess-only session, or vice versa), every previously-cached mistake's playerColor stays stuck at the old session's value — including in self-played games where knownUsernames matches both colors and the new fall-through to _playerColor would change the answer. Mistakes cache invalidation key was version + params + per-game fingerprint, none of which captured the knownUsernames signature. Add knownUsernamesSig() = sorted set joined with | as a separate cache field; loadMistakesCache returns null if the saved sig differs from the current. Verified ordering: knownUsernames is populated (from cacheUsernames in fast path, gistCache.usernames in cold start) before the synchronous extractAllMistakes call, so the sig comparison is always against fully-populated state. L12 — in airplane / no-Gist mode, debounceEvalCacheSync was writing the entire evalCache JSON blob to localStorage synchronously on every evalCacheStore call. preAnalysis at depth 30 produces dozens of stores per session and each one rewrote the whole blob (potentially MBs). Debounce the LS write using the same evalCacheSyncTimer the Gist branch uses — 5s is shorter than the Gist 15s because airplane has no other persistence path, but still batches sequential preAnalysis stores. Reset evalCacheDirty in the timer callback so the dirty counter stays accurate (otherwise grows unbounded in airplane mode and flushPendingSyncs always sees evalCacheDirty>0, redundantly re-writing LS at teardown). Follow-up race fixed: airplane→online toggle while a debounced LS-only timer is pending would let the timer fire, mark evalCacheDirty=0, but the entries were never sent to Gist — subsequent syncEvalCacheToGist returns early at evalCacheDirty===0, eval cache divergence between LS and Gist. The airplane toggle's onchange now cancels the pending evalCacheSyncTimer and force-syncs to Gist when transitioning airplane→online with dirty entries pending. flushPendingSyncs (pagehide+beforeunload) bypasses the debounce via direct saveEvalCacheToLocalStorage, so unflushed writes are still persisted on teardown.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3027,8 +3027,24 @@ function evalCacheStore(fen, depth, bestMove, bestCp, pvs, multiPv = 1) {
 
 function debounceEvalCacheSync() {
   if (airplaneMode || !isGistConfigured()) {
-    // Still cache locally
-    saveEvalCacheToLocalStorage();
+    // L12: in airplane / no-Gist mode the previous code wrote the entire
+    // evalCache JSON blob to localStorage synchronously on every evalCacheStore
+    // call. preAnalysis at depth 30 produces dozens of stores per session and
+    // each one rewrote the whole blob (potentially MBs). Debounce the LS write
+    // using the same timer the Gist branch uses — 5s is shorter than the Gist
+    // 15s because airplane mode has no other persistence path, but still
+    // batches enough to coalesce sequential preAnalysis stores. flushPendingSyncs
+    // (pagehide + beforeunload) bypasses this debounce via its direct
+    // saveEvalCacheToLocalStorage call, so unflushed writes are still persisted
+    // on teardown. Reset evalCacheDirty in the timer callback so the dirty
+    // counter stays accurate (otherwise it grows unbounded in airplane mode
+    // and flushPendingSyncs always sees evalCacheDirty>0, redundantly re-writing
+    // LS at teardown).
+    clearTimeout(evalCacheSyncTimer);
+    evalCacheSyncTimer = setTimeout(() => {
+      saveEvalCacheToLocalStorage();
+      evalCacheDirty = 0;
+    }, 5000);
     return;
   }
   clearTimeout(evalCacheSyncTimer);
@@ -3238,8 +3254,21 @@ function loadMistakesCache() {
     const cache = JSON.parse(raw);
     if (!cache || cache.version !== MISTAKES_CACHE_VERSION) return null;
     if (JSON.stringify(cache.params) !== JSON.stringify(MISTAKES_CACHE_PARAMS)) return null;
+    // L11: knownUsernames affects detectPlayerColor's output, which is then
+    // baked into each cached mistake's playerColor. If the user adds another
+    // platform username (chess.com alias added after a Lichess-only session,
+    // or vice versa), every previously-cached mistake's playerColor stays
+    // stuck at the old session's value — including in self-played games where
+    // knownUsernames matches both colors and the new fall-through to
+    // _playerColor would change the answer. Invalidate when the signature
+    // shifts so the next extract regenerates with the current set.
+    if (cache.knownUsernamesSig !== knownUsernamesSig()) return null;
     return cache;
   } catch { return null; }
+}
+
+function knownUsernamesSig() {
+  return [...knownUsernames].sort().join('|');
 }
 
 function saveMistakesCache(rawMistakes, gameFingerprints, advantageCandidates) {
@@ -3252,6 +3281,7 @@ function saveMistakesCache(rawMistakes, gameFingerprints, advantageCandidates) {
     const cache = {
       version: MISTAKES_CACHE_VERSION,
       params: { ...MISTAKES_CACHE_PARAMS },
+      knownUsernamesSig: knownUsernamesSig(),
       games: gameFingerprints,
       mistakes: serialized,
       advantageCandidates: advantageCandidates || {},
@@ -3575,12 +3605,22 @@ function openSettings() {
   const airplaneToggle = document.getElementById('settingsAirplaneMode');
   airplaneToggle.checked = airplaneMode;
   airplaneToggle.onchange = function() {
+    const wasAirplane = airplaneMode;
     airplaneMode = this.checked;
     localStorage.setItem('airplaneMode', airplaneMode);
     updateSyncStatusForAirplane();
     // When turning off airplane mode, push any accumulated changes
     if (!airplaneMode && postProgressOnReturn && gistData && isGistConfigured()) {
       debounceSyncToGist();
+    }
+    // L12 follow-up: when transitioning airplane → online, the eval cache has
+    // a pending LS-only debounce timer that on fire would mark evalCacheDirty=0
+    // — but the entries were never sent to Gist. Cancel that timer and route
+    // the dirty entries through a Gist sync so they propagate to other devices.
+    if (wasAirplane && !airplaneMode && isGistConfigured() && evalCacheDirty > 0) {
+      clearTimeout(evalCacheSyncTimer);
+      evalCacheSyncTimer = null;
+      syncEvalCacheToGist(); // best-effort
     }
   };
   // Post progress on return toggle
@@ -8828,9 +8868,9 @@ async function fetchGames(autoUsername) {
               if (currentMistakeIdx < 0) {
                 // Safe to re-extract: user hasn't loaded a position yet
                 setSyncStatus('syncing', 'Updating…');
-                // Invalidate lazy indices — will be rebuilt on next access
-                positionMoveIndex = new Map(); pmiGameCount = 0;
-                gameFenIndex = new Map(); fenIndexGameCount = 0;
+                // Invalidate lazy indices and abort any in-flight build —
+                // see invalidateOpeningIndices for the full rationale.
+                invalidateOpeningIndices();
                 extractAllMistakes();
                 applyFilters();
                 updateSessionProgress();
@@ -8942,6 +8982,10 @@ async function fetchGames(autoUsername) {
       if (appShown) setSyncStatus('syncing', 'Analyzing…');
       else btn.textContent = `Analyzing ${allGames.length} games…`;
       await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+      // L10: allGames was just replaced with `merged` above, so any in-flight
+      // opening-index build has a stale snapshot. Invalidate so the build
+      // completes into a discarded session and a fresh build runs.
+      if (merged.length > 0) invalidateOpeningIndices();
       extractAllMistakes();
       applyFilters();
 
@@ -8995,7 +9039,16 @@ function extractMistakesForGame(game) {
     const posKey = fenPositionKey(fenBefore);
     const san = moves[i];
     const moveResult = chess.move(san, { sloppy: true });
-    if (!moveResult) continue;
+    // L8: break, not continue. If a move fails to play (corrupted PGN,
+    // illegal-from-position move from a buggy analyzer output, etc), `chess`
+    // didn't advance, so the next iteration's chess.move(moves[i+1]) tries
+    // to play move i+1 from the same position — almost always fails too,
+    // and moveStats/fens get silently truncated for the remainder of the
+    // game with no signal to the user. break stops cleanly at the failure
+    // point so the opening explorer's gameFenIndex shows the prefix that
+    // legitimately played, without phantom holes. Matches the existing
+    // pattern in buildOpeningIndex which already uses break.
+    if (!moveResult) break;
     fens.push(fenPositionKey(chess.fen()));
     moveStats.push({ posKey, moveUci: moveResult.from + moveResult.to + (moveResult.promotion || ''), moveSan: moveResult.san });
 
@@ -9694,27 +9747,57 @@ function buildOpeningIndex() {
   }
 }
 
+// L10: invalidate the lazy opening indices and abort any in-flight build.
+// Use this anywhere `allGames` is replaced or substantially mutated (cache-first
+// games-changed branch, standalone-path fresh fetch, future re-fetch paths)
+// — without bumping openingBuildSession alongside the reset, an in-flight
+// build with the old allGames snapshot would complete its work into its local
+// pmi/newFenIndex, see buildSession === openingBuildSession at line 9890,
+// and overwrite the freshly-reset indices with stale data. The session bump
+// makes the build's completion check fail, so the late arrival is dropped
+// and the next opening-explorer access kicks off a clean rebuild against the
+// new allGames. Pairs with logout's existing session bump pattern.
+function invalidateOpeningIndices() {
+  positionMoveIndex = new Map(); pmiGameCount = 0;
+  gameFenIndex = new Map(); fenIndexGameCount = 0;
+  openingBuildSession = (openingBuildSession | 0) + 1;
+  pmiBuilding = false;
+  fenIndexBuilding = false;
+}
+
 function doBuildOpeningIndex() {
   const t0 = performance.now();
   // Snapshot the session token at build start. If logout fires mid-build, the
   // global token increments and our completion path becomes a no-op — we must
   // not overwrite the new user's (null) indices or flip the build flags back.
   const buildSession = openingBuildSession;
-  const fenData = fenDataCacheLoaded ? (fenDataCache || {}) : {};
-  const newFenIndex = new Map();
-  const pmi = new Map();
-  // Assign immediately so partial results are available to renderExplorerStats
-  positionMoveIndex = pmi;
-  gameFenIndex = newFenIndex; // partial — applyOpeningFilterFromBoard re-applies when done
-  const games = allGames.slice();
-  const BATCH = 50;
+  // L9: setup runs synchronously between pmiBuilding=true (in buildOpeningIndex)
+  // and processBatch's try-catch. Anything that throws here would leave the
+  // build flags stuck at true, so subsequent buildOpeningIndex calls early-return
+  // forever and the opening explorer dies for the rest of the session. Catch
+  // synchronous setup errors and reset flags so the next call can retry.
+  let fenData, newFenIndex, pmi, games, BATCH, lastRenderT, RENDER_THROTTLE_MS;
   let i = 0;
   let cacheHits = 0;
   let cacheMisses = 0;
   const dirtyGames = {};  // games that needed chess.js replay — persist at the end
-
-  let lastRenderT = 0;
-  const RENDER_THROTTLE_MS = 250;
+  try {
+    fenData = fenDataCacheLoaded ? (fenDataCache || {}) : {};
+    newFenIndex = new Map();
+    pmi = new Map();
+    // Assign immediately so partial results are available to renderExplorerStats
+    positionMoveIndex = pmi;
+    gameFenIndex = newFenIndex; // partial — applyOpeningFilterFromBoard re-applies when done
+    games = allGames.slice();
+    BATCH = 50;
+    lastRenderT = 0;
+    RENDER_THROTTLE_MS = 250;
+  } catch (e) {
+    console.error('[OpeningIndex] Setup failed:', e);
+    pmiBuilding = false;
+    fenIndexBuilding = false;
+    return;
+  }
 
   function processBatch() {
     // Session-token check: if logout incremented openingBuildSession while this
