@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync L5: gate airplane-off auto-push on _gistProgressDirtyLocal. The airplaneToggle.onchange handler in openSettings was unconditionally scheduling a debounceSyncToGist call on every airplane→online transition, regardless of whether any offline mutations had actually occurred. In the no-offline-activity sub-case (airplane toggled by mistake, brief connectivity check, idle session) this gratuitously PATCHed the local stale gistData over whatever another device may have written during the offline window — pure data destruction with no compensating user benefit. Worst-case walk-through: Device A loaded Gist on Monday, toggled airplane on Tuesday (no offline drilling), Device B drilled Tuesday and synced. Device A toggled airplane off Wednesday morning before opening any positions → 3s timer fired → Device A's Monday-base gistData PATCHed over Device B's Tuesday writes. Device B's progress lost on Gist; Device A's localStorage cache also overwrites it on next launch. Adding && _gistProgressDirtyLocal to the gate condition closes this sub-case entirely — no offline mutation, no schedule, no clobber. The with-mutation case still triggers a blind PATCH (H2/M4 deferred); read-merge-write in syncToGist is the only stable fix for that. After H1 the dirty flag is correctly maintained for all mutation paths, so this gate is reliable. Side benefit: the postProgressOnReturn flag now means what its name suggests ("post progress on return" — only when there is progress to post), rather than "PATCH on every transition." Found during the Cloud Sync / Gist scan; H1 already landed, M6 next.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync M6: flush pending progress + eval cache syncs before disconnectGist clears credentials. Without this, any mutation in the 3s debounce window before disconnect (or in flight during a 3s sync delay) was silently dropped: the timer would fire after gistToken='' and syncToGist's first guard (if (!gistToken || !gistId || !gistData) return) returned early without writing. Repro: drill a position to the SRS Easy grade, then immediately open Settings → Disconnect within 3s — the SRS update for that position never reached Gist. The fix runs the same best-effort fire-and-forget syncToGist that logout already does at line 8700, but for the disconnect path which previously had nothing equivalent. Eval cache gets the same treatment: a pending evalCacheSyncTimer firing post-disconnect would see !isGistConfigured() and early-return, leaving the entries in LS-only forever (or until a future re-connect, which routes through saveSettingsGist's L12-A force-sync). Flushing now means the user's work lands on the account they're disconnecting from, which is the principle-of-least-surprise behavior. Both flushes gated on the appropriate dirty/timer signals so they're no-ops when there's nothing to flush. Side note discovered while writing the comment: my earlier pattern study assumed evalCacheDirty was reset by syncEvalCacheToGist's early return — it's not, dirty is preserved across the early-return path, which is correct. Found during the Cloud Sync / Gist scan; H1 + L5 already landed; M2 next.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3744,6 +3744,27 @@ async function saveSettingsGist() {
 }
 
 function disconnectGist() {
+  // Flush any pending sync first — without this, mutations made within the
+  // 3s debounce window before disconnect (or during the 3s sync delay) get
+  // silently dropped: the timer fires after gistToken='' and syncToGist
+  // returns early at the no-token guard. Best-effort fire-and-forget;
+  // matches the logout flush pattern at line 8700.
+  if (syncDebounceTimer && gistData && isGistConfigured()) {
+    clearTimeout(syncDebounceTimer);
+    syncDebounceTimer = null;
+    syncToGist();
+  }
+  // Same for eval cache: a pending evalCacheSyncTimer would fire after
+  // disconnect, see !isGistConfigured() in syncEvalCacheToGist's guard, and
+  // return early without touching dirty. The entries would persist in LS
+  // (saveEvalCacheToLocalStorage runs on flushPendingSyncs) but never reach
+  // the user's Gist. Force-sync now while creds are still valid so the
+  // user's work lands on the account they're disconnecting from.
+  if (evalCacheDirty > 0 && isGistConfigured() && !airplaneMode) {
+    clearTimeout(evalCacheSyncTimer);
+    evalCacheSyncTimer = null;
+    syncEvalCacheToGist();
+  }
   gistToken = ''; gistId = ''; gistData = null;
   localStorage.removeItem('mistakelab_gist_token');
   localStorage.removeItem('mistakelab_gist_id');
