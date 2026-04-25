@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync M2: study-comment cleanup deletion is now sync-triggering and runs even when allComments is empty. Two compounding bugs in the previous loadRepertoireTrie code path: (1) the cleanup loop deleted stale source:'study' notes from gistData.notes for positions no longer in any study, but the debounceSyncToGist call was gated on imported>0 — so deletions in a load with no new comments to import (the typical re-load case once a study has been seen) stayed in-memory only, and an unrelated mutation had to coincidentally trigger sync to flush them. (2) the outer `if (allComments.size > 0 && gistData)` guard skipped the entire block — including cleanup — when the user removed their last study, leaving stale source:'study' entries permanently in Gist with no path to ever delete them. Repro: import a study with comments, observe notes appear; remove the study from Settings; reload; notes still there forever. Fix tracks cleaned count alongside imported, fires sync on either >0, and widens the outer guard to `if (gistData)` so cleanup runs even on empty-allComments loads. The import branch is unchanged (still iterates allComments which may be empty, no-op when so). Side note: study notes are intentionally re-overwritten on each load (the existing.source !== 'study' guard preserves user-created notes but allows study-source notes to be refreshed) — so source comment edits propagate; only structural changes (study removed, position dropped from a chapter) needed the cleanup path. Found during the Cloud Sync / Gist scan; H1 + L5 + M6 already landed; M1 (eval cache read-merge-write) next.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync M1: read-merge-write for syncEvalCacheToGist. The previous blind PATCH wrote evalCacheToJSON() (this device's in-memory view) directly to the Gist eval file — every sync stripped any entries another device had written since this device's last loadEvalCacheFromGist. Round-trip eventually converged because each device kept its locally-computed entries in evalCache + LS and re-added them on its own next sync, but during heavy multi-device use the Gist file content "flapped" and shared Stockfish compute was repeatedly wasted (positions both devices analyzed independently never propagated within a session). Fix fetches gistReadEvals at sync start, merges any unseen-by-us entries through evalCacheShouldOverwrite (the same prefer-deeper-and-at-least-as-wide policy used by every other merge site), then PATCHes the merged result. Read failure tolerance: if gistReadEvals throws, log warning and continue with blind PATCH — for eval cache (idempotent, recomputable from FEN) preserving this device's writes is more valuable than preventing potential remote overwrite, and the round-trip from the other device's next sync will re-merge. The trade-off goes the opposite way for progress data (non-recomputable), so the M4 fix will refuse to write on read failure instead. Validation mirrors loadEvalCacheFromGist's Array.isArray + pv element-shape check exactly so malformed Gist entries can't poison the cache. Counter included in the success log for visibility into how often cross-device merge actually fires. The 5s gistFetchAll TTL is acceptable here because syncEvalCacheToGist runs at 15s debounce, so the cache is always cold by sync time. After PATCH, gistInvalidateCache nukes the cache so any subsequent gistReadEvals refetches fresh. Smaller pattern study for the queued M4 read-merge-write on syncToGist (progress); landed before M4 because eval cache schema is purely additive (no delete/clear semantics) which lets the merge be a single union pass with no per-key tombstone reasoning. H1 + L5 + M6 + M2 already landed; M4 next.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3128,6 +3128,42 @@ async function syncEvalCacheToGist() {
   if (airplaneMode || !isGistConfigured()) return;
   if (evalCacheDirty === 0) return;
   try {
+    // M1: read-merge-write — fetch current Gist eval cache and merge any
+    // unseen-by-us entries before PATCHing. Without this merge, a blind
+    // PATCH strips entries written by other devices since our last load
+    // (we'd overwrite the remote file with our in-memory view, which never
+    // had those entries). Round-trip would eventually converge through the
+    // other device's next sync, but during heavy multi-device use the file
+    // content "flaps" and shared compute is repeatedly wasted. Smaller
+    // pattern study for the queued M4 progress read-merge-write.
+    let mergedFromRemote = 0;
+    try {
+      const gistEvals = await gistReadEvals();
+      if (gistEvals && typeof gistEvals === 'object') {
+        for (const [key, val] of Object.entries(gistEvals)) {
+          // Same Array.isArray + element-shape validation as
+          // loadEvalCacheFromGist and evalCacheFromJSON — keeps malformed
+          // Gist entries out of cache so the SEED path's pv.map can never
+          // throw.
+          if (!val || typeof val.depth !== 'number' || !val.bestMove
+              || !Array.isArray(val.pvs)
+              || !val.pvs.every(pv => pv && typeof pv.cp === 'number' && pv.move)) continue;
+          const existing = evalCache.get(key);
+          if (evalCacheShouldOverwrite(existing, val.depth, val.multiPv || 1)) {
+            evalCache.set(key, val);
+            mergedFromRemote++;
+          }
+        }
+      }
+    } catch (readErr) {
+      // Read failure: continue with blind PATCH. For eval cache (idempotent,
+      // recomputable from FEN) preserving this device's writes is more
+      // valuable than preventing potential remote overwrite — the round-trip
+      // from the other device's next sync will re-merge. For progress data
+      // (non-recomputable) the M4 fix will refuse to write on read failure
+      // instead.
+      console.warn('[EvalCache] Read-merge skipped (read failed); proceeding with blind PATCH:', readErr.message);
+    }
     const data = evalCacheToJSON();
     await fetch(`https://api.github.com/gists/${gistId}`, {
       method: 'PATCH',
@@ -3142,7 +3178,11 @@ async function syncEvalCacheToGist() {
     evalCacheDirty = 0;
     saveEvalCacheToLocalStorage();
     gistInvalidateCache();
-    console.log(`[EvalCache] Synced ${evalCache.size} entries to Gist`);
+    if (mergedFromRemote > 0) {
+      console.log(`[EvalCache] Synced ${evalCache.size} entries to Gist (merged ${mergedFromRemote} from remote)`);
+    } else {
+      console.log(`[EvalCache] Synced ${evalCache.size} entries to Gist`);
+    }
   } catch (e) {
     console.warn('[EvalCache] Gist sync failed:', e.message);
   }
