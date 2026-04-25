@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Hint M4 follow-up: gate hint-visual re-apply on btnHint visibility. Post-hoc scan of the 8-commit hint batch surfaced a cosmetic interaction between M3 and M4: several code paths hide btnHint without resetting hintLevel / hintMove / hintUsed (M3 revealRepertoireAnswer 20456; finishAdvantage 16119; handleEvalResult wrong-move / good-move / inaccuracy branches at 13616 / 13632 / 13646; stopAndReviewContinuation 16204; others). If the user pressed A from any of those states and then exited analysis, M4's unconditional re-apply would paint `.square-hint` on a board where btnHint is hidden — the user can't interact with the highlight, and the hint no longer represents the current feedback state. Pre-existing "exit loses post-reveal state" bug is the root cause; M4 exposed it as a stray highlight. Fix: wrap the re-apply-or-stale-reset block in an `hintBtnVisible` check. When btnHint is hidden, skip both re-apply and stale-reset — the scalars stay set and will be cleaned up by whichever code path re-shows btnHint next (showRepContPrompt 20759; loadPosition 11596; retryPosition branches; etc. — all do their own four-scalar reset). Preserves M4's original intent (restore hint when btnHint is available for interaction) while closing the cross-commit cosmetic issue. hintBtnReset variable folded into hintBtnCheck since one lookup now serves both branches.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Extraction H1+H2+H3+M1+M2+M3: cross-device gistData refresh re-extracts; eval cache merge-on-load instead of clear-and-replace; legacy-pos-key migration on cache-first fast path; eval cache strict-improvement merge policy; suffix-anchored regex matchers for invalidation classification; eval cache pvs validation. H1 — fast-path background sync at fetchGames ~8643 replaces gistData with freshProgress (gated on !_gistProgressDirtyLocal) but never re-runs extractAllMistakes; cross-device tactic/mistake invalidations, practice items, and repertoire changes are invisible until next launch since applyFilters operates on the already-built allMistakes. Fix: after gistData = freshProgress and the existing migrate + LS-cache update, if currentMistakeIdx < 0 call extractAllMistakes + applyFilters + updateSessionProgress. Mirrors the games-changed branch directly below. Cheap because every game is a mistakes-cache hit; lazy PMI/gameFenIndex auto-rebuild on next access. Mid-drill is preserved. H2 — evalCacheFromJSON did evalCache.clear() before re-loading from JSON. Cold paths (line 2865 airplane, line 8631 fast path) had empty evalCache so the clear was a no-op. But loadEvalCacheFromGist's preceding loadEvalCacheFromLocalStorage step (line 3036) ran the same path with a populated in-memory cache: user starts drilling after the initial render → preAnalysis bestmove fires evalCacheStore → debounceEvalCacheSync schedules a 15s timer (Gist mode does not write LS until that timer fires and syncEvalCacheToGist completes) → background sync arrives within ~1s → loadEvalCacheFromGist → loadEvalCacheFromLocalStorage → evalCacheFromJSON → in-memory writes from the last few seconds are wiped, evalCacheDirty preserved so the next debounce-fired sync writes the cleared state to Gist propagating the loss. Fix: merge instead of clear, using the same prefer-deeper-then-more-PVs policy as loadEvalCacheFromGist's existing Gist-side loop. Cold paths are still no-ops (empty Map, no merge work); hot path preserves unflushed entries. H3 — migrateLegacyPosKeys (which normalizes pre-EP-stripping keys in gistData.notes / practiceScoreboard / repertoire.customDeviations / repertoire.dismissed) is only called from loadFromGist. The cache-first fast path's two gistData assignment sites (LS restore at fetchGames ~8617; freshProgress replacement in background sync ~8645) both call migrateInvalidationsToGist but not migrateLegacyPosKeys, so users with un-migrated legacy keys see notes / scoreboard entries / custom deviations silently miss for any position reached after a double pawn push, every cache-first session, until they happen to hit a path that calls loadFromGist (logout + login, airplane-mode flip). Fix: call migrateLegacyPosKeys at both sites, immediately after migrateInvalidationsToGist. Idempotent — normalized keys are fixed points, so this is a no-op once data is clean. M1 — three sites that merge into evalCache (evalCacheStore, evalCacheFromJSON, loadEvalCacheFromGist's Gist-side loop) used a "deeper, OR same depth and wider" policy that let a deeper-but-narrower write clobber a shallower-but-wider entry. Concrete case: preAnalysis stored depth-20 multiPv=3 → user triggered a wrong-move refutation routed through sfAnalyzeAdaptive → depth-25 multiPv=1 stored → existing depth-20 multiPv=3 entry overwritten, PV2/PV3 gone. The next startPreAnalysis SEED at the position then ran as a multiPv=1 partial hit and pvGap couldn't be computed; Great/Miss classification was unavailable until Stockfish's fresh search surpassed depth 25. Same shape via loadEvalCacheFromGist when another device pushed a deeper-but-narrower entry. Fix: extract a single evalCacheShouldOverwrite(existing, depth, mpv) helper with strict-improvement semantics — overwrite only when (depth > existing.depth AND mpv >= existing.mpv) OR (depth === existing.depth AND mpv > existing.mpv); deeper-but-narrower writes are skipped. All three sites route through the helper so the policy lives in one place. M2 — getInvalidatedTactics and getInvalidatedMistakes used pid.includes('_t') / !pid.includes('_t') to classify position IDs. The posId scheme has mistake pids ending in `_<digits>`, tactic in `_t<digits>`, advantage in `_a<digits>`, repertoire prefixed `r_`. The substring matcher handles real Lichess (8-char base62) and Chess.com (numeric) gameIds correctly because they don't contain `_`, but mis-fires on any gameId that contains the substring `_t` anywhere — concretely the test game `_test_clocks_6sS121tG` whose mistake pid `_test_clocks_6sS121tG_45` and advantage pid `_test_clocks_6sS121tG_a35` both contain `_t` from the leading `_test_`. Effect: invalidating a mistake or advantage from the test game silently had no effect — the pid landed in getInvalidatedTactics' Set instead of getInvalidatedMistakes', and the type-gated filter in extractAllMistakes (`m.type === 'tactic' && invalidated.has(posId(m))`) never fires on a mistake item. Fix: replace the substring checks with suffix-anchored regexes — PID_TACTIC_RE = /_t\d+$/, PID_MISTAKE_OR_ADVANTAGE_RE = /_a?\d+$/. Robust against arbitrary gameId content. Healing side-effect: any previously-set invalidated flag on a test-game mistake/advantage that was silently ignored under the old code now takes effect. M3 — evalCacheFromJSON and loadEvalCacheFromGist's Gist-side merge loop validated `depth` is a number and `bestMove` is truthy, but did not check that `pvs` is an array or that its elements have the right shape. A corrupted Gist entry (manual edit, future schema drift, transport corruption) with `pvs: null` / `pvs: {}` / `pvs: [null]` / `pvs: [{}]` / `pvs: [{cp:30}]` (missing `move`) would pass validation, enter evalCache, then break the SEED path in startPreAnalysis at `cachedEval.pvs.map(pv => ({cp: pv.cp, move: pv.move, ...}))` — propagating the throw to loadPosition. Fix at three layers. (1) Tighten upstream validation in evalCacheFromJSON and loadEvalCacheFromGist to require Array.isArray(val.pvs). (2) Same upstream sites also require every element to be a non-null object with typeof pv.cp === 'number' AND truthy pv.move — so the malformed elements that pass the array check still get rejected at load. Verified against 17 edge cases including legitimate cp:0 (equal position), negative cp (losing position), and empty pvs:[] arrays. (3) Belt-and-suspenders Array.isArray guard at every site that consumes cached.pvs.map — startPreAnalysis SEED, startAnalysisSearch SEED (analysis mode), sfAnalyze, tacticWorkerAnalyzePosition — so a poisoned in-memory entry from any future code path still degrades to "no cache hit" rather than throwing. evalCacheStore was already safe (every site builds {cp, move, san, uciLine} objects via .map); the only entry point for malformed entries is external corruption, which the upstream validation now rejects.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2555,11 +2555,29 @@ function markCompleted(pid) {
 }
 
 // ─── Invalidated Tactics ───
+// posId scheme (see posId): mistakes end in `_<digits>`, tactics in `_t<digits>`,
+// advantage items in `_a<digits>`, repertoire items start with `r_`. The
+// previous classifier here used `pid.includes('_t')` which catches the tactic
+// suffix on every Lichess (8-char base62, no underscores) and Chess.com
+// (numeric) gameId — but mis-fires on any gameId that contains the substring
+// `_t` anywhere, e.g. the test game `_test_clocks_6sS121tG` whose mistake
+// pid `_test_clocks_6sS121tG_45` and advantage pid `_test_clocks_6sS121tG_a35`
+// both contain `_t` from the leading `_test_`. Effect: invalidating a mistake
+// or advantage from the test game silently has no effect, because the pid
+// goes into getInvalidatedTactics' Set instead of getInvalidatedMistakes',
+// and the type-gated filter in extractAllMistakes (`m.type === 'tactic' &&
+// invalidated.has(...)`) never fires on a mistake item. Suffix-anchored
+// regexes are robust against arbitrary gameId content; the test workflow
+// works again, and the pattern survives any future loosening of gameId
+// charsets.
+const PID_TACTIC_RE = /_t\d+$/;
+const PID_MISTAKE_OR_ADVANTAGE_RE = /_a?\d+$/;
+
 function getInvalidatedTactics() {
   const s = new Set();
   if (!gistData?.positions) return s;
   for (const [pid, data] of Object.entries(gistData.positions)) {
-    if (pid.includes('_t') && data.invalidated) s.add(pid);
+    if (PID_TACTIC_RE.test(pid) && data.invalidated) s.add(pid);
   }
   return s;
 }
@@ -2575,7 +2593,7 @@ function getInvalidatedMistakes() {
   const s = new Set();
   if (!gistData?.positions) return s;
   for (const [pid, data] of Object.entries(gistData.positions)) {
-    if (!pid.includes('_t') && data.invalidated) s.add(pid);
+    if (PID_MISTAKE_OR_ADVANTAGE_RE.test(pid) && data.invalidated) s.add(pid);
   }
   return s;
 }
@@ -2941,13 +2959,36 @@ function evalCacheGet(fen, minDepth, minMultiPv = 1) {
   return entry;
 }
 
+// Returns true if `incoming` is strictly more informative than `existing` on
+// at least one axis (depth or multiPv) and at least as informative on the
+// other. Used by every site that merges into evalCache (evalCacheStore,
+// evalCacheFromJSON, loadEvalCacheFromGist) so the policy is in one place.
+//
+// The non-obvious clause is the deeper-but-narrower case. The previous
+// policy ("overwrite if deeper, OR same depth but more PVs") let a depth-25
+// multiPv=1 result (e.g. from sfAnalyzeAdaptive doing wrong-move refutation)
+// overwrite an existing depth-20 multiPv=3 result from preAnalysis. That
+// dropped PV2/PV3, so the next startPreAnalysis SEED at the position ran
+// as a multiPv=1 partial hit — pvGap couldn't be computed and Great/Miss
+// classification was unavailable until Stockfish surpassed the deeper cached
+// depth in a fresh search. The 5-ply depth gain isn't worth the lost gap
+// data: at depths >20 the bestMove generally agrees, but pvGap is essential
+// for Great/Miss tagging. So a deeper-but-narrower write is now skipped;
+// the cache stays at the shallower-wider state until something genuinely
+// better (deeper AND at least as wide) arrives.
+function evalCacheShouldOverwrite(existing, incomingDepth, incomingMpv) {
+  if (!existing) return true;
+  const existingMpv = existing.multiPv || 1;
+  if (incomingDepth > existing.depth && incomingMpv >= existingMpv) return true;
+  if (incomingDepth === existing.depth && incomingMpv > existingMpv) return true;
+  return false;
+}
+
 function evalCacheStore(fen, depth, bestMove, bestCp, pvs, multiPv = 1) {
   if (depth < EVAL_CACHE_MIN_DEPTH) return;
   const key = evalCacheKey(fen);
   const existing = evalCache.get(key);
-  // Only overwrite if deeper, or same depth but more PVs
-  if (existing && existing.depth > depth) return;
-  if (existing && existing.depth === depth && (existing.multiPv || 1) >= multiPv) return;
+  if (!evalCacheShouldOverwrite(existing, depth, multiPv)) return;
   evalCache.set(key, { depth, bestMove, bestCp, pvs, multiPv });
   evalCacheDirty++;
   debounceEvalCacheSync();
@@ -2972,11 +3013,40 @@ function evalCacheToJSON() {
 }
 
 function evalCacheFromJSON(obj) {
-  evalCache.clear();
+  // Merge instead of clear-and-replace. Originally this called evalCache.clear()
+  // before the load, which was a no-op at session-start (evalCache was empty)
+  // but silently wiped in-memory entries when called later — specifically from
+  // loadEvalCacheFromGist's preceding loadEvalCacheFromLocalStorage step on the
+  // cache-first fast path. Sequence: user starts drilling immediately after the
+  // initial render → preAnalysis bestmove fires evalCacheStore → debounceEvalCacheSync
+  // schedules a 15s timer (Gist mode does not write LS until that timer fires
+  // and syncEvalCacheToGist completes successfully) → background sync's gistRead
+  // path calls loadEvalCacheFromGist within ~1s of fast-path entry → that calls
+  // loadEvalCacheFromLocalStorage → evalCacheFromJSON → evalCache.clear() →
+  // in-memory entries from the last few seconds are gone. evalCacheDirty was
+  // preserved so the next debounce-fired syncEvalCacheToGist would write the
+  // cleared state to Gist, propagating the loss to other devices. Now: merge
+  // every JSON entry into evalCache using the same prefer-deeper-then-more-PVs
+  // policy as the Gist merge loop in loadEvalCacheFromGist. Cold-paths are
+  // unaffected (empty Map, no merge to do); hot-path preserves work.
   if (!obj || typeof obj !== 'object') return;
   for (const [key, val] of Object.entries(obj)) {
-    if (val && typeof val.depth === 'number' && val.bestMove) {
-      evalCache.set(key, val);
+    // Validation must include Array.isArray(pvs) AND element-shape check:
+    // the SEED path in startPreAnalysis does cachedEval.pvs.map(pv => ({cp: pv.cp,
+    // move: pv.move, ...})), so a pathological pvs:[null] / pvs:[{}] / pvs:["str"]
+    // would pass the array check but throw on the .map. Strict element validation
+    // here means malformed entries are silently dropped on load rather than
+    // poisoning the cache. evalCacheStore writes always satisfy this shape
+    // (every site builds {cp, move, san, uciLine} objects via .map), so the
+    // only entry point for malformed entries is external corruption (manual
+    // Gist edit, future schema drift, transport corruption).
+    if (val && typeof val.depth === 'number' && val.bestMove
+        && Array.isArray(val.pvs)
+        && val.pvs.every(pv => pv && typeof pv.cp === 'number' && pv.move)) {
+      const existing = evalCache.get(key);
+      if (evalCacheShouldOverwrite(existing, val.depth, val.multiPv || 1)) {
+        evalCache.set(key, val);
+      }
     }
   }
 }
@@ -3041,10 +3111,15 @@ async function loadEvalCacheFromGist() {
     if (gistEvals && typeof gistEvals === 'object') {
       let merged = 0;
       for (const [key, val] of Object.entries(gistEvals)) {
-        if (!val || typeof val.depth !== 'number' || !val.bestMove) continue;
+        // Same Array.isArray(pvs) + element-shape requirement as evalCacheFromJSON
+        // — keeps malformed Gist entries (corrupted manual edit, future schema
+        // drift, transport corruption) out of the cache so the SEED path's
+        // .map(pv => ({cp: pv.cp, ...})) can never throw.
+        if (!val || typeof val.depth !== 'number' || !val.bestMove
+            || !Array.isArray(val.pvs)
+            || !val.pvs.every(pv => pv && typeof pv.cp === 'number' && pv.move)) continue;
         const existing = evalCache.get(key);
-        if (!existing || val.depth > existing.depth ||
-            (val.depth === existing.depth && (val.multiPv || 1) > (existing.multiPv || 1))) {
+        if (evalCacheShouldOverwrite(existing, val.depth, val.multiPv || 1)) {
           evalCache.set(key, val);
           merged++;
         }
@@ -3975,7 +4050,7 @@ function tacticWorkerAnalyzePosition(fen, depth, multiPv) {
   return new Promise(async (resolve) => {
     // Check eval cache first (MultiPV calls at depth ≥ 20 are cache-worthy)
     const cached = evalCacheGet(fen, depthAdj(depth), multiPv);
-    if (cached) {
+    if (cached && Array.isArray(cached.pvs)) {
       const pvs = cached.pvs.map(pv => ({
         cp: pv.cp,
         firstMove: pv.move,
@@ -5596,7 +5671,7 @@ function sfAnalyze(fen, depth = 16, multiPv = 1) {
     (async () => {
       // ── Eval cache check ──
       const cached = evalCacheGet(fen, depthAdj(depth), multiPv);
-      if (cached) {
+      if (cached && Array.isArray(cached.pvs)) {
         sfLog('sfAnalyze', `CACHE HIT depth=${cached.depth} bestMove=${cached.bestMove} fen=${fen.split(' ').slice(0,2).join(' ')}…`);
         const pvs = cached.pvs.map(pv => ({
           cp: pv.cp, moves: pv.uciLine || pv.move, depth: cached.depth, firstMove: pv.move
@@ -5880,7 +5955,12 @@ function startPreAnalysis(fen) {
   // ── Eval cache check ──
   const targetDepth = depthAdj(30);
   const cachedEval = evalCacheGet(fen, EVAL_CACHE_MIN_DEPTH, 1);
-  if (cachedEval) {
+  // Defensive: validation in evalCacheFromJSON / loadEvalCacheFromGist already
+  // rejects entries without an array `pvs`, so this should never fire — but a
+  // future code path that writes to evalCache without going through evalCacheStore
+  // could sneak a bad entry in, and treating it as a cache miss is strictly
+  // better than throwing on the .map below and breaking loadPosition.
+  if (cachedEval && Array.isArray(cachedEval.pvs)) {
     const isFullHit = cachedEval.depth >= targetDepth && (cachedEval.multiPv || 1) >= 3;
     sfLog('startPreAnalysis', `session=${session} CACHE ${isFullHit ? 'FULL' : 'SEED'} depth=${cachedEval.depth}/${targetDepth} mpv=${cachedEval.multiPv||1}/3 bestMove=${cachedEval.bestMove} fen=${fen.split(' ').slice(0,2).join(' ')}…`);
     preAnalysisDepth = cachedEval.depth;
@@ -7113,7 +7193,9 @@ function startAnalysisSearch(fen) {
 
   // Check eval cache first
   const cachedEval = evalCacheGet(fen, EVAL_CACHE_MIN_DEPTH, 1);
-  if (cachedEval) {
+  // Same Array.isArray defensive guard as the startPreAnalysis SEED — keeps
+  // a corrupted entry from breaking analysis-mode loadPosition.
+  if (cachedEval && Array.isArray(cachedEval.pvs)) {
     const isFullHit = cachedEval.depth >= depthAdj(30) && (cachedEval.multiPv || 1) >= 3;
     analysisDepth = cachedEval.depth;
     analysisPvs = cachedEval.pvs.map(pv => ({
@@ -8614,6 +8696,17 @@ async function fetchGames(autoUsername) {
         if (cachedProgress) {
           gistData = JSON.parse(cachedProgress);
           migrateInvalidationsToGist();
+          // Also normalize any legacy (pre-EP-stripping) position keys in
+          // notes / practiceScoreboard / repertoire.customDeviations /
+          // repertoire.dismissed. The fast-path branch never calls
+          // loadFromGist() — which is the only other site that runs this
+          // migration — so without this call, users with legacy gistData would
+          // see notes / scoreboard entries / custom deviations silently miss
+          // for any position reached after a double pawn push, every cache-first
+          // session, until they happen to hit a path that calls loadFromGist
+          // (logout + login, airplane-mode flip, etc.). Idempotent: normalized
+          // keys are fixed points, so this is a no-op once the data is clean.
+          migrateLegacyPosKeys();
           localProgressOk = true;
         }
       } catch (_) {}
@@ -8644,7 +8737,27 @@ async function fetchGames(autoUsername) {
             if (freshProgress && freshProgress.positions && !_gistProgressDirtyLocal) {
               gistData = freshProgress;
               migrateInvalidationsToGist();
+              // Also normalize legacy position keys — the background sync path
+              // calls gistRead() directly rather than loadFromGist(), so without
+              // this call freshProgress from a device that hasn't migrated yet
+              // would leave gistData with un-normalized keys. Idempotent: no-op
+              // when keys are already fixed points.
+              migrateLegacyPosKeys();
               try { localStorage.setItem(GIST_PROGRESS_CACHE_KEY, JSON.stringify(gistData)); } catch (_) {}
+              // Re-extract so cross-device changes (invalidated tactics/mistakes,
+              // saved practice items, custom deviations, dismissed positions) flow
+              // into the in-memory queue. The initial extractAllMistakes ran against
+              // the localStorage-cached gistData snapshot and applyFilters operates
+              // on the resulting allMistakes — without this re-extract, remote changes
+              // are invisible until next launch. Gated on !mid-drill (matches the
+              // games-changed branch below); cheap because every game is a
+              // mistakes-cache hit and lazy indices auto-rebuild on next access.
+              if (currentMistakeIdx < 0) {
+                console.log('[CacheFirst] gistData refreshed from Gist — re-extracting');
+                extractAllMistakes();
+                applyFilters();
+                updateSessionProgress();
+              }
             } else if (freshProgress && freshProgress.positions) {
               // User already modified gistData — just update localStorage cache for next launch
               console.log('[CacheFirst] Skipping gistData replace (local modifications pending)');
