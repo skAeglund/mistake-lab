@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Extraction H1+H2+H3+M1+M2+M3: cross-device gistData refresh re-extracts; eval cache merge-on-load instead of clear-and-replace; legacy-pos-key migration on cache-first fast path; eval cache strict-improvement merge policy; suffix-anchored regex matchers for invalidation classification; eval cache pvs validation. H1 — fast-path background sync at fetchGames ~8643 replaces gistData with freshProgress (gated on !_gistProgressDirtyLocal) but never re-runs extractAllMistakes; cross-device tactic/mistake invalidations, practice items, and repertoire changes are invisible until next launch since applyFilters operates on the already-built allMistakes. Fix: after gistData = freshProgress and the existing migrate + LS-cache update, if currentMistakeIdx < 0 call extractAllMistakes + applyFilters + updateSessionProgress. Mirrors the games-changed branch directly below. Cheap because every game is a mistakes-cache hit; lazy PMI/gameFenIndex auto-rebuild on next access. Mid-drill is preserved. H2 — evalCacheFromJSON did evalCache.clear() before re-loading from JSON. Cold paths (line 2865 airplane, line 8631 fast path) had empty evalCache so the clear was a no-op. But loadEvalCacheFromGist's preceding loadEvalCacheFromLocalStorage step (line 3036) ran the same path with a populated in-memory cache: user starts drilling after the initial render → preAnalysis bestmove fires evalCacheStore → debounceEvalCacheSync schedules a 15s timer (Gist mode does not write LS until that timer fires and syncEvalCacheToGist completes) → background sync arrives within ~1s → loadEvalCacheFromGist → loadEvalCacheFromLocalStorage → evalCacheFromJSON → in-memory writes from the last few seconds are wiped, evalCacheDirty preserved so the next debounce-fired sync writes the cleared state to Gist propagating the loss. Fix: merge instead of clear, using the same prefer-deeper-then-more-PVs policy as loadEvalCacheFromGist's existing Gist-side loop. Cold paths are still no-ops (empty Map, no merge work); hot path preserves unflushed entries. H3 — migrateLegacyPosKeys (which normalizes pre-EP-stripping keys in gistData.notes / practiceScoreboard / repertoire.customDeviations / repertoire.dismissed) is only called from loadFromGist. The cache-first fast path's two gistData assignment sites (LS restore at fetchGames ~8617; freshProgress replacement in background sync ~8645) both call migrateInvalidationsToGist but not migrateLegacyPosKeys, so users with un-migrated legacy keys see notes / scoreboard entries / custom deviations silently miss for any position reached after a double pawn push, every cache-first session, until they happen to hit a path that calls loadFromGist (logout + login, airplane-mode flip). Fix: call migrateLegacyPosKeys at both sites, immediately after migrateInvalidationsToGist. Idempotent — normalized keys are fixed points, so this is a no-op once data is clean. M1 — three sites that merge into evalCache (evalCacheStore, evalCacheFromJSON, loadEvalCacheFromGist's Gist-side loop) used a "deeper, OR same depth and wider" policy that let a deeper-but-narrower write clobber a shallower-but-wider entry. Concrete case: preAnalysis stored depth-20 multiPv=3 → user triggered a wrong-move refutation routed through sfAnalyzeAdaptive → depth-25 multiPv=1 stored → existing depth-20 multiPv=3 entry overwritten, PV2/PV3 gone. The next startPreAnalysis SEED at the position then ran as a multiPv=1 partial hit and pvGap couldn't be computed; Great/Miss classification was unavailable until Stockfish's fresh search surpassed depth 25. Same shape via loadEvalCacheFromGist when another device pushed a deeper-but-narrower entry. Fix: extract a single evalCacheShouldOverwrite(existing, depth, mpv) helper with strict-improvement semantics — overwrite only when (depth > existing.depth AND mpv >= existing.mpv) OR (depth === existing.depth AND mpv > existing.mpv); deeper-but-narrower writes are skipped. All three sites route through the helper so the policy lives in one place. M2 — getInvalidatedTactics and getInvalidatedMistakes used pid.includes('_t') / !pid.includes('_t') to classify position IDs. The posId scheme has mistake pids ending in `_<digits>`, tactic in `_t<digits>`, advantage in `_a<digits>`, repertoire prefixed `r_`. The substring matcher handles real Lichess (8-char base62) and Chess.com (numeric) gameIds correctly because they don't contain `_`, but mis-fires on any gameId that contains the substring `_t` anywhere — concretely the test game `_test_clocks_6sS121tG` whose mistake pid `_test_clocks_6sS121tG_45` and advantage pid `_test_clocks_6sS121tG_a35` both contain `_t` from the leading `_test_`. Effect: invalidating a mistake or advantage from the test game silently had no effect — the pid landed in getInvalidatedTactics' Set instead of getInvalidatedMistakes', and the type-gated filter in extractAllMistakes (`m.type === 'tactic' && invalidated.has(posId(m))`) never fires on a mistake item. Fix: replace the substring checks with suffix-anchored regexes — PID_TACTIC_RE = /_t\d+$/, PID_MISTAKE_OR_ADVANTAGE_RE = /_a?\d+$/. Robust against arbitrary gameId content. Healing side-effect: any previously-set invalidated flag on a test-game mistake/advantage that was silently ignored under the old code now takes effect. M3 — evalCacheFromJSON and loadEvalCacheFromGist's Gist-side merge loop validated `depth` is a number and `bestMove` is truthy, but did not check that `pvs` is an array or that its elements have the right shape. A corrupted Gist entry (manual edit, future schema drift, transport corruption) with `pvs: null` / `pvs: {}` / `pvs: [null]` / `pvs: [{}]` / `pvs: [{cp:30}]` (missing `move`) would pass validation, enter evalCache, then break the SEED path in startPreAnalysis at `cachedEval.pvs.map(pv => ({cp: pv.cp, move: pv.move, ...}))` — propagating the throw to loadPosition. Fix at three layers. (1) Tighten upstream validation in evalCacheFromJSON and loadEvalCacheFromGist to require Array.isArray(val.pvs). (2) Same upstream sites also require every element to be a non-null object with typeof pv.cp === 'number' AND truthy pv.move — so the malformed elements that pass the array check still get rejected at load. Verified against 17 edge cases including legitimate cp:0 (equal position), negative cp (losing position), and empty pvs:[] arrays. (3) Belt-and-suspenders Array.isArray guard at every site that consumes cached.pvs.map — startPreAnalysis SEED, startAnalysisSearch SEED (analysis mode), sfAnalyze, tacticWorkerAnalyzePosition — so a poisoned in-memory entry from any future code path still degrades to "no cache hit" rather than throwing. evalCacheStore was already safe (every site builds {cp, move, san, uciLine} objects via .map); the only entry point for malformed entries is external corruption, which the upstream validation now rejects.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Extraction L1+L2+L3+L5+L6: low-priority follow-ups to the H+M batch. L1 — buildGameFingerprint included tacticsLen and hasClocks but not analysis.length, so a game whose analysis is later upgraded from partial to full (rare — server analysis upgrade, analyzer rerun with deeper search) would short-circuit at the cached length and never see the appended moves. extractMistakesForGame iterates only up to analysis.length and the cache key didn't reflect the change. Fix: add analysisLen to the fingerprint shape; bump MISTAKES_CACHE_VERSION 7 → 8 so existing caches are invalidated and rebuilt with the new shape. L2 — eval cache flush only fired on beforeunload, but mobile browsers reliably fire pagehide while often skipping beforeunload, so the 15s debounce window of in-memory writes was lost when the app was backgrounded and OS-killed on mobile. Extract the flush logic to flushPendingSyncs() shared between handlers. Two follow-up edge cases addressed: (a) on desktop both handlers may fire in sequence (beforeunload first, then pagehide), so without a guard the second call would re-fire syncToGist (clearTimeout doesn't null the variable, syncEvalCacheToGist is async so evalCacheDirty may still be >0 when the second call arrives) — added _flushPendingSyncsFired flag; (b) pagehide can also fire when the page goes into bfcache (e.persisted=true) on mobile and pageshow restores it later, in which case flushing during the bfcache hop is wasteful and would burn the dual-fire flag for the rest of the session — gate pagehide flush on !e.persisted, and reset the flag on pageshow(persisted=true). saveContSession is still called unconditionally on pagehide regardless of persisted (cheap, non-destructive). L3 — startPreAnalysis SEED only treated cached entries at full target depth (depthAdj(30)) and multiPv 3 as full hits; everything else fell through to terminate-and-reinit-and-deepen even when the cached depth was 28 or 29 (only 1-2 plies short). The terminate-reinit cost (drainSfPendingResolvers, async initStockfish, setoption Hash, isready) is typically >100ms and a 2-ply deepening from 28 buys very little — at depths >20 Stockfish bestMove generally agrees and multiPv breadth (which the cache already has at 3) is what matters for Great/Miss classification. Add isNearFullHit branch: cachedEval.depth >= targetDepth - 2 AND mpv >= 3 → treat as full hit, skip relaunch. Verified safe across mobile depthAdj range (max offset 6 → target 24 → threshold 22 still above EVAL_CACHE_MIN_DEPTH=20). Deliberately not applied to startAnalysisSearch (analysis mode) — the user wants the live deepening progress visible in the depth tag. L5 — _gistProgressDirtyLocal was set to true by debounceSyncToGist but never reset, so once any local change triggered a sync the flag stayed true for the rest of the session. Currently background sync is one-shot per session (only fired by the cache-first phase 2 in fetchGames), so the leak doesn't manifest as a user-visible bug today, but any future code path that adds another background-sync trigger inherits a permanently-true flag and the !_gistProgressDirtyLocal gate in fetchGames would never fire correctly on subsequent triggers. Fix: reset _gistProgressDirtyLocal = false inside syncToGist's try-after-gistWrite-success path (not in catch — failed sync should leave the flag dirty so retry sees it). Defensive — keeps the invariant correct rather than relying on the flag never being read again. L6 — cold-start path in fetchGames calls await loadFromGist(); extractAllMistakes(); applyFilters(); showMainApp() unconditionally. If loadFromGist throws on the network layer, the catch returns false, gistData stays null (no LS fallback in the non-airplane try-catch), and extractAllMistakes runs with no invalidations / notes / practice items in the queue this session — and any local changes during the session would write to a fresh empty gistData, overwriting cloud state on the next successful sync. Fast path already had a localStorage-backed fallback before its own gistRead call. Cold start did not. Fix: in loadFromGist's catch block, attempt the same localStorage cache restore that airplane mode already does (parse cached gistData, run migrations, also load eval cache from LS so cold-start-with-network-failure still gets the eval cache it would have gotten from a successful loadEvalCacheFromGist). Returns true if the LS restore succeeds. Status indicator is left on "Load failed" — user should be aware they're on stale data. L4 (syncEvalCacheToGist blind overwrite) deliberately deferred — twin of M4, both belong in the planned Cloud Sync scan for consistency.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2499,7 +2499,7 @@ const EVAL_CACHE_LS_KEY = 'mistakelab_eval_cache';
 let evalCache = new Map();       // fenKey → { depth, bestMove, bestCp, pvs, multiPv }
 let evalCacheDirty = 0;          // count of unsaved entries since last sync
 let evalCacheSyncTimer = null;
-const MISTAKES_CACHE_VERSION = 7;
+const MISTAKES_CACHE_VERSION = 8;
 const MISTAKES_CACHE_PARAMS = { wpDropThreshold: 10, advantageThreshold: 300, advantageMinMoves: 2 };
 
 // Populate login fields from saved config + auto-load
@@ -2868,6 +2868,13 @@ async function syncToGist() {
     await gistWrite(gistData);
     // Update local cache for airplane mode
     try { localStorage.setItem(GIST_PROGRESS_CACHE_KEY, JSON.stringify(gistData)); } catch (_) {}
+    // L5: clear the dirty flag — the local state has now been pushed upstream,
+    // so any future background sync trigger that gates on !_gistProgressDirtyLocal
+    // (e.g. fetchGames cache-first phase 2) sees an accurate "no local changes
+    // pending" state. Currently background sync is one-shot per session so
+    // this is defensive for future code that adds another trigger; keeps the
+    // invariant correct rather than relying on the flag never being read again.
+    _gistProgressDirtyLocal = false;
     setSyncStatus('ok', 'Synced');
   } catch (e) {
     console.error('Sync failed:', e);
@@ -2914,6 +2921,30 @@ async function loadFromGist() {
   } catch (e) {
     console.error('Gist load failed:', e);
     setSyncStatus('error', 'Load failed');
+    // L6: network failure — gistData is left null. The cold-start caller
+    // (fetchGames) immediately runs extractAllMistakes() against whatever
+    // gistData currently is, so a null gistData means no invalidations,
+    // notes, or practice items in the queue this session — and any local
+    // changes during the session would write to a fresh empty gistData,
+    // overwriting cloud state on the next successful sync. Mirror what
+    // airplane mode already does: try the localStorage cache as a fallback
+    // before returning failure, so the user still gets their last-known
+    // state and the queue is correctly populated.
+    try {
+      const cached = localStorage.getItem(GIST_PROGRESS_CACHE_KEY);
+      if (cached) {
+        gistData = JSON.parse(cached);
+        migrateInvalidationsToGist();
+        migrateLegacyPosKeys();
+        // Also load eval cache from LS — the success-path call to
+        // loadEvalCacheFromGist (which also seeds from LS) was skipped by
+        // the throw, so without this the eval cache stays empty for the
+        // session and every position runs cold.
+        loadEvalCacheFromLocalStorage();
+        console.log('[Gist] Network failed — restored gistData from localStorage cache');
+        return true;
+      }
+    } catch (_) {}
     return false;
   }
 }
@@ -3460,6 +3491,11 @@ function buildGameFingerprint(game) {
   return {
     tacticsLen: Array.isArray(game.tactics) ? game.tactics.length : 0,
     hasClocks: Array.isArray(game.clocks) && game.clocks.length > 0,
+    // Include analysis length so the cache invalidates when a partial
+    // analysis is later upgraded to full (rare — server analysis upgrade,
+    // analyzer rerun with deeper search). Without this, extractMistakesForGame
+    // would short-circuit at the old length and never see the appended moves.
+    analysisLen: Array.isArray(game.analysis) ? game.analysis.length : 0,
   };
 }
 
@@ -5961,8 +5997,17 @@ function startPreAnalysis(fen) {
   // could sneak a bad entry in, and treating it as a cache miss is strictly
   // better than throwing on the .map below and breaking loadPosition.
   if (cachedEval && Array.isArray(cachedEval.pvs)) {
-    const isFullHit = cachedEval.depth >= targetDepth && (cachedEval.multiPv || 1) >= 3;
-    sfLog('startPreAnalysis', `session=${session} CACHE ${isFullHit ? 'FULL' : 'SEED'} depth=${cachedEval.depth}/${targetDepth} mpv=${cachedEval.multiPv||1}/3 bestMove=${cachedEval.bestMove} fen=${fen.split(' ').slice(0,2).join(' ')}…`);
+    const cachedMpv = cachedEval.multiPv || 1;
+    // L3: a 2-ply deepening from depth-28-to-30 buys very little (Stockfish
+    // bestMove generally agrees at depths >20 and multiPv breadth is what
+    // matters for Great/Miss classification) but pays the full WASM
+    // terminate-and-reinit cost (drainSfPendingResolvers, async initStockfish,
+    // setoption Hash, isready, etc — typically >100ms). If the cached entry
+    // is within 2 plies of target AND already has multiPv 3, treat as a
+    // full hit and skip the relaunch entirely.
+    const isFullHit = cachedEval.depth >= targetDepth && cachedMpv >= 3;
+    const isNearFullHit = !isFullHit && cachedEval.depth >= targetDepth - 2 && cachedMpv >= 3;
+    sfLog('startPreAnalysis', `session=${session} CACHE ${isFullHit ? 'FULL' : (isNearFullHit ? 'NEAR-FULL' : 'SEED')} depth=${cachedEval.depth}/${targetDepth} mpv=${cachedMpv}/3 bestMove=${cachedEval.bestMove} fen=${fen.split(' ').slice(0,2).join(' ')}…`);
     preAnalysisDepth = cachedEval.depth;
     preAnalysis = {
       bestCp: cachedEval.bestCp,
@@ -5975,8 +6020,8 @@ function startPreAnalysis(fen) {
       })),
       depth: cachedEval.depth,
     };
-    if (isFullHit) {
-      // Cache has full-depth MultiPV 3 result — no need to run Stockfish
+    if (isFullHit || isNearFullHit) {
+      // Cache has effectively-target-depth MultiPV 3 result — no need to run Stockfish
       preAnalysisComplete = true;
       resolveWaiters();
       updatePreAnalysisUI();
@@ -15085,9 +15130,58 @@ document.addEventListener('visibilitychange', () => {
     saveContSession();
   }
 });
-document.addEventListener('pagehide', () => {
+document.addEventListener('pagehide', (e) => {
   if (continuationMode && contLine) saveContSession();
+  // Only flush on real teardown (e.persisted=false) — when the page is being
+  // put into bfcache (e.persisted=true), pageshow will fire later when the
+  // user returns and the session continues. Flushing in the bfcache case is
+  // wasteful (everything will continue normally) and would also burn the
+  // dual-fire flag for the rest of the session.
+  if (!e.persisted) {
+    flushPendingSyncs();
+  }
 });
+
+// If the page is restored from bfcache, reset the dual-fire flag so a
+// subsequent real teardown (later in the same session) still flushes.
+window.addEventListener('pageshow', (e) => {
+  if (e.persisted) {
+    _flushPendingSyncsFired = false;
+  }
+});
+
+// Shared between pagehide (mobile-reliable) and beforeunload (desktop-reliable)
+// — mobile browsers reliably fire pagehide but often skip beforeunload, so an
+// eval-cache-only-on-beforeunload flush meant the 15s debounce window of
+// in-memory writes was lost when the app was backgrounded and OS-killed on
+// mobile. Both handlers route through this helper so the flush logic stays
+// in one place. saveContSession is left in the pagehide handler above (only
+// pagehide cares about session persistence; beforeunload doesn't need it).
+//
+// On desktop both pagehide and beforeunload may fire in sequence — without
+// the _flushed flag below, the second call would re-fire syncToGist (because
+// clearTimeout doesn't null the variable, and syncEvalCacheToGist is async
+// so evalCacheDirty may still be >0 when the second call arrives). The flag
+// short-circuits any subsequent call within the same teardown sequence.
+let _flushPendingSyncsFired = false;
+function flushPendingSyncs() {
+  if (_flushPendingSyncsFired) return;
+  _flushPendingSyncsFired = true;
+  if (syncDebounceTimer && gistData && isGistConfigured()) {
+    clearTimeout(syncDebounceTimer);
+    syncDebounceTimer = null;
+    // Best-effort sync (may be cancelled by browser)
+    syncToGist();
+  }
+  if (evalCacheDirty > 0) {
+    clearTimeout(evalCacheSyncTimer);
+    evalCacheSyncTimer = null;
+    saveEvalCacheToLocalStorage();
+    if (isGistConfigured() && !airplaneMode) {
+      syncEvalCacheToGist(); // best-effort
+    }
+  }
+}
 
 // ─── Continuation Line ───
 function addContLineMove(san, uci, fen, isUser, evalData) {
@@ -22612,21 +22706,10 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// Flush pending sync before page unload
+// Flush pending sync + eval cache before page unload (desktop). Mobile uses
+// the pagehide handler above which calls the same flushPendingSyncs helper.
 window.addEventListener('beforeunload', () => {
-  if (syncDebounceTimer && gistData && isGistConfigured()) {
-    clearTimeout(syncDebounceTimer);
-    // Best-effort sync (may be cancelled by browser)
-    syncToGist();
-  }
-  // Flush dirty eval cache
-  if (evalCacheDirty > 0) {
-    clearTimeout(evalCacheSyncTimer);
-    saveEvalCacheToLocalStorage();
-    if (isGistConfigured() && !airplaneMode) {
-      syncEvalCacheToGist(); // best-effort
-    }
-  }
+  flushPendingSyncs();
 });
 </script>
 </body>
