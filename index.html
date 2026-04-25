@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync H3 + L2 + L3: cold-start no-fallback Gist failure now surfaces clearly to the user instead of being silently overwritten with 'Synced'. Three coupled fixes in one commit because H3's status flag is meaningless without L2 (showMainApp's inline 'ok'/'Synced' set was unconditionally overriding any earlier 'error' state) and L2's natural fix is L3 (consolidate the duplicate status logic into updateSyncStatusForAirplane). H3 (cold-start guard): when fetchGames' Gist-configured cold-start path calls await loadFromGist() and that returns false (network failure during initial load AND no GIST_PROGRESS_CACHE_KEY in localStorage to fall back to via L6 — true cold start on a new device with transient connectivity), gistData stays null. Pre-H2 this caused total remote-progress-loss on the next syncToGist (blind PATCH'd an empty fresh gistData over Gist's existing state) but H2's read-merge-write closed that vector — syncToGist now refuses to write on read failure. The remaining issue was UX: extractAllMistakes ran against null gistData (no invalidations / notes / practice items in queue this session), the user saw an empty queue, and showMainApp set the status to 'Synced' anyway, suggesting everything was fine. Now fetchGames captures loadFromGist's return value and on false sets a clear 'Progress unavailable — refresh when online' status; the user knows to refresh once connectivity is restored. L2 (status preservation): updateSyncStatusForAirplane now reads dot.classList.contains('error') and short-circuits when an error state is already set, so the 'Progress unavailable' label H3 sets survives the showMainApp call that happens immediately after. Reading the actual DOM rather than tracking a parallel JS variable prevents drift between intended and shown state. L3 (consolidation): the inline status logic in showMainApp (`if (airplaneMode) ... else if (isGistConfigured()) setSyncStatus('ok', 'Synced')`) was a near-verbatim duplicate of updateSyncStatusForAirplane — replaced with a call to the now-error-preserving function so future status-state additions (e.g., a 'reconnecting' state) don't have to be added in two places. Side benefit: removes the brief pre-phase-2 'Synced' flash that happened in the cache-first fast path between phase 1's setSyncStatus('syncing', ...) and phase 2's start. Found during the Cloud Sync / Gist scan; H1 + L5 + M6 + M2 + M1 + M4+M5 + H2+M3+phase-2-merge already landed; L1 (dead constant) + L4 (description clobber) + L6 (silent quota errors) + L7 (keepalive) + L8 (schema-init duplication) remain as low-priority cleanup items.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync L1: implement EVAL_CACHE_SYNC_THRESHOLD as a debounce-shortener so the constant actually does what its declaring comment ("sync after this many new entries") claims. The constant was previously declared but never read by any code path — dead until now. With only the 15s debounce, heavy SF use (rapid auto-review of many positions, or background tactic scanning that pushes dozens of entries through evalCacheStore in a short window) could accumulate dozens of dirty entries before any sync fired, and a tab kill before the debounce resolved would lose all of them — M3-equivalent on the eval-cache side, except eval entries are recomputable from FEN so the loss is wasted compute rather than user data. The fix changes debounceEvalCacheSync's Gist-mode branch to compute a delay based on the dirty count: when evalCacheDirty >= EVAL_CACHE_SYNC_THRESHOLD (10), the delay drops to 0 so the sync fires on the next event-loop tick. clearTimeout + setTimeout(0) still allows further evalCacheStore calls within the same tick to coalesce (their debounceEvalCacheSync also resolves to delay=0, re-scheduling the same near-immediate fire), so the threshold doesn't degenerate into a per-call sync — it's a "fire as soon as possible after the burst settles." After the sync completes and resets dirty=0, subsequent stores go back to the 15s debounce. Airplane / no-Gist branches unchanged: the LS-only 5s debounce already provides bounded loss, and the threshold semantics ("force a network sync") don't apply there. Project instructions previously documented the constant alongside EVAL_CACHE_MIN_DEPTH and EVAL_CACHE_SYNC_DEBOUNCE as if all three were active — they're now correct. Found during the Cloud Sync / Gist scan; H1 + L5 + M6 + M2 + M1 + M4+M5 + H2+M3+phase-2-merge + H3+L2+L3 already landed; L4 (description clobber) + L6 (silent quota errors) + L7 (keepalive on flush fetches) + L8 (schema-init duplication) remain.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3269,7 +3269,21 @@ function debounceEvalCacheSync() {
     return;
   }
   clearTimeout(evalCacheSyncTimer);
-  evalCacheSyncTimer = setTimeout(() => syncEvalCacheToGist(), EVAL_CACHE_SYNC_DEBOUNCE);
+  // L1: implement EVAL_CACHE_SYNC_THRESHOLD as a debounce-shortener. The
+  // constant was previously declared with comment "sync after this many new
+  // entries" but no code path read it — dead until now. With only the 15s
+  // debounce, heavy SF use (e.g., rapid auto-review) could accumulate dozens
+  // of dirty entries before any sync fired, and a tab kill before the
+  // debounce resolved would lose all of them (M3-equivalent on the eval-cache
+  // side, except eval entries are recomputable so the loss is wasted compute
+  // rather than user data). When dirty >= threshold, drop the delay to 0 so
+  // the sync fires on the next event-loop tick — clearTimeout+setTimeout(0)
+  // still allows further evalCacheStore calls within the same tick to
+  // coalesce (their debounceEvalCacheSync also resolves to delay=0,
+  // re-scheduling the same near-immediate fire). After the sync resets
+  // dirty, subsequent stores go back to the 15s debounce.
+  const delay = evalCacheDirty >= EVAL_CACHE_SYNC_THRESHOLD ? 0 : EVAL_CACHE_SYNC_DEBOUNCE;
+  evalCacheSyncTimer = setTimeout(() => syncEvalCacheToGist(), delay);
 }
 
 function evalCacheToJSON() {
