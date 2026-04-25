@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync H1: route saveNote/deleteNote through debounceSyncToGist instead of an inline setTimeout(syncToGist, 3000) scheduler. The bypass had three consequences. First, _gistProgressDirtyLocal was never set, so cache-first phase 2's `if (freshProgress && !_gistProgressDirtyLocal)` replacement guard at line 8834 saw "no local changes" and could clobber gistData with stale freshProgress within the 3s timer window — the subsequent timer firing then PATCHed the clobbered version to Gist, permanently losing the note both locally and remotely. Repro: open app (cache-first fast path renders from LS), within ~500ms-3s add or delete a note, observe phase 2's gistRead resolve and replace gistData. Second, in airplane mode the inline scheduler skipped the LS-write branch that debounceSyncToGist runs unconditionally for airplane (line 2854) — the 3s timer fired, syncToGist returned early on airplaneMode, and the note was never persisted to localStorage. Tab close in airplane mode → note vaporized. Third, the dirty-flag invariant was broken globally: any future read path that gates on !_gistProgressDirtyLocal would have to know this exception. The fix collapses to a single debounceSyncToGist() call at each site (saveNote line 22617, deleteNote line 22645). Same 3s timing in non-airplane Gist-configured mode, gains all three protections. The if (isGistConfigured()) wrapper is also removed because debounceSyncToGist handles non-configured mode internally (sets dirty=true unconditionally, returns at the no-token guard) — which is the correct behavior for note-save in standalone-mode-then-Gist-configured flows: the dirty flag now reflects the no-Gist-but-mutated state for any future no-Gist→Gist merge logic to consume. Found during the Cloud Sync / Gist scan (full report still in chat, queued items M1-M6 H2 H3 plus L1-L8 follow). H1 lands first because it's surgical, eliminates an active data-loss vector for an existing feature, and doesn't depend on M4 read-merge-write infrastructure that the other items require.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync L5: gate airplane-off auto-push on _gistProgressDirtyLocal. The airplaneToggle.onchange handler in openSettings was unconditionally scheduling a debounceSyncToGist call on every airplane→online transition, regardless of whether any offline mutations had actually occurred. In the no-offline-activity sub-case (airplane toggled by mistake, brief connectivity check, idle session) this gratuitously PATCHed the local stale gistData over whatever another device may have written during the offline window — pure data destruction with no compensating user benefit. Worst-case walk-through: Device A loaded Gist on Monday, toggled airplane on Tuesday (no offline drilling), Device B drilled Tuesday and synced. Device A toggled airplane off Wednesday morning before opening any positions → 3s timer fired → Device A's Monday-base gistData PATCHed over Device B's Tuesday writes. Device B's progress lost on Gist; Device A's localStorage cache also overwrites it on next launch. Adding && _gistProgressDirtyLocal to the gate condition closes this sub-case entirely — no offline mutation, no schedule, no clobber. The with-mutation case still triggers a blind PATCH (H2/M4 deferred); read-merge-write in syncToGist is the only stable fix for that. After H1 the dirty flag is correctly maintained for all mutation paths, so this gate is reliable. Side benefit: the postProgressOnReturn flag now means what its name suggests ("post progress on return" — only when there is progress to post), rather than "PATCH on every transition." Found during the Cloud Sync / Gist scan; H1 already landed, M6 next.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3609,8 +3609,15 @@ function openSettings() {
     airplaneMode = this.checked;
     localStorage.setItem('airplaneMode', airplaneMode);
     updateSyncStatusForAirplane();
-    // When turning off airplane mode, push any accumulated changes
-    if (!airplaneMode && postProgressOnReturn && gistData && isGistConfigured()) {
+    // When turning off airplane mode, push any accumulated changes — but only
+    // if there are actually accumulated changes. Without the dirty-flag gate,
+    // every airplane-off transition (including bounces with no offline
+    // activity) would PATCH the local stale gistData over whatever another
+    // device may have written during the offline window, gratuitously
+    // discarding cross-device state. The gate reduces the H2 attack surface
+    // to the with-mutation case only; that case still needs syncToGist
+    // read-merge-write to be fully fixed (queued).
+    if (!airplaneMode && postProgressOnReturn && gistData && isGistConfigured() && _gistProgressDirtyLocal) {
       debounceSyncToGist();
     }
     // L12 follow-up: when transitioning airplane → online, the eval cache has
