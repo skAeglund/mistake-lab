@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync L1: implement EVAL_CACHE_SYNC_THRESHOLD as a debounce-shortener so the constant actually does what its declaring comment ("sync after this many new entries") claims. The constant was previously declared but never read by any code path — dead until now. With only the 15s debounce, heavy SF use (rapid auto-review of many positions, or background tactic scanning that pushes dozens of entries through evalCacheStore in a short window) could accumulate dozens of dirty entries before any sync fired, and a tab kill before the debounce resolved would lose all of them — M3-equivalent on the eval-cache side, except eval entries are recomputable from FEN so the loss is wasted compute rather than user data. The fix changes debounceEvalCacheSync's Gist-mode branch to compute a delay based on the dirty count: when evalCacheDirty >= EVAL_CACHE_SYNC_THRESHOLD (10), the delay drops to 0 so the sync fires on the next event-loop tick. clearTimeout + setTimeout(0) still allows further evalCacheStore calls within the same tick to coalesce (their debounceEvalCacheSync also resolves to delay=0, re-scheduling the same near-immediate fire), so the threshold doesn't degenerate into a per-call sync — it's a "fire as soon as possible after the burst settles." After the sync completes and resets dirty=0, subsequent stores go back to the 15s debounce. Airplane / no-Gist branches unchanged: the LS-only 5s debounce already provides bounded loss, and the threshold semantics ("force a network sync") don't apply there. Project instructions previously documented the constant alongside EVAL_CACHE_MIN_DEPTH and EVAL_CACHE_SYNC_DEBOUNCE as if all three were active — they're now correct. Found during the Cloud Sync / Gist scan; H1 + L5 + M6 + M2 + M1 + M4+M5 + H2+M3+phase-2-merge + H3+L2+L3 already landed; L4 (description clobber) + L6 (silent quota errors) + L7 (keepalive on flush fetches) + L8 (schema-init duplication) remain.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync L4: drop the description PATCH from gistWrite so the analyzer's description survives. The previous gistWrite always sent `description: 'MistakeLab progress sync (browser) — N positions'` alongside every progress file PATCH; syncEvalCacheToGist sent no description at all, and gistCreate set `description: 'MistakeLab chess trainer progress'` once at creation. The analyzer (separate Node.js process) writes its own description on each run — typically with timestamp + game count, more useful than either of the browser-side strings. Whichever writer wrote last won, and since browser progress syncs run on every drilling-session mutation while the analyzer runs occasionally, the browser description clobbered the analyzer's. Cosmetic only — affects how the Gist appears in the user's Gists list — but the inconsistency between gistWrite (touches description) and syncEvalCacheToGist (doesn't touch it) was a hint that the design wasn't deliberate. Fix is to remove the description field from gistWrite's PATCH body. GitHub Gist PATCH semantics preserve fields not included in the request, so omitting description leaves whatever the analyzer or initial gistCreate set in place. Found during the Cloud Sync / Gist scan; full queue progress: H1 + L5 + M6 + M2 + M1 + M4+M5 + H2+M3+phase-2-merge + H3+L2+L3 + L1 already landed; L6 (silent quota errors) + L7 (keepalive on flush fetches) + L8 (schema-init duplication) remain.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2810,6 +2810,16 @@ async function gistRead() {
 
 async function gistWrite(data) {
   if (!gistToken || !gistId) return;
+  // L4: do not include `description` in the PATCH. The analyzer (separate
+  // Node.js process) writes its own description with timestamp + game count
+  // each time it runs, and syncEvalCacheToGist doesn't touch description at
+  // all — having gistWrite update the description on every progress sync
+  // meant whoever wrote last (typically the more frequent browser progress
+  // syncs) clobbered the analyzer's more useful description. Now the
+  // description stays at whatever the most recent analyzer run or the
+  // initial gistCreate set it to. PATCH semantics preserve fields not
+  // included in the request body, so omitting `description` leaves the
+  // existing value untouched.
   const resp = await fetch(`https://api.github.com/gists/${gistId}`, {
     method: 'PATCH',
     headers: {
@@ -2817,7 +2827,6 @@ async function gistWrite(data) {
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      description: `MistakeLab progress sync (browser) — ${Object.keys(data.positions || {}).length} positions`,
       files: { [GIST_FILENAME]: { content: JSON.stringify(data, null, 2) } }
     })
   });
