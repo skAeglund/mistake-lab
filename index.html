@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync M1: read-merge-write for syncEvalCacheToGist. The previous blind PATCH wrote evalCacheToJSON() (this device's in-memory view) directly to the Gist eval file — every sync stripped any entries another device had written since this device's last loadEvalCacheFromGist. Round-trip eventually converged because each device kept its locally-computed entries in evalCache + LS and re-added them on its own next sync, but during heavy multi-device use the Gist file content "flapped" and shared Stockfish compute was repeatedly wasted (positions both devices analyzed independently never propagated within a session). Fix fetches gistReadEvals at sync start, merges any unseen-by-us entries through evalCacheShouldOverwrite (the same prefer-deeper-and-at-least-as-wide policy used by every other merge site), then PATCHes the merged result. Read failure tolerance: if gistReadEvals throws, log warning and continue with blind PATCH — for eval cache (idempotent, recomputable from FEN) preserving this device's writes is more valuable than preventing potential remote overwrite, and the round-trip from the other device's next sync will re-merge. The trade-off goes the opposite way for progress data (non-recomputable), so the M4 fix will refuse to write on read failure instead. Validation mirrors loadEvalCacheFromGist's Array.isArray + pv element-shape check exactly so malformed Gist entries can't poison the cache. Counter included in the success log for visibility into how often cross-device merge actually fires. The 5s gistFetchAll TTL is acceptable here because syncEvalCacheToGist runs at 15s debounce, so the cache is always cold by sync time. After PATCH, gistInvalidateCache nukes the cache so any subsequent gistReadEvals refetches fresh. Smaller pattern study for the queued M4 read-merge-write on syncToGist (progress); landed before M4 because eval cache schema is purely additive (no delete/clear semantics) which lets the merge be a single union pass with no per-key tombstone reasoning. H1 + L5 + M6 + M2 already landed; M4 next.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync M4+M5: preserve local mutations across no-Gist → Gist transition. Two paired bugs in saveSettingsGist's no-Gist → Gist transition that silently lost any standalone-mode session mutations the user had accumulated before configuring Gist. M5 (gistCreate empty seed): the new-gist creation path hardcoded `JSON.stringify({positions:{},version:1})` as initial content, so when the user clicked Save & Sync without an existing gistId, gistCreate POSTed an empty Gist and the subsequent loadFromGist re-fetched that empty content as the new gistData, replacing any in-memory mutations. M4 (existing-gist clobber): the existing-gist path skipped gistCreate but still called loadFromGist, which unconditionally replaces gistData with the remote Gist's content — same loss vector. Repro for either: standalone session, drill some positions to SRS Easy grade and save a practice mistake, open Settings → enter Gist credentials → Save & Sync, observe SRS state and saved mistake disappear from the queue. The fix introduces mergeGistData(local, remote) (the merge logic that the queued H2/M4-progress fix needs anyway) and uses it in saveSettingsGist: capture localGistDataSnapshot at function start if _gistProgressDirtyLocal is true, pass it as seed to gistCreate for the new-gist path (M5), and merge it into gistData after loadFromGist for the existing-gist path (M4). Merge strategy is per-field: positions[pid] use newer lastSeen for completed/lastSeen/srs and OR/union for invalidated/invalidatedLines; notes[posKey] use newer 'updated'; repertoire arrays use union dedupe by id/positionKey/string; practiceScoreboard concats with ts-dedupe; practiceMistakes/practiceTactics dedupe by their existing dedup keys (fenBefore+sanPlayed and fenBefore+_chainSig respectively, matching the savePracticeMistake/savePracticeTactic dedup logic at lines 16083 and 16164). Known limitation noted in mergeGistData comment: union semantics for dismissed/customDeviations/studies don't disambiguate "remote previously had X, local explicitly removed it" — for the no-Gist → Gist case this is irrelevant (local has never seen remote's data), for the periodic syncToGist read-merge-write case (H2/M4-progress) per-array _clearedAt timestamps will be needed and are deferred to that fix. After merge, debounceSyncToGist marks dirty and schedules upstream propagation; without that the merged state would live only in memory until some other mutation happened to trigger sync. Login-time saveGistConfig's gistCreate() call (line 3768) is unchanged because the user can't have local mutations at the login screen — no games loaded yet. Batched as one commit because M5 is a pure API extension that M4 immediately consumes; splitting would leave M5 as a "preparing for M4" commit with no observable effect, and the two are inseparable parts of one logical fix to one flow. Found during the Cloud Sync / Gist scan; H1 + L5 + M6 + M2 + M1 already landed; H2/M3 paired (the big syncToGist read-merge-write) and H3 (cold-start no-fallback guard) next.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2825,8 +2825,16 @@ async function gistWrite(data) {
   gistInvalidateCache();
 }
 
-async function gistCreate() {
+async function gistCreate(seedContent) {
   if (!gistToken) throw new Error('No token');
+  // M5: optional seedContent lets callers (saveSettingsGist when local
+  // standalone-mode mutations are pending) seed the new Gist with their
+  // local data instead of the hardcoded empty default. Without this,
+  // every new-gist creation starts empty, and the subsequent loadFromGist
+  // replaced gistData with that empty content — local session mutations
+  // were lost. With seed, loadFromGist re-fetches our just-created Gist
+  // and gets back our local data unchanged.
+  const initial = seedContent || JSON.stringify({ positions: {}, version: 1 }, null, 2);
   const resp = await fetch('https://api.github.com/gists', {
     method: 'POST',
     headers: {
@@ -2836,12 +2844,145 @@ async function gistCreate() {
     body: JSON.stringify({
       description: 'MistakeLab chess trainer progress',
       public: false,
-      files: { [GIST_FILENAME]: { content: JSON.stringify({ positions: {}, version: 1 }, null, 2) } }
+      files: { [GIST_FILENAME]: { content: initial } }
     })
   });
   if (!resp.ok) throw new Error(`Gist create failed: ${resp.status}`);
   const gist = await resp.json();
   return gist.id;
+}
+
+// M4: merge local gistData into remote gistData. Used for read-merge-write
+// flows — saveSettingsGist's no-Gist → Gist transition (existing-gist sub-
+// case), and reusable for the queued H2/M4-progress read-merge-write in
+// syncToGist itself.
+//
+// Strategy per top-level field:
+// - positions[pid]: per-pid merge. Newer lastSeen wins for completed/lastSeen/
+//   srs (treat the whole position state as one timestamped record). invalidated
+//   merges as OR. invalidatedLines merges as union (a line invalidated on
+//   either side stays invalidated).
+// - notes[posKey]: per-key, newer 'updated' wins.
+// - repertoire.studies: union by id; local wins on conflict (the user just
+//   configured them on this device, those are intentional in the no-Gist →
+//   Gist flow).
+// - repertoire.customDeviations: union by positionKey; remote wins on conflict
+//   (analyzer-style "remote is canonical").
+// - repertoire.dismissed: set union of position keys.
+// - practiceScoreboard[posKey]: per-posKey concat with ts-dedupe, sorted.
+// - practiceMistakes: union dedupe by fenBefore + sanPlayed (matches the
+//   savePracticeMistake dedup key at line 16083).
+// - practiceTactics: union dedupe by fenBefore + _chainSig (matches the
+//   savePracticeTactic dedup key at line 16164).
+//
+// KNOWN LIMITATION: union semantics for dismissed / customDeviations /
+// studies arrays don't disambiguate "remote previously had X, local
+// explicitly removed it" — the union re-adds X. For the no-Gist → Gist
+// transition (M4) this isn't an issue because local has never seen remote's
+// data, so explicit-removal-in-local-of-an-existing-remote-item can't happen.
+// For periodic syncToGist read-merge-write (H2/M4-progress) this needs per-
+// array _clearedAt timestamps to disambiguate "never had" vs "explicitly
+// removed". Deferred to that fix.
+function mergeGistData(local, remote) {
+  if (!local) return remote;
+  if (!remote) return JSON.parse(JSON.stringify(local));
+  const merged = JSON.parse(JSON.stringify(remote));
+
+  // ── positions ──
+  if (local.positions) {
+    if (!merged.positions) merged.positions = {};
+    for (const [pid, localPos] of Object.entries(local.positions)) {
+      const remotePos = merged.positions[pid];
+      if (!remotePos) { merged.positions[pid] = localPos; continue; }
+      const localTime = new Date(localPos.lastSeen || 0).getTime();
+      const remoteTime = new Date(remotePos.lastSeen || 0).getTime();
+      const newer = localTime > remoteTime ? localPos : remotePos;
+      merged.positions[pid] = {
+        ...remotePos,
+        ...newer,
+        invalidated: !!(remotePos.invalidated || localPos.invalidated),
+        invalidatedLines: Array.from(new Set([
+          ...(remotePos.invalidatedLines || []),
+          ...(localPos.invalidatedLines || []),
+        ])),
+      };
+    }
+  }
+
+  // ── notes ──
+  if (local.notes) {
+    if (!merged.notes) merged.notes = {};
+    for (const [key, localNote] of Object.entries(local.notes)) {
+      const remoteNote = merged.notes[key];
+      if (!remoteNote) { merged.notes[key] = localNote; continue; }
+      const localUpd = new Date(localNote.updated || 0).getTime();
+      const remoteUpd = new Date(remoteNote.updated || 0).getTime();
+      merged.notes[key] = localUpd > remoteUpd ? localNote : remoteNote;
+    }
+  }
+
+  // ── repertoire ──
+  if (local.repertoire) {
+    if (!merged.repertoire) merged.repertoire = {};
+    if (local.repertoire.studies) {
+      const byId = new Map();
+      for (const s of merged.repertoire.studies || []) byId.set(s.id, s);
+      for (const s of local.repertoire.studies) byId.set(s.id, s); // local wins
+      merged.repertoire.studies = [...byId.values()];
+    }
+    if (local.repertoire.customDeviations) {
+      const byKey = new Map();
+      for (const d of merged.repertoire.customDeviations || []) byKey.set(d.positionKey, d);
+      for (const d of local.repertoire.customDeviations) {
+        if (!byKey.has(d.positionKey)) byKey.set(d.positionKey, d); // remote wins
+      }
+      merged.repertoire.customDeviations = [...byKey.values()];
+    }
+    if (local.repertoire.dismissed) {
+      const set = new Set([
+        ...(merged.repertoire.dismissed || []),
+        ...local.repertoire.dismissed,
+      ]);
+      merged.repertoire.dismissed = [...set];
+    }
+  }
+
+  // ── practiceScoreboard ──
+  if (local.practiceScoreboard) {
+    if (!merged.practiceScoreboard) merged.practiceScoreboard = {};
+    for (const [posKey, localEntries] of Object.entries(local.practiceScoreboard)) {
+      const remoteEntries = merged.practiceScoreboard[posKey];
+      if (!remoteEntries) { merged.practiceScoreboard[posKey] = localEntries; continue; }
+      const seen = new Set(remoteEntries.map(e => e.ts));
+      const additions = (localEntries || []).filter(e => !seen.has(e.ts));
+      merged.practiceScoreboard[posKey] = [...remoteEntries, ...additions]
+        .sort((a, b) => (a.ts || 0) - (b.ts || 0));
+    }
+  }
+
+  // ── practiceMistakes ──
+  if (local.practiceMistakes) {
+    if (!merged.practiceMistakes) merged.practiceMistakes = [];
+    const k = pm => `${pm.fenBefore}|${pm.sanPlayed}`;
+    const seen = new Set(merged.practiceMistakes.map(k));
+    for (const pm of local.practiceMistakes) {
+      const key = k(pm);
+      if (!seen.has(key)) { merged.practiceMistakes.push(pm); seen.add(key); }
+    }
+  }
+
+  // ── practiceTactics ──
+  if (local.practiceTactics) {
+    if (!merged.practiceTactics) merged.practiceTactics = [];
+    const k = pt => `${pt.fenBefore}|${pt._chainSig}`;
+    const seen = new Set(merged.practiceTactics.map(k));
+    for (const pt of local.practiceTactics) {
+      const key = k(pt);
+      if (!seen.has(key)) { merged.practiceTactics.push(pt); seen.add(key); }
+    }
+  }
+
+  return merged;
 }
 
 // ─── Sync logic ───
@@ -3749,6 +3890,18 @@ async function saveSettingsGist() {
   const id = document.getElementById('settingsGistId').value.trim();
   const msg = document.getElementById('settingsMsg');
   if (!token) { msg.style.color = 'var(--red)'; msg.textContent = 'Token is required'; return; }
+
+  // M4: capture local gistData snapshot if any standalone-mode mutations are
+  // pending, so they survive the loadFromGist replacement. Without this,
+  // recordReview / savePracticeMistake / addCustomDeviation / saveNote /
+  // dismissRepertoirePosition / etc. mutations from the current standalone-
+  // mode session were silently lost when the user configured Gist:
+  // gistData was unconditionally replaced with the Gist's content (or
+  // gistCreate's empty seed).
+  const localGistDataSnapshot = (_gistProgressDirtyLocal && gistData)
+    ? JSON.parse(JSON.stringify(gistData))
+    : null;
+
   gistToken = token;
   localStorage.setItem('mistakelab_gist_token', token);
   if (id) {
@@ -3757,7 +3910,13 @@ async function saveSettingsGist() {
   } else {
     msg.style.color = 'var(--text-muted)'; msg.textContent = 'Creating gist…';
     try {
-      const newId = await gistCreate();
+      // M5: seed new Gist with local mutations. After gistCreate returns,
+      // loadFromGist below re-fetches our just-created Gist and gets back our
+      // local data unchanged — no merge needed because we own this gist.
+      const seedContent = localGistDataSnapshot
+        ? JSON.stringify(localGistDataSnapshot, null, 2)
+        : null;
+      const newId = await gistCreate(seedContent);
       gistId = newId;
       localStorage.setItem('mistakelab_gist_id', newId);
       document.getElementById('settingsGistId').value = newId;
@@ -3767,6 +3926,24 @@ async function saveSettingsGist() {
   }
   closeSettings();
   await loadFromGist();
+
+  // M4: for the existing-gist path (id was provided), loadFromGist replaced
+  // gistData with the existing remote content. Merge our captured local
+  // mutations back in via mergeGistData, then mark dirty so the next sync
+  // propagates the merged state to Gist. For the new-gist path (gistCreate
+  // with seed), loadFromGist's gistData is already our local state, so the
+  // merge runs but is effectively idempotent (mergeGistData is identity for
+  // a snapshot of itself when timestamps match) — running unconditionally
+  // keeps the code simple. The debounceSyncToGist call here is what flushes
+  // the merged state upstream; without it, in the existing-gist path the
+  // local mutations would live only in memory until some other mutation
+  // happened to trigger a sync.
+  if (localGistDataSnapshot) {
+    gistData = mergeGistData(localGistDataSnapshot, gistData);
+    debounceSyncToGist();
+    console.log('[Settings] Merged local mutations into Gist data');
+  }
+
   // L12-A: when transitioning no-Gist → Gist mid-session, the eval cache may
   // have a pending LS-only debounce timer with dirty entries from no-Gist
   // mode. Without this, the timer would fire and mark evalCacheDirty=0
