@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">SRS scan SRS-7: exclude in-flight synthetic items from buildReviewQueue. The active practiceContItem and resumed-game synthetic both live in filteredMistakes (so the board can navigate to them via currentMistakeIdx) and have type='practice' which bypasses the type-chip filter applied in applyFilters. Without a queue-level exclusion, those synthetics would surface in the review list as "New" SRS items alongside real mistakes — clicking one hits loadPosition's wasPractice branch, which silently splices the synthetic and shows an empty board: not a crash, but confusing UX. The fix adds an isInFlightSynthetic predicate that matches type==='practice' OR gameId==='_practice' OR gameId==='_resumed', filtered out before isDue. Saved practice mistakes (savePracticeMistake → type='mistake', gameId='_practice_<ts>') and saved practice tactics (savePracticeTactic → type='tactic', gameId='_practice_tactic_<ts>_<rand>') are correctly RETAINED — they should appear in the queue. The exact-string gameId match (=== '_practice') distinguishes in-flight from persisted because saved items always have a timestamp suffix. Test injections (_test_clocks_6sS121tG mistakes/advantages, _test_bxf7 tactic) keep their queue presence — they're normal SRS items by current design, separate concern from this fix. Found during the SRS scan; SRS-1 through SRS-6 landed previously (SRS-5 deferred as doc-only).</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">SRS scan SRS-8: NaN/corruption guards in fsrs_review and getCardForPosition. Two failure modes: (1) c.lastReview is a malformed string (cross-version corruption, manual gist edit, schema migration miss) — `new Date(bad)` returns Invalid Date, the subtraction is NaN, Math.max(0, NaN) is NaN per spec, and the NaN propagates through fsrs_retrievability / fsrs_difficulty / fsrs_stability into gistData.positions[pid].srs, which then syncs the corruption to Gist. isDue on a NaN-due card silently returns false (NaN <= today is false), so the card vanishes from the queue forever. (2) An existing non-new card has corrupt stability/difficulty (NaN/Infinity from prior corruption, out-of-range from manual edit) — same FSRS formula propagation, same silent disappearance. Fix (1): in fsrs_review, validate the parsed timestamp with Number.isFinite before using it; treat unparseable as elapsed=0 (same as fsrs_review's no-prior-review branch). Fix (2): in getCardForPosition, defensive validator on the persisted srs object — if state ≠ new and stability ≤ 0 OR not finite OR difficulty out of [1,10], log a console.warn and return fsrs_newCard() (accepting one-time data loss to avoid corrupt-forever). New cards skip the validator because stability/difficulty=0 are valid initial states for them (fsrs_review's new-card branch initializes from grade). Found during the SRS scan; SRS-1 through SRS-7 landed previously (SRS-5 deferred). All Mediums except SRS-5 done; Lows next.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2425,7 +2425,22 @@ function localDateString(d) {
 function fsrs_review(card, grade, now) {
   now = now || new Date();
   const c = { ...card };
-  const elapsed = c.lastReview ? Math.max(0, (now - new Date(c.lastReview)) / 86400000) : 0;
+  // SRS-8: validate c.lastReview before computing elapsed. A malformed value
+  // (cross-version corruption, manual gist edit, schema migration miss) makes
+  // `new Date(bad)` return Invalid Date, the subtraction NaN, and Math.max(0,
+  // NaN) is NaN per spec — which then propagates through fsrs_retrievability /
+  // fsrs_difficulty / fsrs_stability and gets persisted as NaN in
+  // gistData.positions[pid].srs, eventually syncing the corruption to Gist.
+  // isDue on a NaN-due card silently returns false, so the card vanishes from
+  // the queue forever. Treat unparseable lastReview as "no prior review" —
+  // elapsed=0 falls into the same branch as a brand-new lastReview, no harm.
+  let elapsed = 0;
+  if (c.lastReview) {
+    const lrTime = new Date(c.lastReview).getTime();
+    if (Number.isFinite(lrTime)) {
+      elapsed = Math.max(0, (now.getTime() - lrTime) / 86400000);
+    }
+  }
   c.elapsedDays = elapsed;
 
   if (c.state === FSRS_STATE.new) {
@@ -2474,8 +2489,23 @@ function fsrs_review(card, grade, now) {
 
 function getCardForPosition(pid) {
   const data = gistData?.positions?.[pid];
-  if (data?.srs) return data.srs;
-  return fsrs_newCard();
+  if (!data?.srs) return fsrs_newCard();
+  // SRS-8: defensive validator. If a non-new card has corrupt math fields
+  // (NaN/Infinity from a propagation bug, schema migration, or manual edit;
+  // out-of-range difficulty from a bad upstream weight set), the FSRS update
+  // formulas can produce more NaN, and isDue silently buries the card. Reset
+  // to a fresh new card in that case — accept the data loss vs corrupt-forever.
+  // Skip validation for actual new cards (stability/difficulty=0 are valid for
+  // those — fsrs_review's new-card branch initializes them from grade).
+  const srs = data.srs;
+  if (srs.state !== FSRS_STATE.new) {
+    if (!Number.isFinite(srs.stability) || srs.stability <= 0 ||
+        !Number.isFinite(srs.difficulty) || srs.difficulty < 1 || srs.difficulty > 10) {
+      console.warn(`[SRS-8] Corrupt card for pid=${pid} (s=${srs.stability} d=${srs.difficulty}); resetting`);
+      return fsrs_newCard();
+    }
+  }
+  return srs;
 }
 
 function recordReview(pid, grade) {
