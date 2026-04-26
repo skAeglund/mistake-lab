@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">SRS scan SRS-2: switch FSRS due-date scheduling from UTC dates to local dates so card timing matches the user's local midnight rollover. The previous implementation computed `due = toISOString().split('T')[0]` and compared against `today = toISOString().split('T')[0]` — both in UTC. For any user not in UTC, this drifted intervals by up to ±12h depending on time of day: a California user grading at 11:30 PM local has UTC `today` = next day already, so a "1 day" interval would become due at next-afternoon-local (~16h later); same user grading at 6 AM local has UTC `today` = current day, so "1 day" becomes due next-morning-local (~12h later). Drift is largest proportionally for short intervals but applies to all of them. The fix introduces a localDateString(d?) helper using getFullYear/getMonth/getDate, and updates all four call sites: fsrs_review's due-write, isDue's today-read, buildReviewQueue's (dead-but-now-removed) today const, and renderReviewList's overdue check. Locally-set due strings are still YYYY-MM-DD so the existing string comparison (`card.due <= today`) keeps working without schema migration. Cross-device users in different timezones could see ±1 day inconsistency on the comparison (Device A in UTC+0 and Device B in UTC+12 compute different "today" strings for the same instant); this is acceptable for typical single-timezone usage and avoids the wholesale UTC drift for everyone. Existing UTC-stored due values keep working — the comparison treats any YYYY-MM-DD string consistently — and on the next grade for any card, its due will be rewritten in local-date form. Brief one-time desync during the transition session: a card stored with UTC due="2026-04-30" might surface a few hours later than expected for a far-from-UTC user, but only this one time per card; subsequent re-grades produce consistent local-date due values. Found during the SRS scan; SRS-1 landed in the previous commit.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">SRS scan SRS-3: remove dead-code branch from fsrs_review again-interval calc. The branch was `ivl = c.state === FSRS_STATE.new ? 0 : Math.max(1, Math.round(c.stability * 0.5))`, but by the time this line ran the state had already been reassigned at lines ~2405 (new+again → learning) and ~2413 (existing+again → relearning), so `c.state === new` was permanently false. Behavior didn't diverge: the dead arm would have produced ivl=0, which the next line's `ivl = Math.min(ivl, 365)` doesn't clamp upward, but the original `Math.max(1, ...)` outside this branch — actually let me restate: the surviving arm computes `Math.max(1, round(0.5 * fsrs_s0(again)))` = max(1, round(0.5 * 0.40255)) = max(1, 0) = 1, which is what the user actually got. The dead arm was meant to enable same-day re-review (ivl=0 → due=today → card re-surfaces in current session) for new cards graded Again — an unimplemented FSRS-5 short-term scheduler feature that doesn't apply to chess training anyway because srsRecorded locks first-attempt grades. The fix simplifies to just `ivl = Math.max(1, Math.round(c.stability * 0.5))` with a comment explaining why the new+again same-day case is intentionally not handled. No schema migration; no behavioral change to existing cards. Found during the SRS scan; SRS-1 and SRS-2 landed in previous commits.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2437,7 +2437,18 @@ function fsrs_review(card, grade, now) {
 
   let ivl;
   if (grade === FSRS_GRADE.again) {
-    ivl = c.state === FSRS_STATE.new ? 0 : Math.max(1, Math.round(c.stability * 0.5));
+    // SRS-3: state is always learning/relearning here. The state assignments
+    // at lines ~2405 (new+again → learning) and ~2413 (existing+again →
+    // relearning) run before this block, so the previous `c.state === new ?
+    // 0 : ...` ternary's first arm was unreachable. The behavior didn't
+    // diverge — Math.max(1, round(0.5 * fsrs_s0(again))) = max(1, 0) = 1
+    // matches what the dead arm's eventual `Math.max(1, ivl)` would have
+    // clamped to anyway — but the dead arm hinted at an unimplemented
+    // same-day relearning step (ivl=0 → due=today → re-surfaces in the
+    // current session). Keeping that off the table for chess training:
+    // srsRecorded locks first-attempt grades, so same-day re-reviews don't
+    // happen by design.
+    ivl = Math.max(1, Math.round(c.stability * 0.5));
   } else {
     ivl = Math.max(1, Math.round(fsrs_interval(DESIRED_RETENTION, c.stability)));
   }
