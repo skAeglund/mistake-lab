@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync audit A3: move L2's error-preservation from updateSyncStatusForAirplane into showMainApp's call site. The L2 fix added `if (dot && dot.classList.contains('error')) return;` at the top of updateSyncStatusForAirplane to prevent showMainApp's blanket 'ok'/'Synced' from overwriting H3's cold-start error indicator. But updateSyncStatusForAirplane has another caller — the airplane toggle handler (line 3611) — and that caller now also short-circuits when error is set. User flow: cold-start fails → 'Progress unavailable — refresh when online' shown → user toggles airplane on → expects '✈ Offline' indicator → instead the error indicator stays. The airplane toggle is an explicit user action; the indicator should reflect that immediately. Fix: revert updateSyncStatusForAirplane to its original simple unconditional logic, move the error-preservation check to showMainApp's call site as a per-call gate. Now showMainApp post-fetch preserves error (the actual L2 use case), and the airplane toggle can flip status normally regardless of stale error indicators. The error indicator is still cleared on the next successful sync (syncToGist's setSyncStatus('ok') call) or any other explicit setSyncStatus invocation, so this doesn't introduce a "stuck error" risk for non-airplane paths. Reading the live DOM via classList.contains preserves the original L2 design choice of avoiding a parallel JS variable. Found during the post-Cloud-Sync-scan audit; A1 + A2 already landed; the audit also flagged A4-A7 as Low-priority items (eval cache merge asymmetry, debounce LS-write perf, syncToGist read-failure no-retry, mergeGistData _clearedAt — all noted as known limitations, may or may not be addressed depending on priority).</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync audit A4: build syncEvalCacheToGist's PATCH body as a union of local + remote so incomparable Gist entries are preserved instead of overwritten. The M1 read-merge-write merged remote entries into local evalCache only when remote was strictly better under shouldOverwrite (deeper-and-at-least-as-wide, or same-depth-wider). Two devices with different SF configurations could produce incomparable entries for the same FEN — one device with mobileDepthOffset=0 produces depth-22-mpv-1 (deeper but narrower), another with depth-20-mpv-3 (wider but shallower). shouldOverwrite returns false in both directions: local stays unchanged in evalCache, but the subsequent PATCH used evalCacheToJSON() (just the local view) and overwrote Gist — remote's mpv-3 information was lost on every sync. The next session on the other device would re-PATCH its own incomparable view, and the Gist file would flap between the two on each sync round-trip, with each device retaining only its own locally-computed view. Fix builds a separate patchPayload object: seeded with all valid remote entries, then local entries overlay only when local is strictly better under shouldOverwrite (or pure-local — !remote at that key). For incomparable shared keys, remote stays in patchPayload so Gist preserves its variant. evalCache (in-memory) is unchanged — still keeps prefer-deepest-and-widest semantics for fast lookup paths. The PATCH and in-memory views are now allowed to diverge: local has the entry the SEED path can use directly (deepest); Gist preserves the cross-device alternative for next session's load. Behavior on read-failure: patchPayload starts empty, the catch block runs, the local-overlay loop adds all evalCache entries to patchPayload, and the PATCH effectively becomes evalCacheToJSON() (the original M1 fallback behavior). evalCache.size invariant: every key in evalCache has exactly one entry in patchPayload (either the remote variant when incomparable, or the local entry when local strictly better, or local when remote was strictly better and got merged into local). So the success log line "Synced N entries" still reflects the actual file size. Side note: this also closes a subtle issue in the read-failure fallback — the fallback PATCH used to write evalCacheToJSON() and could have overwritten a remote that we hadn't read yet. Now on read failure we explicitly write only our local view, which is consistent with the M1 trade-off doc (preserving local writes outweighs remote-overwrite risk for recomputable eval data). Found during the post-Cloud-Sync-scan audit; A1 + A2 + A3 already landed; A6 (retry on read failure for syncToGist) follows.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3427,15 +3427,22 @@ async function syncEvalCacheToGist() {
   if (airplaneMode || !isGistConfigured()) return;
   if (evalCacheDirty === 0) return;
   try {
-    // M1: read-merge-write — fetch current Gist eval cache and merge any
-    // unseen-by-us entries before PATCHing. Without this merge, a blind
-    // PATCH strips entries written by other devices since our last load
-    // (we'd overwrite the remote file with our in-memory view, which never
-    // had those entries). Round-trip would eventually converge through the
-    // other device's next sync, but during heavy multi-device use the file
-    // content "flaps" and shared compute is repeatedly wasted. Smaller
-    // pattern study for the queued M4 progress read-merge-write.
+    // M1 + A4: read-merge-write — fetch current Gist eval cache and merge
+    // unseen-or-better entries into the in-memory evalCache, AND build a
+    // separate PATCH payload that preserves remote's incomparable entries.
+    //
+    // Without the separate PATCH payload (M1 alone), a "deeper-but-narrower"
+    // local entry vs a "shallower-but-wider" remote entry produces an
+    // asymmetric result: the merge step keeps local (incoming-remote not
+    // strictly better → skipped), then evalCacheToJSON() serializes only
+    // local, and the PATCH overwrites Gist — remote's mpv-3 info is lost.
+    // With A4: PATCH starts with all valid remote entries, then local
+    // overlays only when local is strictly better (or pure-local). For
+    // incomparable shared keys, remote stays in the PATCH so Gist keeps
+    // its mpv-3 info. Both devices converge on Gist content over time
+    // instead of flapping between their local-favorite versions.
     let mergedFromRemote = 0;
+    const patchPayload = {};
     try {
       const gistEvals = await gistReadEvals();
       if (gistEvals && typeof gistEvals === 'object') {
@@ -3447,6 +3454,12 @@ async function syncEvalCacheToGist() {
           if (!val || typeof val.depth !== 'number' || !val.bestMove
               || !Array.isArray(val.pvs)
               || !val.pvs.every(pv => pv && typeof pv.cp === 'number' && pv.move)) continue;
+          // Seed PATCH payload with this remote entry — local overlay below
+          // may replace it if local is strictly better, otherwise it stays
+          // (preserving remote's incomparable variants).
+          patchPayload[key] = val;
+          // Merge into in-memory evalCache only when remote is strictly
+          // better (existing prefer-deepest-and-widest policy unchanged).
           const existing = evalCache.get(key);
           if (evalCacheShouldOverwrite(existing, val.depth, val.multiPv || 1)) {
             evalCache.set(key, val);
@@ -3455,15 +3468,24 @@ async function syncEvalCacheToGist() {
         }
       }
     } catch (readErr) {
-      // Read failure: continue with blind PATCH. For eval cache (idempotent,
-      // recomputable from FEN) preserving this device's writes is more
-      // valuable than preventing potential remote overwrite — the round-trip
-      // from the other device's next sync will re-merge. For progress data
-      // (non-recomputable) the M4 fix will refuse to write on read failure
-      // instead.
+      // Read failure: continue with blind PATCH (using local-only payload
+      // built below). For eval cache (idempotent, recomputable from FEN)
+      // preserving this device's writes is more valuable than preventing
+      // potential remote overwrite — the round-trip from the other device's
+      // next sync will re-merge. For progress data (non-recomputable) the
+      // syncToGist H2 path refuses to write on read failure instead.
       console.warn('[EvalCache] Read-merge skipped (read failed); proceeding with blind PATCH:', readErr.message);
     }
-    const data = evalCacheToJSON();
+    // Overlay local entries onto patchPayload: replace remote only when
+    // local is strictly better (or remote has no entry for this key).
+    // Incomparable shared keys leave remote intact so Gist preserves its
+    // mpv-3 (or other variant) information.
+    for (const [key, val] of evalCache) {
+      const remote = patchPayload[key];
+      if (!remote || evalCacheShouldOverwrite(remote, val.depth, val.multiPv || 1)) {
+        patchPayload[key] = val;
+      }
+    }
     // L7: keepalive when body fits the 64KB browser cap. flushPendingSyncs
     // calls this from pagehide/beforeunload handlers; without keepalive the
     // browser cancels the request as the page unloads. Eval cache bodies
@@ -3473,7 +3495,7 @@ async function syncEvalCacheToGist() {
     // behavior on every page unload), and in-session syncs (most calls)
     // never hit unload anyway.
     const evalBody = JSON.stringify({
-      files: { [GIST_EVALS_FILENAME]: { content: JSON.stringify(data) } }
+      files: { [GIST_EVALS_FILENAME]: { content: JSON.stringify(patchPayload) } }
     });
     await fetch(`https://api.github.com/gists/${gistId}`, {
       method: 'PATCH',
