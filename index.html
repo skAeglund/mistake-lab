@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync L6: surface localStorage quota failures so stale-cache symptoms are diagnosable. Every sync-layer LS write (debounceSyncToGist's progress-cache + dirty-flag, syncToGist's post-write cache update, loadFromGist's post-load cache update, cache-first phase-2's merge cache update, and saveEvalCacheToLocalStorage) was wrapped in `try { localStorage.setItem(k, v); } catch (_) {}` — the catch with no body. On Brave (~2.86MB quota) or any LS-pressured environment the write would fail, the cache would stay stale, and next session would read stale LS without any signal that anything had gone wrong. Symptoms in the field were "user reports their progress isn't syncing" with no clue from console logs because the failure path emitted nothing. The fix introduces lsSetSafe(key, value, ctx) which detects QuotaExceededError specifically (across browser variants — name='QuotaExceededError', code=22 for WebKit/Blink, code=1014 for Firefox NS_ERROR_DOM_QUOTA_REACHED) and logs a one-shot per-session warning identifying the context (which write site failed) and pointing the user toward remediation (clear games, remove FenData IDB store). One-shot via _lsQuotaWarned flag avoids spamming the console once a session enters quota pressure — every subsequent setItem call would otherwise re-warn. Non-quota errors (security restrictions, private-mode browsers, disk full) log per-call without the one-shot guard since those are rarer and more diagnostic-worthy when they do happen. Returns true/false so future callers can branch on success if they care; current callers ignore the return because the in-memory state is the source of truth and the LS write is best-effort persistence. Eval cache is the largest LS consumer (hundreds of KB per session at heavy SF use) so it's the most likely quota trigger. Found during the Cloud Sync / Gist scan; all H + M items now landed; L7 (keepalive on flush fetches) + L8 (schema-init duplication) remain.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync L7: enable keepalive on flush-time fetches so pagehide/beforeunload syncs actually complete. The previous gistWrite and syncEvalCacheToGist PATCHes used plain fetch(), and browsers cancel non-keepalive fetches when the page unloads — flushPendingSyncs's "best-effort" comment was overstating the reliability. Most page unloads silently dropped the request even though the user expected the H2/M3 LS-write side to have already preserved the in-memory state (which it does — the loss was in the upstream Gist propagation, not LS). Adding keepalive: true tells the browser to hold the request alive (up to a 64KB browser-enforced body cap) until it completes even after the page is gone. Body-size guard via .length < 65536 because a user with thousands of positions can produce gistData JSON that exceeds the cap; keepalive falls back to plain fetch in that case (terminates on unload but works fine for normal in-session syncs which are most of the call volume). Eval cache hits the cap more aggressively because eval entries are large (5KB+ per cached position with full PVs) — typically only the first ~10 entries fit — but unload-survival for any subset is strictly better than the previous all-or-nothing cancellation. The body-length measurement uses the JSON string length directly (UTF-8 byte count is at most string-length × 4 in the worst case, but for our content which is mostly ASCII it's effectively == string-length, and the < 65536 threshold is conservative for the cap). Found during the Cloud Sync / Gist scan; only L8 (schema-init duplication) remains.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2856,15 +2856,28 @@ async function gistWrite(data) {
   // initial gistCreate set it to. PATCH semantics preserve fields not
   // included in the request body, so omitting `description` leaves the
   // existing value untouched.
+  // L7: enable keepalive when body fits the 64KB browser cap. flushPendingSyncs
+  // calls gistWrite from pagehide/beforeunload handlers; without keepalive,
+  // browsers terminate non-keepalive fetches when the page unloads, so the
+  // 'best-effort' flush comment was overstating the reliability — most page
+  // unloads silently dropped the request. With keepalive, the browser holds
+  // the request alive (up to 64KB body, browser-enforced cap) until it
+  // completes even after the page is gone. Body size guard: a user with
+  // thousands of positions can produce gistData JSON that exceeds the cap;
+  // in that case we fall back to plain fetch (terminates on unload but at
+  // least works during normal in-session syncs). Synchronous Blob.size
+  // measurement is correct because the body was just computed above.
+  const body = JSON.stringify({
+    files: { [GIST_FILENAME]: { content: JSON.stringify(data, null, 2) } }
+  });
   const resp = await fetch(`https://api.github.com/gists/${gistId}`, {
     method: 'PATCH',
     headers: {
       'Authorization': `token ${gistToken}`,
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify({
-      files: { [GIST_FILENAME]: { content: JSON.stringify(data, null, 2) } }
-    })
+    body,
+    keepalive: body.length < 65536
   });
   if (!resp.ok) throw new Error(`Gist write failed: ${resp.status}`);
   gistInvalidateCache();
@@ -3447,15 +3460,25 @@ async function syncEvalCacheToGist() {
       console.warn('[EvalCache] Read-merge skipped (read failed); proceeding with blind PATCH:', readErr.message);
     }
     const data = evalCacheToJSON();
+    // L7: keepalive when body fits the 64KB browser cap. flushPendingSyncs
+    // calls this from pagehide/beforeunload handlers; without keepalive the
+    // browser cancels the request as the page unloads. Eval cache bodies
+    // tend to grow large (5KB+ per cached position) so the cap is more
+    // restrictive here than for gistWrite — typically only the first ~10
+    // entries fit. That's still strictly better than zero (the previous
+    // behavior on every page unload), and in-session syncs (most calls)
+    // never hit unload anyway.
+    const evalBody = JSON.stringify({
+      files: { [GIST_EVALS_FILENAME]: { content: JSON.stringify(data) } }
+    });
     await fetch(`https://api.github.com/gists/${gistId}`, {
       method: 'PATCH',
       headers: {
         'Authorization': `token ${gistToken}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        files: { [GIST_EVALS_FILENAME]: { content: JSON.stringify(data) } }
-      })
+      body: evalBody,
+      keepalive: evalBody.length < 65536
     });
     evalCacheDirty = 0;
     saveEvalCacheToLocalStorage();
