@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">SRS scan SRS-6: drop the latent `hintUsed = true` assignment in showHint's filter-practice trie branch. Practice items aren't SRS-graded — recordPracticeResult writes to gistData.practiceScoreboard, never to gistData.positions[pid].srs — so the flag was dead state in this path today, but it would silently start producing wrong grades the moment practice grading is ever added (since the hintUsed → Again override is wired into the SRS rubrics for mistake/tactic/repertoire). The hint mechanic itself (square highlight on first press, arrow on second press) doesn't depend on the flag, so removing the assignment leaves the practice hint experience identical and structurally self-corrects: if practice grading is added later, the hintUsed → Again logic would then need its own deliberate enable in the new practice rubric. Comment at line 16554 was already calling this out as a "latent bug if practice ever becomes graded"; this lands the fix. Leaves untouched the three other hintUsed=true sites: tactic (line 6990, where SRS does grade), repertoire (line 7023), and main-mistake (line 7089). Found during the SRS scan; SRS-1 through SRS-4 landed previously, SRS-5 deferred as doc-only.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">SRS scan SRS-7: exclude in-flight synthetic items from buildReviewQueue. The active practiceContItem and resumed-game synthetic both live in filteredMistakes (so the board can navigate to them via currentMistakeIdx) and have type='practice' which bypasses the type-chip filter applied in applyFilters. Without a queue-level exclusion, those synthetics would surface in the review list as "New" SRS items alongside real mistakes — clicking one hits loadPosition's wasPractice branch, which silently splices the synthetic and shows an empty board: not a crash, but confusing UX. The fix adds an isInFlightSynthetic predicate that matches type==='practice' OR gameId==='_practice' OR gameId==='_resumed', filtered out before isDue. Saved practice mistakes (savePracticeMistake → type='mistake', gameId='_practice_<ts>') and saved practice tactics (savePracticeTactic → type='tactic', gameId='_practice_tactic_<ts>_<rand>') are correctly RETAINED — they should appear in the queue. The exact-string gameId match (=== '_practice') distinguishes in-flight from persisted because saved items always have a timestamp suffix. Test injections (_test_clocks_6sS121tG mistakes/advantages, _test_bxf7 tactic) keep their queue presence — they're normal SRS items by current design, separate concern from this fix. Found during the SRS scan; SRS-1 through SRS-6 landed previously (SRS-5 deferred as doc-only).</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2503,7 +2503,26 @@ function isDue(pid) {
 }
 
 function buildReviewQueue() {
-  reviewQueue = filteredMistakes.filter(m => isDue(posId(m)));
+  // SRS-7: exclude in-flight synthetic items from the review queue. The
+  // active practiceContItem and resumed-game synthetic both live in
+  // filteredMistakes (so the board can navigate to them via
+  // currentMistakeIdx) and have type='practice' which bypasses the
+  // type-chip filter — so without this guard they would surface in the
+  // review list as "New" SRS items alongside real mistakes. Clicking
+  // such an entry hits loadPosition's wasPractice branch, which silently
+  // splices the synthetic and shows an empty board: not a crash, but a
+  // confusing UX. Excluded by both type AND gameId prefix to cover the
+  // edge case where one was set but the other didn't synchronize (e.g.
+  // a partial state during mode switching). Saved practice mistakes/
+  // tactics injected via savePracticeMistake/savePracticeTactic carry
+  // type='mistake'/'tactic' and gameId='_practice_<ts>' — they SHOULD
+  // appear in the queue, and the type check (m.type === 'practice')
+  // correctly leaves them in. The gameId-exact check (=== '_practice'
+  // or '_resumed' without timestamp suffix) distinguishes the in-flight
+  // synthetics from the persisted saved items.
+  const isInFlightSynthetic = (m) =>
+    m.type === 'practice' || m.gameId === '_practice' || m.gameId === '_resumed';
+  reviewQueue = filteredMistakes.filter(m => !isInFlightSynthetic(m) && isDue(posId(m)));
   // Sort: overdue first (by due date), then new positions
   reviewQueue.sort((a, b) => {
     const ca = getCardForPosition(posId(a));
