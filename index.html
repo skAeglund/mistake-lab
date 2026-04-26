@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync L8: extract ensureGistData() helper to consolidate the 9-site lazy-init pattern. The pattern `if (!gistData) gistData = { positions: {}, notes: {}, version: 1 };` was duplicated at 9 callers across the file (recordReview, the practice-mistake / practice-tactic / practice-scoreboard / repertoire-customDeviation / repertoire-dismissed / note-save mutation paths, etc.). Each site had to know the full default shape, and adding a new top-level field — say a future `cleared.dismissedAt` for the H2/M3 known limitation around restoreDismissedRepertoire round-trips — would require touching all 9 sites with the risk of one being missed and silently producing inconsistent gistData shapes across mutation paths. The new helper centralizes the shape; future schema additions go in one place. Returns gistData so callers can chain (`const data = ensureGistData(); data.foo = ...`) although none of the current callers use that — the pattern continues with bare `gistData.foo = ...` for diff minimality. Helper is declared right next to the `let gistData = null` declaration so the relationship is obvious. No behavior change: the `if (!gistData) ... ` check was always synchronous and inline, and ensureGistData() runs in the same synchronous context referring to the same module-level `gistData` binding — no race introduced. Sed-based bulk replace did the substitution; one caveat caught and fixed: the regex matched the helper's own body, briefly producing `function ensureGistData() { ensureGistData(); return gistData; }` (infinite recursion); restored the body via str_replace before validation. Found during the Cloud Sync / Gist scan; this is the final item in the queue. SCAN COMPLETE: H1, H2, H3, M1, M2, M3, M4, M5, M6, L1, L2, L3, L4, L5, L6, L7, L8 — all landed plus the cache-first phase-2 merge that paired with H2/M3. Known limitation deferred for a future targeted fix: per-array _clearedAt timestamps to disambiguate "remote previously had X, local explicitly removed it" from "never had X" in the dismissed/customDeviations/studies merge paths — affects long-disconnected-session edge cases only.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync audit A1: make disconnectGist async and await syncToGist + syncEvalCacheToGist instead of fire-and-forget. M6 originally landed before H2 changed syncToGist to do read-merge-write. Pre-H2 the fire-and-forget pattern worked because syncToGist's first await was gistWrite(), and gistWrite synchronously builds its fetch URL+headers using the still-set gistToken/gistId before suspending — the PATCH was already in flight by the time disconnectGist cleared creds. After H2 the first await is gistRead(): syncToGist's sync prefix runs (creds still set, passes guard), hits await gistRead(), suspends. Control returns to disconnectGist which clears gistToken/gistId/gistData synchronously. When gistRead resolves, syncToGist resumes: const localSnapshot = JSON.parse(JSON.stringify(gistData)) → localSnapshot = null (gistData was nulled). mergeGistData(null, remote) returns deep-copy of remote (since `if (!local) return remote`). gistData = merged → gistData restored to remote contents post-disconnect (BUG #1). await gistWrite(gistData) → gistWrite's `if (!gistToken || !gistId) return` no-ops, the PATCH never happens, user's pending mutations never reach Gist (BUG #2 — M6's stated fix completely broken). lsSetSafe writes the remote contents to LS (BUG #3 — stale data left in LS post-disconnect). _gistProgressDirtyLocal = false; localStorage.removeItem(GIST_PROGRESS_DIRTY_LS_KEY) — clears dirty (acceptable since the user is disconnecting). setSyncStatus('ok', 'Synced') overwrites the 'off'/'Not synced' that disconnectGist set (BUG #4 — UI lies about state). The fix awaits both flushes; the syncs complete in full while creds are still valid, then disconnectGist proceeds with the cred-clearing teardown. Try/catch wraps each await so a network failure doesn't abort the disconnect. Logout's analogous pattern at line 9119 is unaffected because logout doesn't clear gistToken/gistId — credentials persist through the operation, so the gistRead-then-gistWrite flow uses them throughout. Found during the post-Cloud-Sync-scan audit; A2 (M2 cleanup unreachable on last study removal) and A3 (L2 error preservation breaking airplane toggle) follow.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -4134,27 +4134,35 @@ async function saveSettingsGist() {
   renderQueue();
 }
 
-function disconnectGist() {
-  // Flush any pending sync first — without this, mutations made within the
-  // 3s debounce window before disconnect (or during the 3s sync delay) get
-  // silently dropped: the timer fires after gistToken='' and syncToGist
-  // returns early at the no-token guard. Best-effort fire-and-forget;
-  // matches the logout flush pattern at line 8700.
+async function disconnectGist() {
+  // A1 fix: await the flushes. After H2 made syncToGist's first await
+  // gistRead() (instead of the previous blind-PATCH first-await of
+  // gistWrite), the fire-and-forget pattern broke for disconnect: the
+  // sync prefix runs synchronously, hits await gistRead(), suspends, and
+  // disconnectGist's subsequent gistToken='' clears creds before the
+  // gistRead resolves. When syncToGist resumes, deep-copy of (now-null)
+  // gistData → null localSnapshot → mergeGistData(null, remote) returns
+  // remote → gistData = remote → gistWrite no-ops on no-token guard. The
+  // user's pending mutations never reach Gist (M6's stated fix broken),
+  // gistData is restored to remote contents post-disconnect, LS gets
+  // remote contents written, and status flips to 'Synced' overwriting
+  // 'Not synced'. Awaiting fixes all four issues by completing the sync
+  // BEFORE clearing creds. Logout's pattern (line 9119) is unaffected
+  // because logout doesn't clear gistToken/gistId.
   if (syncDebounceTimer && gistData && isGistConfigured()) {
     clearTimeout(syncDebounceTimer);
     syncDebounceTimer = null;
-    syncToGist();
+    try { await syncToGist(); } catch (_) { /* best-effort */ }
   }
   // Same for eval cache: a pending evalCacheSyncTimer would fire after
-  // disconnect, see !isGistConfigured() in syncEvalCacheToGist's guard, and
-  // return early without touching dirty. The entries would persist in LS
-  // (saveEvalCacheToLocalStorage runs on flushPendingSyncs) but never reach
-  // the user's Gist. Force-sync now while creds are still valid so the
-  // user's work lands on the account they're disconnecting from.
+  // disconnect, see !isGistConfigured() in syncEvalCacheToGist's guard,
+  // and return early. Entries persist in LS but never reach this user's
+  // Gist. Force-sync now while creds are still valid so the user's work
+  // lands on the account they're disconnecting from.
   if (evalCacheDirty > 0 && isGistConfigured() && !airplaneMode) {
     clearTimeout(evalCacheSyncTimer);
     evalCacheSyncTimer = null;
-    syncEvalCacheToGist();
+    try { await syncEvalCacheToGist(); } catch (_) { /* best-effort */ }
   }
   gistToken = ''; gistId = ''; gistData = null;
   localStorage.removeItem('mistakelab_gist_token');
