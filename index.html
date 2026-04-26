@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync audit A6: schedule a retry timer when syncToGist's gistRead step fails. The H2 read-merge-write design correctly refuses to write progress data on read failure (since progress is non-recomputable, a blind PATCH could overwrite cross-device state). But the original H2 implementation just returned with the dirty flag still true, relying on "the next mutation's debounceSyncToGist will re-attempt." If the user made no further mutations — typical for someone stopping mid-session after a sync error indicator appeared — the dirty mutations stayed LS-only forever, never propagating to Gist. The fix sets a 30s retry timer in the catch block, reusing the syncDebounceTimer slot so a subsequent mutation's debounceSyncToGist call cleanly replaces the retry (avoiding double-fire). The status indicator now reads "Sync failed (read) — retrying" so the user knows recovery is automatic. If the retry's gistRead also fails, the catch fires again and schedules another 30s retry — infinite retries on persistent network failure, which is appropriate behavior (eventually network comes back; no exponential backoff needed for a 30s baseline). Interaction with A1 disconnect flow: disconnectGist's `clearTimeout(syncDebounceTimer)` clears any pending retry, then disconnectGist's awaited syncToGist runs. If THAT one also fails on read, the catch schedules a NEW retry. After disconnectGist's await returns, the function proceeds to `gistToken = ''`. The new retry timer eventually fires and calls syncToGist, which short-circuits at the no-token guard. Slight orphan-timer cost; acceptable. Interaction with airplane mode: if user toggles airplane on while retry is pending, the timer fires and syncToGist's `if (airplaneMode) return` short-circuits. No further retries scheduled. Updates dirty state correctly via L5's airplane-off auto-push gate when user transitions back. Found during the post-Cloud-Sync-scan audit; A1 + A2 + A3 + A4 already landed. Audit items A5 (LS-write perf, ~50ms blocking on large gistData) and A7 (mergeGistData arrays don't disambiguate explicit-removal — known limitation deferred to per-array _clearedAt fix) are not addressed in this commit; A5 is below the perf threshold for typical users and A7 needs schema design beyond an audit-fix scope.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">SRS scan SRS-1: persist srsRecorded across continuation session resume so advantage drills can grade after an interrupt-and-resume cycle. The previous resumeContSession set srsRecorded=true unconditionally to prevent double-grading on resumed mistakes/tactics (correct for those — they record on first wrong attempt, so the flag is always true by save time). For advantage items, srsRecorded is only set inside finishAdvantage at drill end, so an interrupted advantage drill saved with srsRecorded=false. On resume, the unconditional true forced finishAdvantage's `if (grade !== null && !srsRecorded)` check to skip the grade, leaving the card in state:new forever even after a successful conversion on the resumed attempt. The fix persists the live srsRecorded value as srsRecordedAtSave in the session blob, and restores from it on resume (defaulting to true for old sessions saved before this fix, to preserve the safer no-double-grade behavior for those). Mistake/tactic resume paths are unaffected because srsRecorded is already true by save time in normal flows. Interaction with the advantage 'interrupted' grade=null branch: that branch already skips recordReview regardless of srsRecorded, so resuming an interrupted-with-grade=null drill and then completing it still works correctly under the new logic. Found during the SRS scan; SRS-2 (UTC-vs-local-date scheduling drift) is the other High item and lands separately.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -15568,6 +15568,14 @@ function saveContSession() {
       playerColor: m.playerColor,
       itemType: m.type,
       itemPosId: posId(m),
+      // SRS-1: persist live srsRecorded so resume can avoid double-grading without
+      // also blocking grading entirely. Mistake/tactic items already record on first
+      // wrong attempt, so this is usually true by the time saveContSession fires.
+      // Advantage items only record at finishAdvantage (drill end), so an interrupted
+      // advantage drill saves with srsRecordedAtSave=false — and the eventual finish
+      // on resume CAN record the grade. Without this, resumed advantage drills set
+      // srsRecorded=true unconditionally and the grade was silently dropped.
+      srsRecordedAtSave: srsRecorded,
       savedAt: Date.now(),
     }));
   } catch (e) { /* quota or serialization error — non-critical */ }
@@ -15642,7 +15650,17 @@ function resumeContSession(session) {
   currentAttempts = 0;
   hintLevel = 0;
   hintMove = null;
-  srsRecorded = true; // don't re-record SRS for a resumed game
+  // SRS-1: restore srsRecorded from the session blob instead of forcing true.
+  // The previous unconditional `true` was correct for mistake/tactic items
+  // (which record SRS on first wrong attempt, so srsRecorded was always true
+  // by save time) but wrong for advantage items (which only record at
+  // finishAdvantage — an interrupted-then-resumed advantage drill set
+  // srsRecorded=true here, then finishAdvantage's `if (grade !== null &&
+  // !srsRecorded)` check silently skipped the grade and the card stayed
+  // state:new forever). Sessions saved before this fix lack the field;
+  // default to true to preserve the old behavior for those (avoids
+  // re-grading mistakes/tactics that *probably* already recorded).
+  srsRecorded = session.srsRecordedAtSave !== undefined ? !!session.srsRecordedAtSave : true;
 
   // Switch to training layout on mobile
   if (document.body.classList.contains('mobile-browsing')) {
