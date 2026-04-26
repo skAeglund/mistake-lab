@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">SRS scan SRS-8: NaN/corruption guards in fsrs_review and getCardForPosition. Two failure modes: (1) c.lastReview is a malformed string (cross-version corruption, manual gist edit, schema migration miss) — `new Date(bad)` returns Invalid Date, the subtraction is NaN, Math.max(0, NaN) is NaN per spec, and the NaN propagates through fsrs_retrievability / fsrs_difficulty / fsrs_stability into gistData.positions[pid].srs, which then syncs the corruption to Gist. isDue on a NaN-due card silently returns false (NaN <= today is false), so the card vanishes from the queue forever. (2) An existing non-new card has corrupt stability/difficulty (NaN/Infinity from prior corruption, out-of-range from manual edit) — same FSRS formula propagation, same silent disappearance. Fix (1): in fsrs_review, validate the parsed timestamp with Number.isFinite before using it; treat unparseable as elapsed=0 (same as fsrs_review's no-prior-review branch). Fix (2): in getCardForPosition, defensive validator on the persisted srs object — if state ≠ new and stability ≤ 0 OR not finite OR difficulty out of [1,10], log a console.warn and return fsrs_newCard() (accepting one-time data loss to avoid corrupt-forever). New cards skip the validator because stability/difficulty=0 are valid initial states for them (fsrs_review's new-card branch initializes from grade). Found during the SRS scan; SRS-1 through SRS-7 landed previously (SRS-5 deferred). All Mediums except SRS-5 done; Lows next.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">SRS scan SRS-11: console.warn when fsrs_review's elapsed clamp triggers (negative elapsed clipped to 0). The Math.max(0, rawElapsed) clamp itself is correct defensive behavior — avoids NaN-like downstream propagation if elapsed went negative AND prevents fsrs_retrievability from inflating beyond 1.0 (which would make stability barely grow on success while fail still penalizes; net under-reward of the user's review). The clamp activates when lastReview is in the future relative to "now" — system clock moved backwards (timezone change, NTP resync, manual edit) or a different device wrote the card with a clock ahead of this one. Previously the clamp was silent, so any clock-skew-driven scheduling weirdness left no debug trail. Logs the offending lastReview ISO string and the negative delta. SRS-10 (corrupt s=0 stability stays at 0 forever) is now subsumed by SRS-8's getCardForPosition validator — `srs.stability <= 0` triggers the reset path, so an s=0 card resets to fresh on next access. SRS-9 (test injection orphan SRS records) deferred — not a current defect since test items are in allMistakes and SRS records correctly correspond; cleanup belongs in the test-injection-removal commit. SRS-12, SRS-13, SRS-14, SRS-15 deferred pending intent confirmation; flagged in scan summary. All Highs and Mediums (except SRS-5 doc-only) plus SRS-11 landed.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2438,7 +2438,19 @@ function fsrs_review(card, grade, now) {
   if (c.lastReview) {
     const lrTime = new Date(c.lastReview).getTime();
     if (Number.isFinite(lrTime)) {
-      elapsed = Math.max(0, (now.getTime() - lrTime) / 86400000);
+      const rawElapsed = (now.getTime() - lrTime) / 86400000;
+      // SRS-11: surface clock-skew when the clamp triggers. Negative
+      // elapsed means lastReview is in the future relative to "now" —
+      // either the system clock moved backwards (timezone change, NTP
+      // resync, manual user edit) or a different device wrote the card
+      // with a clock ahead of this one. The clamp itself is correct
+      // defensive behavior (avoids NaN downstream and prevents negative
+      // elapsed from inflating fsrs_retrievability beyond 1.0); just log
+      // so debugging flagged "user under-reviewed" surfaces here.
+      if (rawElapsed < 0) {
+        console.warn(`[SRS-11] Clock skew detected: elapsed=${rawElapsed.toFixed(2)} days for lastReview=${c.lastReview}; clamping to 0`);
+      }
+      elapsed = Math.max(0, rawElapsed);
     }
   }
   c.elapsedDays = elapsed;
