@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync L4: drop the description PATCH from gistWrite so the analyzer's description survives. The previous gistWrite always sent `description: 'MistakeLab progress sync (browser) — N positions'` alongside every progress file PATCH; syncEvalCacheToGist sent no description at all, and gistCreate set `description: 'MistakeLab chess trainer progress'` once at creation. The analyzer (separate Node.js process) writes its own description on each run — typically with timestamp + game count, more useful than either of the browser-side strings. Whichever writer wrote last won, and since browser progress syncs run on every drilling-session mutation while the analyzer runs occasionally, the browser description clobbered the analyzer's. Cosmetic only — affects how the Gist appears in the user's Gists list — but the inconsistency between gistWrite (touches description) and syncEvalCacheToGist (doesn't touch it) was a hint that the design wasn't deliberate. Fix is to remove the description field from gistWrite's PATCH body. GitHub Gist PATCH semantics preserve fields not included in the request, so omitting description leaves whatever the analyzer or initial gistCreate set in place. Found during the Cloud Sync / Gist scan; full queue progress: H1 + L5 + M6 + M2 + M1 + M4+M5 + H2+M3+phase-2-merge + H3+L2+L3 + L1 already landed; L6 (silent quota errors) + L7 (keepalive on flush fetches) + L8 (schema-init duplication) remain.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync L6: surface localStorage quota failures so stale-cache symptoms are diagnosable. Every sync-layer LS write (debounceSyncToGist's progress-cache + dirty-flag, syncToGist's post-write cache update, loadFromGist's post-load cache update, cache-first phase-2's merge cache update, and saveEvalCacheToLocalStorage) was wrapped in `try { localStorage.setItem(k, v); } catch (_) {}` — the catch with no body. On Brave (~2.86MB quota) or any LS-pressured environment the write would fail, the cache would stay stale, and next session would read stale LS without any signal that anything had gone wrong. Symptoms in the field were "user reports their progress isn't syncing" with no clue from console logs because the failure path emitted nothing. The fix introduces lsSetSafe(key, value, ctx) which detects QuotaExceededError specifically (across browser variants — name='QuotaExceededError', code=22 for WebKit/Blink, code=1014 for Firefox NS_ERROR_DOM_QUOTA_REACHED) and logs a one-shot per-session warning identifying the context (which write site failed) and pointing the user toward remediation (clear games, remove FenData IDB store). One-shot via _lsQuotaWarned flag avoids spamming the console once a session enters quota pressure — every subsequent setItem call would otherwise re-warn. Non-quota errors (security restrictions, private-mode browsers, disk full) log per-call without the one-shot guard since those are rarer and more diagnostic-worthy when they do happen. Returns true/false so future callers can branch on success if they care; current callers ignore the return because the in-memory state is the source of truth and the LS write is best-effort persistence. Eval cache is the largest LS consumer (hundreds of KB per session at heavy SF use) so it's the most likely quota trigger. Found during the Cloud Sync / Gist scan; all H + M items now landed; L7 (keepalive on flush fetches) + L8 (schema-init duplication) remain.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2808,6 +2808,42 @@ async function gistRead() {
   return JSON.parse(content);
 }
 
+// L6: safe localStorage.setItem wrapper that surfaces failures (especially
+// quota-exceeded) instead of swallowing them silently. Every sync-layer LS
+// write previously used `try { localStorage.setItem(k,v); } catch (_) {}`
+// which made Brave's ~2.86MB quota (and any LS-pressured environment) an
+// invisible cliff: the write would fail, the cache would stay stale, and
+// next session would read stale LS. Returns true on success so callers can
+// branch if they care; current callers don't, but logging means it's
+// diagnosable when a user reports stale state. _quotaWarned flag prevents
+// console-spam: every sync attempt would otherwise log on every LS-pressure
+// session. The flag is per-session (resets on reload) so users still see
+// the warning at least once when a problem starts. _lsLastQuotaWarn lets
+// us re-warn periodically if the pressure persists.
+let _lsQuotaWarned = false;
+function lsSetSafe(key, value, ctx) {
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch (e) {
+    const isQuota = e && (e.name === 'QuotaExceededError'
+                       || e.code === 22
+                       || e.code === 1014); // Firefox NS_ERROR_DOM_QUOTA_REACHED
+    if (isQuota) {
+      if (!_lsQuotaWarned) {
+        _lsQuotaWarned = true;
+        console.warn(`[LS] localStorage quota exceeded writing ${ctx || key}. ` +
+          `Cache may be stale until space is freed. ` +
+          `Brave enforces a ~2.86MB quota; other browsers ~5MB. ` +
+          `Consider clearing old games (Logout → re-fetch fewer) or removing the FenData IDB store.`);
+      }
+    } else {
+      console.warn(`[LS] setItem(${ctx || key}) failed:`, e && e.message);
+    }
+    return false;
+  }
+}
+
 async function gistWrite(data) {
   if (!gistToken || !gistId) return;
   // L4: do not include `description` in the PATCH. The analyzer (separate
@@ -3029,8 +3065,8 @@ function debounceSyncToGist() {
   // restarts so the next session knows to push pending state upstream
   // even if no mutation is made that session.
   if (gistData) {
-    try { localStorage.setItem(GIST_PROGRESS_CACHE_KEY, JSON.stringify(gistData)); } catch (_) {}
-    try { localStorage.setItem(GIST_PROGRESS_DIRTY_LS_KEY, '1'); } catch (_) {}
+    lsSetSafe(GIST_PROGRESS_CACHE_KEY, JSON.stringify(gistData), 'progress cache');
+    lsSetSafe(GIST_PROGRESS_DIRTY_LS_KEY, '1', 'progress dirty flag');
   }
   if (airplaneMode) return;
   if (!gistToken || !gistId) return;
@@ -3076,7 +3112,7 @@ async function syncToGist() {
     gistData = merged;
     await gistWrite(gistData);
     // Update local cache for airplane mode
-    try { localStorage.setItem(GIST_PROGRESS_CACHE_KEY, JSON.stringify(gistData)); } catch (_) {}
+    lsSetSafe(GIST_PROGRESS_CACHE_KEY, JSON.stringify(gistData), 'progress cache (post-sync)');
     // Clear dirty: local state has now been pushed upstream. The in-memory
     // flag is still read by L5's airplane-off auto-push gate; the LS sentinel
     // is read at session start by restoreDirtyFlagFromLS so a future session
@@ -3125,7 +3161,7 @@ async function loadFromGist() {
       localStorage.setItem(getCompletedKey(), JSON.stringify([...s]));
     }
     // Cache for airplane mode
-    try { localStorage.setItem(GIST_PROGRESS_CACHE_KEY, JSON.stringify(gistData)); } catch (_) {}
+    lsSetSafe(GIST_PROGRESS_CACHE_KEY, JSON.stringify(gistData), 'progress cache (post-load)');
     // Load eval cache (non-blocking — not on critical path)
     loadEvalCacheFromGist();
     setSyncStatus('ok', 'Synced');
@@ -3343,9 +3379,11 @@ function evalCacheFromJSON(obj) {
 }
 
 function saveEvalCacheToLocalStorage() {
-  try {
-    localStorage.setItem(EVAL_CACHE_LS_KEY, JSON.stringify(evalCacheToJSON()));
-  } catch (_) { /* quota exceeded — non-critical */ }
+  // L6: route through lsSetSafe so quota failures are diagnosable instead
+  // of silently dropped. Eval cache is the largest LS consumer (a session
+  // with many analyzed positions can push hundreds of KB), so it's the
+  // most likely trigger for Brave's ~2.86MB quota.
+  lsSetSafe(EVAL_CACHE_LS_KEY, JSON.stringify(evalCacheToJSON()), 'eval cache');
 }
 
 function loadEvalCacheFromLocalStorage() {
@@ -9207,7 +9245,7 @@ async function fetchGames(autoUsername) {
               // would leave gistData with un-normalized keys. Idempotent:
               // no-op when keys are already fixed points.
               migrateLegacyPosKeys();
-              try { localStorage.setItem(GIST_PROGRESS_CACHE_KEY, JSON.stringify(gistData)); } catch (_) {}
+              lsSetSafe(GIST_PROGRESS_CACHE_KEY, JSON.stringify(gistData), 'progress cache (phase-2 merge)');
               // If local had unsynced mutations (dirty flag was true going in),
               // the merge produced state that differs from remote. Trigger a
               // sync to push the merged state upstream — without this, local
