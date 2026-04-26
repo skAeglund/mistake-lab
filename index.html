@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">SRS scan SRS-4: document FSRS_W[17] and FSRS_W[18] as reserved for the unimplemented FSRS-5 short-term scheduler. The header was labeled "FSRS-5 Algorithm" but only the long-term scheduler is implemented — w[17] and w[18] are defined in the FSRS_W array but never read. In FSRS-5, those two weights drive the short-term update `S' = S * exp(w[17] * (G - 3 + w[18]))`, used when a card in learning/relearning state gets re-rated in the same session. Chess-mistake training is single-rating per session by design (srsRecorded locks the first-attempt grade across retries), so the short-term path is structurally unreachable. No code change needed; just rename the section header to "FSRS Algorithm (long-term scheduler only)" and add a comment by w[17]/w[18] explaining they're kept aligned with upstream FSRS-5's 19-weight layout so a future trained-weights swap stays a one-line change. Found during the SRS scan; SRS-1, SRS-2, SRS-3 landed in previous commits.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">SRS scan SRS-6: drop the latent `hintUsed = true` assignment in showHint's filter-practice trie branch. Practice items aren't SRS-graded — recordPracticeResult writes to gistData.practiceScoreboard, never to gistData.positions[pid].srs — so the flag was dead state in this path today, but it would silently start producing wrong grades the moment practice grading is ever added (since the hintUsed → Again override is wired into the SRS rubrics for mistake/tactic/repertoire). The hint mechanic itself (square highlight on first press, arrow on second press) doesn't depend on the flag, so removing the assignment leaves the practice hint experience identical and structurally self-corrects: if practice grading is added later, the hintUsed → Again logic would then need its own deliberate enable in the new practice rubric. Comment at line 16554 was already calling this out as a "latent bug if practice ever becomes graded"; this lands the fix. Leaves untouched the three other hintUsed=true sites: tactic (line 6990, where SRS does grade), repertoire (line 7023), and main-mistake (line 7089). Found during the SRS scan; SRS-1 through SRS-4 landed previously, SRS-5 deferred as doc-only.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -7090,7 +7090,17 @@ async function showHint() {
     const posKey = fenPositionKey(currentSolveFen);
     const entry = trieFirst(posKey);
     if (entry && entry.uci) {
-      hintUsed = true;
+      // SRS-6: do NOT set hintUsed here. Practice items aren't SRS-graded
+      // (recordPracticeResult writes to practiceScoreboard, never to
+      // gistData.positions[pid].srs), so the flag is dead state in this
+      // path today. If practice ever does become SRS-graded, hintUsed=true
+      // would silently override the grade to Again — penalizing the user
+      // for a hint they used in a separate, ungraded practice session.
+      // The hint mechanic itself (highlight + arrow on second press)
+      // doesn't depend on the flag, so dropping the assignment is
+      // structurally inert today and self-correcting if practice grading
+      // is ever added (the hintUsed → Again logic would then need its
+      // own deliberate enable in the practice grading rubric).
       const fromSq = entry.uci.substring(0, 2);
       const toSq = entry.uci.substring(2, 4);
       if (hintLevel === 0) {
