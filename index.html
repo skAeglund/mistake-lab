@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync audit A1: make disconnectGist async and await syncToGist + syncEvalCacheToGist instead of fire-and-forget. M6 originally landed before H2 changed syncToGist to do read-merge-write. Pre-H2 the fire-and-forget pattern worked because syncToGist's first await was gistWrite(), and gistWrite synchronously builds its fetch URL+headers using the still-set gistToken/gistId before suspending — the PATCH was already in flight by the time disconnectGist cleared creds. After H2 the first await is gistRead(): syncToGist's sync prefix runs (creds still set, passes guard), hits await gistRead(), suspends. Control returns to disconnectGist which clears gistToken/gistId/gistData synchronously. When gistRead resolves, syncToGist resumes: const localSnapshot = JSON.parse(JSON.stringify(gistData)) → localSnapshot = null (gistData was nulled). mergeGistData(null, remote) returns deep-copy of remote (since `if (!local) return remote`). gistData = merged → gistData restored to remote contents post-disconnect (BUG #1). await gistWrite(gistData) → gistWrite's `if (!gistToken || !gistId) return` no-ops, the PATCH never happens, user's pending mutations never reach Gist (BUG #2 — M6's stated fix completely broken). lsSetSafe writes the remote contents to LS (BUG #3 — stale data left in LS post-disconnect). _gistProgressDirtyLocal = false; localStorage.removeItem(GIST_PROGRESS_DIRTY_LS_KEY) — clears dirty (acceptable since the user is disconnecting). setSyncStatus('ok', 'Synced') overwrites the 'off'/'Not synced' that disconnectGist set (BUG #4 — UI lies about state). The fix awaits both flushes; the syncs complete in full while creds are still valid, then disconnectGist proceeds with the cred-clearing teardown. Try/catch wraps each await so a network failure doesn't abort the disconnect. Logout's analogous pattern at line 9119 is unaffected because logout doesn't clear gistToken/gistId — credentials persist through the operation, so the gistRead-then-gistWrite flow uses them throughout. Found during the post-Cloud-Sync-scan audit; A2 (M2 cleanup unreachable on last study removal) and A3 (L2 error preservation breaking airplane toggle) follow.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync audit A2: clean up source:'study' notes when removing the LAST study. M2 widened the inner `if (gistData)` guard inside loadRepertoireTrie, but the function early-returns at line 19942 when getRepertoireConfig().length === 0 — meaning the cleanup branch I widened is never reached when the user removes their last study. M2's stated repro ("import a study with comments, observe notes appear; remove the study from Settings; reload; notes still there permanently") is therefore not actually fixed for the "remove last study" sub-case — only the "remove a study but keep at least one other" sub-case where the trie loop still runs. Fix adds an explicit cleanup branch before the early return: when studies.length === 0 and gistData?.notes exists, iterate notes and delete any with source==='study', track the count, and trigger debounceSyncToGist if any were cleaned. Mirrors the M2 logic exactly but lives in the early-return branch. This closes the actual repro: user removes their last study → loadRepertoireTrie called → studies.length===0 → cleanup runs → stale notes deleted → debounceSyncToGist propagates the deletion to Gist → next session loadFromGist sees no source:'study' notes → cycle broken. Found during the post-Cloud-Sync-scan audit; A1 already landed; A3 (L2 error preservation breaking airplane toggle) follows.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -19943,6 +19943,26 @@ async function loadRepertoireTrie() {
     repertoireTrie = null;
     repertoireDeviations = [];
     repertoireGaps = [];
+    // A2 fix: clean up any source:'study' notes when removing the last
+    // study. The M2 cleanup loop further down is unreachable from here
+    // (early return), so without this branch the user removes their
+    // last study, those notes stay in gistData.notes forever, and the
+    // next loadRepertoireTrie call early-returns again — permanent loop
+    // that M2's repro ("remove the study, reload, notes still there")
+    // identified but didn't actually fix.
+    if (gistData?.notes) {
+      let cleaned = 0;
+      for (const [key, note] of Object.entries(gistData.notes)) {
+        if (note.source === 'study') {
+          delete gistData.notes[key];
+          cleaned++;
+        }
+      }
+      if (cleaned > 0) {
+        console.log(`[Repertoire] Cleaned ${cleaned} stale study notes (no studies configured)`);
+        debounceSyncToGist();
+      }
+    }
     return;
   }
 
