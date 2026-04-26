@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync audit A2: clean up source:'study' notes when removing the LAST study. M2 widened the inner `if (gistData)` guard inside loadRepertoireTrie, but the function early-returns at line 19942 when getRepertoireConfig().length === 0 — meaning the cleanup branch I widened is never reached when the user removes their last study. M2's stated repro ("import a study with comments, observe notes appear; remove the study from Settings; reload; notes still there permanently") is therefore not actually fixed for the "remove last study" sub-case — only the "remove a study but keep at least one other" sub-case where the trie loop still runs. Fix adds an explicit cleanup branch before the early return: when studies.length === 0 and gistData?.notes exists, iterate notes and delete any with source==='study', track the count, and trigger debounceSyncToGist if any were cleaned. Mirrors the M2 logic exactly but lives in the early-return branch. This closes the actual repro: user removes their last study → loadRepertoireTrie called → studies.length===0 → cleanup runs → stale notes deleted → debounceSyncToGist propagates the deletion to Gist → next session loadFromGist sees no source:'study' notes → cycle broken. Found during the post-Cloud-Sync-scan audit; A1 already landed; A3 (L2 error preservation breaking airplane toggle) follows.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync audit A3: move L2's error-preservation from updateSyncStatusForAirplane into showMainApp's call site. The L2 fix added `if (dot && dot.classList.contains('error')) return;` at the top of updateSyncStatusForAirplane to prevent showMainApp's blanket 'ok'/'Synced' from overwriting H3's cold-start error indicator. But updateSyncStatusForAirplane has another caller — the airplane toggle handler (line 3611) — and that caller now also short-circuits when error is set. User flow: cold-start fails → 'Progress unavailable — refresh when online' shown → user toggles airplane on → expects '✈ Offline' indicator → instead the error indicator stays. The airplane toggle is an explicit user action; the indicator should reflect that immediately. Fix: revert updateSyncStatusForAirplane to its original simple unconditional logic, move the error-preservation check to showMainApp's call site as a per-call gate. Now showMainApp post-fetch preserves error (the actual L2 use case), and the airplane toggle can flip status normally regardless of stale error indicators. The error indicator is still cleared on the next successful sync (syncToGist's setSyncStatus('ok') call) or any other explicit setSyncStatus invocation, so this doesn't introduce a "stuck error" risk for non-airplane paths. Reading the live DOM via classList.contains preserves the original L2 design choice of avoiding a parallel JS variable. Found during the post-Cloud-Sync-scan audit; A1 + A2 already landed; the audit also flagged A4-A7 as Low-priority items (eval cache merge asymmetry, debounce LS-write perf, syncToGist read-failure no-retry, mergeGistData _clearedAt — all noted as known limitations, may or may not be addressed depending on priority).</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3235,18 +3235,12 @@ function setSyncStatus(state, label) {
 }
 
 function updateSyncStatusForAirplane() {
-  // L2+L3: this is the single source of truth for "what status should the
-  // indicator show given the current configured state?" — used both by the
-  // airplane toggle and by showMainApp post-fetchGames. Preserves an existing
-  // 'error' state because the caller may have set it intentionally (e.g.,
-  // H3's cold-start progress-load failure path) and the unconditional
-  // 'ok'/'Synced' override would mislead the user into thinking everything
-  // is fine when their progress data didn't load. The dot.classList.contains
-  // check reads the actual DOM rather than tracking a parallel JS variable
-  // so there's no risk of drift between "what we think we set" and "what's
-  // actually shown."
-  const dot = document.getElementById('syncDot');
-  if (dot && dot.classList.contains('error')) return;
+  // Single source of truth for "what status should the indicator show given
+  // the current configured state?" — used by the airplane toggle and by
+  // showMainApp post-fetchGames. Always sets the appropriate state based on
+  // current config; callers that want to preserve an existing 'error' state
+  // (e.g., showMainApp not overriding H3's cold-start failure status) must
+  // check before calling.
   if (airplaneMode) {
     setSyncStatus('off', '✈ Offline');
   } else if (isGistConfigured()) {
@@ -11382,11 +11376,16 @@ function showMainApp() {
   document.getElementById('syncStatus').classList.remove('hidden');
   document.body.classList.add('mobile-browsing');
 
-  // L3: consolidate to the single source of truth in updateSyncStatusForAirplane,
-  // which now also preserves any 'error' state from prior async failures (H3
-  // cold-start no-fallback, gistRead network failure, sync rejection, etc.) so
-  // the user sees the actual state instead of a misleading 'Synced'.
-  updateSyncStatusForAirplane();
+  // L3 + A3: consolidate to updateSyncStatusForAirplane, but preserve any
+  // 'error' state already set by an earlier async path (H3 cold-start
+  // progress-load failure, etc.) so the user sees the actual state instead
+  // of a misleading 'Synced'. The check is per-call here rather than inside
+  // the helper so other callers (airplane toggle) can flip status normally
+  // without being blocked by a stale error indicator.
+  const _syncDot = document.getElementById('syncDot');
+  if (!_syncDot || !_syncDot.classList.contains('error')) {
+    updateSyncStatusForAirplane();
+  }
 
   sessionTotal = filteredMistakes.length;
   sessionCompleted = 0;
