@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">SRS scan SRS-1: persist srsRecorded across continuation session resume so advantage drills can grade after an interrupt-and-resume cycle. The previous resumeContSession set srsRecorded=true unconditionally to prevent double-grading on resumed mistakes/tactics (correct for those — they record on first wrong attempt, so the flag is always true by save time). For advantage items, srsRecorded is only set inside finishAdvantage at drill end, so an interrupted advantage drill saved with srsRecorded=false. On resume, the unconditional true forced finishAdvantage's `if (grade !== null && !srsRecorded)` check to skip the grade, leaving the card in state:new forever even after a successful conversion on the resumed attempt. The fix persists the live srsRecorded value as srsRecordedAtSave in the session blob, and restores from it on resume (defaulting to true for old sessions saved before this fix, to preserve the safer no-double-grade behavior for those). Mistake/tactic resume paths are unaffected because srsRecorded is already true by save time in normal flows. Interaction with the advantage 'interrupted' grade=null branch: that branch already skips recordReview regardless of srsRecorded, so resuming an interrupted-with-grade=null drill and then completing it still works correctly under the new logic. Found during the SRS scan; SRS-2 (UTC-vs-local-date scheduling drift) is the other High item and lands separately.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">SRS scan SRS-2: switch FSRS due-date scheduling from UTC dates to local dates so card timing matches the user's local midnight rollover. The previous implementation computed `due = toISOString().split('T')[0]` and compared against `today = toISOString().split('T')[0]` — both in UTC. For any user not in UTC, this drifted intervals by up to ±12h depending on time of day: a California user grading at 11:30 PM local has UTC `today` = next day already, so a "1 day" interval would become due at next-afternoon-local (~16h later); same user grading at 6 AM local has UTC `today` = current day, so "1 day" becomes due next-morning-local (~12h later). Drift is largest proportionally for short intervals but applies to all of them. The fix introduces a localDateString(d?) helper using getFullYear/getMonth/getDate, and updates all four call sites: fsrs_review's due-write, isDue's today-read, buildReviewQueue's (dead-but-now-removed) today const, and renderReviewList's overdue check. Locally-set due strings are still YYYY-MM-DD so the existing string comparison (`card.due <= today`) keeps working without schema migration. Cross-device users in different timezones could see ±1 day inconsistency on the comparison (Device A in UTC+0 and Device B in UTC+12 compute different "today" strings for the same instant); this is acceptable for typical single-timezone usage and avoids the wholesale UTC drift for everyone. Existing UTC-stored due values keep working — the comparison treats any YYYY-MM-DD string consistently — and on the next grade for any card, its due will be rewritten in local-date form. Brief one-time desync during the transition session: a card stored with UTC due="2026-04-30" might surface a few hours later than expected for a far-from-UTC user, but only this one time per card; subsequent re-grades produce consistent local-date due values. Found during the SRS scan; SRS-1 landed in the previous commit.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2392,6 +2392,23 @@ function fsrs_newCard() {
            reps: 0, lapses: 0, lastReview: null, elapsedDays: 0, scheduledDays: 0 };
 }
 
+// SRS-2: local-date string in YYYY-MM-DD form (uses the device's local timezone,
+// not UTC). Used as both the comparison "today" in isDue and the persisted "due"
+// in fsrs_review so the comparison sides always match. The previous UTC-based
+// implementation drifted scheduling by up to ±12h depending on the user's
+// timezone and time of day — short intervals (1 day) could be honored anywhere
+// from ~7h to ~36h after the review. Local-date keeps "1 day later" consistent
+// at the user's local midnight rollover. Cross-device users in different
+// timezones could see ±1 day inconsistency on the comparison; acceptable
+// trade-off for typical single-timezone usage.
+function localDateString(d) {
+  d = d || new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
 function fsrs_review(card, grade, now) {
   now = now || new Date();
   const c = { ...card };
@@ -2427,7 +2444,7 @@ function fsrs_review(card, grade, now) {
   ivl = Math.min(ivl, 365);
   c.scheduledDays = ivl;
   c.lastReview = now.toISOString();
-  c.due = new Date(now.getTime() + ivl * 86400000).toISOString().split('T')[0];
+  c.due = localDateString(new Date(now.getTime() + ivl * 86400000));
   return c;
 }
 
@@ -2457,12 +2474,11 @@ function isDue(pid) {
   const card = getCardForPosition(pid);
   if (card.state === FSRS_STATE.new) return true;
   if (!card.due) return true;
-  const today = new Date().toISOString().split('T')[0];
+  const today = localDateString();
   return card.due <= today;
 }
 
 function buildReviewQueue() {
-  const today = new Date().toISOString().split('T')[0];
   reviewQueue = filteredMistakes.filter(m => isDue(posId(m)));
   // Sort: overdue first (by due date), then new positions
   reviewQueue.sort((a, b) => {
@@ -11732,7 +11748,7 @@ function renderReviewList() {
     return;
   }
 
-  const today = new Date().toISOString().split('T')[0];
+  const today = localDateString();
   const visibleReviewItems = reviewQueue.slice(0, reviewListDisplayLimit);
 
   for (const m of visibleReviewItems) {
