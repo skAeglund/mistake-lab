@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">SRS scan SRS-3: remove dead-code branch from fsrs_review again-interval calc. The branch was `ivl = c.state === FSRS_STATE.new ? 0 : Math.max(1, Math.round(c.stability * 0.5))`, but by the time this line ran the state had already been reassigned at lines ~2405 (new+again → learning) and ~2413 (existing+again → relearning), so `c.state === new` was permanently false. Behavior didn't diverge: the dead arm would have produced ivl=0, which the next line's `ivl = Math.min(ivl, 365)` doesn't clamp upward, but the original `Math.max(1, ...)` outside this branch — actually let me restate: the surviving arm computes `Math.max(1, round(0.5 * fsrs_s0(again)))` = max(1, round(0.5 * 0.40255)) = max(1, 0) = 1, which is what the user actually got. The dead arm was meant to enable same-day re-review (ivl=0 → due=today → card re-surfaces in current session) for new cards graded Again — an unimplemented FSRS-5 short-term scheduler feature that doesn't apply to chess training anyway because srsRecorded locks first-attempt grades. The fix simplifies to just `ivl = Math.max(1, Math.round(c.stability * 0.5))` with a comment explaining why the new+again same-day case is intentionally not handled. No schema migration; no behavioral change to existing cards. Found during the SRS scan; SRS-1 and SRS-2 landed in previous commits.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">SRS scan SRS-4: document FSRS_W[17] and FSRS_W[18] as reserved for the unimplemented FSRS-5 short-term scheduler. The header was labeled "FSRS-5 Algorithm" but only the long-term scheduler is implemented — w[17] and w[18] are defined in the FSRS_W array but never read. In FSRS-5, those two weights drive the short-term update `S' = S * exp(w[17] * (G - 3 + w[18]))`, used when a card in learning/relearning state gets re-rated in the same session. Chess-mistake training is single-rating per session by design (srsRecorded locks the first-attempt grade across retries), so the short-term path is structurally unreachable. No code change needed; just rename the section header to "FSRS Algorithm (long-term scheduler only)" and add a comment by w[17]/w[18] explaining they're kept aligned with upstream FSRS-5's 19-weight layout so a future trained-weights swap stays a one-line change. Found during the SRS scan; SRS-1, SRS-2, SRS-3 landed in previous commits.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2342,11 +2342,24 @@ function sfLog(fn, msg, data) {
   else console.log(`[SF:${fn}] ${msg}`);
 }
 
-// ─── FSRS-5 Algorithm ───
+// ─── FSRS Algorithm (long-term scheduler only) ───
+// SRS-4: this is the FSRS-5 long-term path. The published 19-weight default
+// values from the FSRS-5 community-trained set are kept here in full, but
+// w[17] and w[18] are unused by this codebase: they're reserved for the
+// FSRS-5 short-term scheduler (`S' = S * exp(w[17] * (G - 3 + w[18]))`),
+// which applies to same-day re-reviews while a card is in learning or
+// relearning state. Chess-mistake training never re-reviews the same card
+// in the same session — srsRecorded locks the first-attempt grade and
+// retries don't re-record — so the short-term path is structurally
+// unreachable. The full 19-weight array is preserved so swapping in a new
+// trained weight set from upstream FSRS-5 stays a one-line change.
 const FSRS_W = [
   0.40255, 1.18385, 3.173, 15.69105, 7.1949, 0.5345, 1.4604, 0.0046,
   1.54575, 0.1192, 1.01925, 1.9395, 0.11, 0.29605, 2.2698, 0.2315,
-  2.9898, 0.51655, 0.6621,
+  2.9898,
+  // w[17] and w[18] below: short-term scheduler weights, not consumed by
+  // this codebase. Keep aligned with the upstream 19-weight FSRS-5 layout.
+  0.51655, 0.6621,
 ];
 const FSRS_F = 19.0 / 81.0;
 const FSRS_C = -0.5;
