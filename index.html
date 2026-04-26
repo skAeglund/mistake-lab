@@ -1643,7 +1643,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync L7: enable keepalive on flush-time fetches so pagehide/beforeunload syncs actually complete. The previous gistWrite and syncEvalCacheToGist PATCHes used plain fetch(), and browsers cancel non-keepalive fetches when the page unloads — flushPendingSyncs's "best-effort" comment was overstating the reliability. Most page unloads silently dropped the request even though the user expected the H2/M3 LS-write side to have already preserved the in-memory state (which it does — the loss was in the upstream Gist propagation, not LS). Adding keepalive: true tells the browser to hold the request alive (up to a 64KB browser-enforced body cap) until it completes even after the page is gone. Body-size guard via .length < 65536 because a user with thousands of positions can produce gistData JSON that exceeds the cap; keepalive falls back to plain fetch in that case (terminates on unload but works fine for normal in-session syncs which are most of the call volume). Eval cache hits the cap more aggressively because eval entries are large (5KB+ per cached position with full PVs) — typically only the first ~10 entries fit — but unload-survival for any subset is strictly better than the previous all-or-nothing cancellation. The body-length measurement uses the JSON string length directly (UTF-8 byte count is at most string-length × 4 in the worst case, but for our content which is mostly ASCII it's effectively == string-length, and the < 65536 threshold is conservative for the cap). Found during the Cloud Sync / Gist scan; only L8 (schema-init duplication) remains.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Cloud Sync L8: extract ensureGistData() helper to consolidate the 9-site lazy-init pattern. The pattern `if (!gistData) gistData = { positions: {}, notes: {}, version: 1 };` was duplicated at 9 callers across the file (recordReview, the practice-mistake / practice-tactic / practice-scoreboard / repertoire-customDeviation / repertoire-dismissed / note-save mutation paths, etc.). Each site had to know the full default shape, and adding a new top-level field — say a future `cleared.dismissedAt` for the H2/M3 known limitation around restoreDismissedRepertoire round-trips — would require touching all 9 sites with the risk of one being missed and silently producing inconsistent gistData shapes across mutation paths. The new helper centralizes the shape; future schema additions go in one place. Returns gistData so callers can chain (`const data = ensureGistData(); data.foo = ...`) although none of the current callers use that — the pattern continues with bare `gistData.foo = ...` for diff minimality. Helper is declared right next to the `let gistData = null` declaration so the relationship is obvious. No behavior change: the `if (!gistData) ... ` check was always synchronous and inline, and ensureGistData() runs in the same synchronous context referring to the same module-level `gistData` binding — no race introduced. Sed-based bulk replace did the substitution; one caveat caught and fixed: the regex matched the helper's own body, briefly producing `function ensureGistData() { ensureGistData(); return gistData; }` (infinite recursion); restored the body via str_replace before validation. Found during the Cloud Sync / Gist scan; this is the final item in the queue. SCAN COMPLETE: H1, H2, H3, M1, M2, M3, M4, M5, M6, L1, L2, L3, L4, L5, L6, L7, L8 — all landed plus the cache-first phase-2 merge that paired with H2/M3. Known limitation deferred for a future targeted fix: per-array _clearedAt timestamps to disambiguate "remote previously had X, local explicitly removed it" from "never had X" in the dismissed/customDeviations/studies merge paths — affects long-disconnected-session edge cases only.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2440,7 +2440,7 @@ function getCardForPosition(pid) {
 function recordReview(pid, grade) {
   const card = getCardForPosition(pid);
   const updated = fsrs_review(card, grade);
-  if (!gistData) gistData = { positions: {}, notes: {}, version: 1 };
+  ensureGistData();
   if (!gistData.positions[pid]) gistData.positions[pid] = {};
   gistData.positions[pid].completed = true;
   gistData.positions[pid].lastSeen = new Date().toISOString();
@@ -2482,6 +2482,16 @@ function buildReviewQueue() {
 let gistToken = localStorage.getItem('mistakelab_gist_token') || '';
 let gistId = localStorage.getItem('mistakelab_gist_id') || '';
 let gistData = null; // { positions: { posId: { completed, ... } }, version: 1 }
+// L8: single source of truth for gistData lazy-init shape. Nine inline
+// sites previously duplicated `if (!gistData) gistData = { positions: {},
+// notes: {}, version: 1 };` — easy to forget a key when adding a new
+// top-level field. ensureGistData() centralizes the default shape; future
+// schema additions go in one place. Returns the (possibly fresh) gistData
+// so callers can chain.
+function ensureGistData() {
+  if (!gistData) gistData = { positions: {}, notes: {}, version: 1 };
+  return gistData;
+}
 let airplaneMode = localStorage.getItem('airplaneMode') === 'true';
 let postProgressOnReturn = localStorage.getItem('postProgressOnReturn') !== 'false';
 let instantFeedback = localStorage.getItem('instantFeedback') !== 'false'; // default true
@@ -2545,7 +2555,7 @@ function markCompleted(pid) {
   s.add(pid);
   localStorage.setItem(getCompletedKey(), JSON.stringify([...s]));
   // Update gist data and schedule sync
-  if (!gistData) gistData = { positions: {}, notes: {}, version: 1 };
+  ensureGistData();
   gistData.positions[pid] = {
     ...gistData.positions[pid],
     completed: true,
@@ -2582,7 +2592,7 @@ function getInvalidatedTactics() {
   return s;
 }
 function invalidateTactic(pid) {
-  if (!gistData) gistData = { positions: {}, notes: {}, version: 1 };
+  ensureGistData();
   if (!gistData.positions[pid]) gistData.positions[pid] = {};
   gistData.positions[pid].invalidated = true;
   debounceSyncToGist();
@@ -2598,7 +2608,7 @@ function getInvalidatedMistakes() {
   return s;
 }
 function invalidateMistake(pid) {
-  if (!gistData) gistData = { positions: {}, notes: {}, version: 1 };
+  ensureGistData();
   if (!gistData.positions[pid]) gistData.positions[pid] = {};
   gistData.positions[pid].invalidated = true;
   debounceSyncToGist();
@@ -2738,7 +2748,7 @@ function getInvalidatedLines(pid) {
   return new Set(gistData.positions[pid].invalidatedLines);
 }
 function invalidateLine(pid, fingerprint) {
-  if (!gistData) gistData = { positions: {}, notes: {}, version: 1 };
+  ensureGistData();
   if (!gistData.positions[pid]) gistData.positions[pid] = {};
   const lines = gistData.positions[pid].invalidatedLines || [];
   if (!lines.includes(fingerprint)) {
@@ -16453,7 +16463,7 @@ function cleanupPracticeCont() {
 
 function recordPracticeResult(result, finalCpWhite) {
   if (!practiceContItem) return;
-  if (!gistData) gistData = { positions: {}, notes: {}, version: 1 };
+  ensureGistData();
   if (!gistData.practiceScoreboard) gistData.practiceScoreboard = {};
   const posKey = fenPositionKey(practiceContItem.fenBefore);
   if (!gistData.practiceScoreboard[posKey]) gistData.practiceScoreboard[posKey] = [];
@@ -16528,7 +16538,7 @@ function savePracticeMistake(moveIdx) {
     : (filteredMistakes[currentMistakeIdx]?.playerColor || 'white');
 
   // Dedup: check if already saved (same fenBefore + same move)
-  if (!gistData) gistData = { positions: {}, notes: {}, version: 1 };
+  ensureGistData();
   if (!gistData.practiceMistakes) gistData.practiceMistakes = [];
   const already = gistData.practiceMistakes.some(pm =>
     pm.fenBefore === fenBefore && pm.sanPlayed === mv.san
@@ -16606,7 +16616,7 @@ function savePracticeTactic(cand) {
   const ply = (moveNum - 1) * 2 + (fenParts[1] === 'b' ? 1 : 0);
   const playerColor = cand.playerColor || 'white';
 
-  if (!gistData) gistData = { positions: {}, notes: {}, version: 1 };
+  ensureGistData();
   if (!gistData.practiceTactics) gistData.practiceTactics = [];
 
   // Dedup by fenBefore + primary chain UCI signature
@@ -19884,7 +19894,7 @@ function getRepertoireConfig() {
 }
 
 function setRepertoireConfig(studies) {
-  if (!gistData) gistData = { positions: {}, notes: {}, version: 1 };
+  ensureGistData();
   if (!gistData.repertoire) gistData.repertoire = {};
   gistData.repertoire.studies = studies;
   debounceSyncToGist();
