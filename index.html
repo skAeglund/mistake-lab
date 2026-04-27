@@ -1123,6 +1123,22 @@
   }
   @media (min-width: 769px) { .line-nav-bar { display: none !important; } }
 
+  /* 4.1 / 4.2: voice indicator stacking overrides.
+     The indicator (#voiceMicIndicator) is created in JS with inline styles
+     (position:fixed; bottom:70px; right:12px; z-index:9999), so these rules
+     need !important to win against the inline cascade.
+
+     4.2 — when the line-nav-bar is showing (120px tall, fixed at bottom:0),
+     lift the indicator above the bar. Otherwise the bar's right ‹› button is
+     partially obscured by the indicator (which sits at bottom 70-114px and
+     wins hit-testing thanks to z-index 9999 vs the bar's 60).
+
+     4.1 — when ANY modal-backdrop is visible (settings, detected-tactics),
+     hide the indicator. Without this it floats on top of the modal's content
+     at z-9999 and steals taps near the modal's right edge. */
+  body.line-nav-active #voiceMicIndicator { bottom: 132px !important; }
+  body:has(.modal-backdrop:not(.hidden)) #voiceMicIndicator { display: none !important; }
+
   /* Continuation line subtitle: hidden by default, shown on mobile via media query */
   .cont-mobile-extra, .cont-mobile-subtitle, .cont-stop-mobile { display: none; }
 
@@ -1131,14 +1147,14 @@
     display: none; /* shown only via media query */
     align-items: center;
     justify-content: space-between;
-    padding: 6px 10px;
+    padding: 3px 10px;  /* 3.4: was 6px — buttons grew to 44, this keeps toolbar ≈50px tall */
     background: var(--bg-panel);
     border-bottom: 1px solid var(--border);
     position: sticky; top: 0; z-index: 50;
     min-height: 44px;
   }
   .mobile-toolbar-btn {
-    width: 38px; height: 38px; border-radius: 8px;
+    width: 44px; height: 44px; border-radius: 8px;  /* 3.4: 38→44 for tap-target minimum */
     border: 1px solid var(--border); background: transparent;
     color: var(--text-secondary); font-size: 18px;
     display: flex; align-items: center; justify-content: center;
@@ -1150,7 +1166,7 @@
     display: flex; align-items: center; gap: 2px;
   }
   .mobile-toolbar-nav .nav-btn {
-    width: 36px; height: 36px; border-radius: 8px;
+    width: 44px; height: 44px; border-radius: 8px;  /* 3.4: 36→44 for tap-target minimum */
     border: 1px solid var(--border); background: transparent;
     color: var(--text-secondary); font-size: 18px; font-weight: 700;
     display: flex; align-items: center; justify-content: center;
@@ -1185,13 +1201,12 @@
     z-index: 199;
     -webkit-tap-highlight-color: transparent;
   }
-  body.drawer-open .drawer-backdrop { display: block; }
-  body.drawer-open { overflow: hidden; }
+  /* (body.drawer-open rules moved into @media (max-width: 768px) below — see 2.1) */
 
   /* ─── Drawer close button (inside panel-left) ─── */
   .drawer-close-btn {
     display: none; /* shown only via media query */
-    width: 32px; height: 32px; border-radius: 6px;
+    width: 44px; height: 44px; border-radius: 8px;  /* 2.4: 32→44 for tap-target minimum */
     border: 1px solid var(--border); background: transparent;
     color: var(--text-secondary); font-size: 18px;
     align-items: center; justify-content: center;
@@ -1233,6 +1248,13 @@
       transform: translateX(0);
     }
 
+    /* 2.1: drawer-state-driven body chrome — scoped to mobile so a landscape
+       rotation past 768px doesn't leave the body scroll-locked behind a black
+       backdrop. (Previously these two rules lived outside @media and "leaked"
+       to desktop on rotation, since the breakpoint can change mid-session.) */
+    body.drawer-open .drawer-backdrop { display: block; }
+    body.drawer-open { overflow: hidden; }
+
     /* Center panel: board-focused, compact */
     .panel-center {
       padding: 6px 2px !important;
@@ -1254,7 +1276,12 @@
       flex-wrap: wrap;
       justify-content: center;
     }
-    .position-nav .btn-sm { padding: 6px 10px; font-size: 11px; }
+    /* 5.5: bump buttons inside position-nav to a proper tap target on mobile.
+       These were 6px/10px padding + font 11 → ~25×60 buttons (well under 44).
+       With Skip / Hint / Note / Retry / Analysis / View Game potentially all
+       visible, two rows of 44px buttons add ~16px vs the old layout, but
+       buttons are now confidently tappable. */
+    .position-nav .btn-sm { padding: 10px 14px; font-size: 12px; min-height: 44px; }
     .position-counter { min-width: auto; font-size: 12px; display: none; }
     .position-nav-arrows { display: none; }
 
@@ -1337,6 +1364,16 @@
     .header { padding: 10px 14px; }
     .header-title { font-size: 14px; }
 
+    /* 5.2: trim mobile header content to fit a 360px-wide phone.
+       - Hide the " / review trainer" subtitle (decorative)
+       - Hide the 140px-wide progress-bar-track (keep the "X/Y" text)
+       - Hide #btnLogout — logout is now reachable via Settings → Change user (7.5)
+       Without these, header-right's intrinsic width (~370px) plus title (~180px)
+       overflows the viewport with overflow-x:hidden on body, clipping content. */
+    .header-title span { display: none; }
+    .session-progress .progress-bar-track { display: none; }
+    #btnLogout { display: none; }
+
     /* Modal adjustments */
     .modal { padding: 20px; }
 
@@ -1402,6 +1439,14 @@
 
   /* Toggle switch */
   .toggle-switch { position: relative; display: inline-block; width: 38px; height: 22px; }
+  /* 5.3: invisible tap-area expansion so the switch hits the WCAG/HIG 44×44
+     minimum without growing the visual track. Extends 11px above/below and
+     3px on each side. The label has position:relative, so this pseudo covers
+     just the label's bounding box plus the extension. */
+  .toggle-switch::after {
+    content: ''; position: absolute;
+    top: -11px; left: -3px; right: -3px; bottom: -11px;
+  }
   .toggle-switch input { opacity: 0; width: 0; height: 0; }
   .toggle-track {
     position: absolute; inset: 0; cursor: pointer; border-radius: 22px;
@@ -1423,6 +1468,9 @@
   .modal {
     background: var(--bg-panel); border: 1px solid var(--border);
     border-radius: 12px; padding: 28px; width: 440px; max-width: 90vw;
+    max-height: 85vh;
+    max-height: 85dvh;  /* dvh tracks the visible viewport (keyboard up shrinks it on Android) */
+    overflow-y: auto;
   }
   .modal h3 {
     font-size: 16px; font-weight: 700; margin-bottom: 16px;
@@ -1443,6 +1491,18 @@
   }
   .modal-actions {
     display: flex; gap: 8px; margin-top: 20px; justify-content: flex-end;
+    /* 7.4: defensive wrap so action buttons don't overflow narrow modals.
+       Settings modal has 4 buttons (~414px content) which exceeds the 248px
+       inner width on 320px-class phones. */
+    flex-wrap: wrap;
+  }
+  /* 7.4: at 320px-class viewports even wrapping looks awkward (Change user
+     ends up alone with margin-right:auto creating a huge gap). Stack buttons
+     vertically full-width. The button[style*="margin-right"] selector targets
+     the inline-styled "Change user" button to override its margin-right:auto. */
+  @media (max-width: 380px) {
+    .modal-actions { flex-direction: column; align-items: stretch; }
+    .modal-actions > button[style*="margin-right"] { margin-right: 0 !important; }
   }
 
   /* Gist setup on login */
@@ -1533,6 +1593,12 @@
   .cont-settings-toggle {
     position: relative; width: 32px; height: 18px; flex-shrink: 0;
     display: inline-block; cursor: pointer;
+  }
+  /* 5.4: invisible tap-area expansion to 44×44 (WCAG/HIG minimum) without
+     growing the visual track. Same pattern as .toggle-switch — see 5.3. */
+  .cont-settings-toggle::after {
+    content: ''; position: absolute;
+    top: -13px; left: -6px; right: -6px; bottom: -13px;
   }
   .cont-settings-toggle input {
     position: absolute; opacity: 0; width: 0; height: 0;
@@ -1631,7 +1697,7 @@
     <details>
       <summary>☁ Set up cloud sync (optional)</summary>
       <div class="gist-fields">
-        <input type="text" id="gistTokenInput" placeholder="GitHub personal access token (gist scope)"
+        <input type="password" id="gistTokenInput" placeholder="GitHub personal access token (gist scope)"
                value="">
         <input type="text" id="gistIdInput" placeholder="Gist ID (leave empty to create new)"
                value="">
@@ -1643,7 +1709,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">SRS scan SRS-11: console.warn when fsrs_review's elapsed clamp triggers (negative elapsed clipped to 0). The Math.max(0, rawElapsed) clamp itself is correct defensive behavior — avoids NaN-like downstream propagation if elapsed went negative AND prevents fsrs_retrievability from inflating beyond 1.0 (which would make stability barely grow on success while fail still penalizes; net under-reward of the user's review). The clamp activates when lastReview is in the future relative to "now" — system clock moved backwards (timezone change, NTP resync, manual edit) or a different device wrote the card with a clock ahead of this one. Previously the clamp was silent, so any clock-skew-driven scheduling weirdness left no debug trail. Logs the offending lastReview ISO string and the negative delta. SRS-10 (corrupt s=0 stability stays at 0 forever) is now subsumed by SRS-8's getCardForPosition validator — `srs.stability <= 0` triggers the reset path, so an s=0 card resets to fresh on next access. SRS-9 (test injection orphan SRS records) deferred — not a current defect since test items are in allMistakes and SRS records correctly correspond; cleanup belongs in the test-injection-removal commit. SRS-12, SRS-13, SRS-14, SRS-15 deferred pending intent confirmation; flagged in scan summary. All Highs and Mediums (except SRS-5 doc-only) plus SRS-11 landed.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Mobile UX scan: 24 fixes. SEVERE: 8.2 sw.js v2 — precache app shell + Stockfish, cache-first for cross-origin CDN deps + Maia ONNX, network-first for HTML, removed .onnx/.wasm skip; 5.1 base .modal max-height 85dvh + overflow-y auto so settings buttons stay reachable; 5.2 hide subtitle / progress-bar-track / btnLogout on mobile to fit 360px viewport; 7.1 closeDrawer at top of openSettings so the modal doesn't open behind the drawer-backdrop (z-199 over modal-backdrop z-100); 7.5 added Change user button to settings modal action row — logout was previously unreachable in mobile-training (where the entire header is hidden). BUGS: 1.4/4.2 voice indicator z-9999 lifted above line-nav-bar (bottom: 132px) and hidden behind any modal-backdrop via :has(); 2.1 moved body.drawer-open rules into mobile @media so landscape rotation past 768px doesn't leave a stuck black overlay; 2.2/2.3 closeDrawer in loadPosition + activatePanelTab so drawer closes on item / tab tap; 2.4/3.4 tap targets to 44×44 (drawer-close-btn 32→44, mobile-toolbar-btn 38→44, nav-btn 36→44 with toolbar padding 6→3 to keep total height stable); 3.1 tap-to-premove on mobile during opponent's turn — mirrors onDrop's premove branch in onBoardClick's tap path so taps on user pieces during opp's turn no longer fall through silently; 5.3/5.4 invisible ::after pseudo for 44×44 tap area on toggle-switch and cont-settings-toggle while keeping the visual track small (math: extensions stay within parent margins so no neighbor-row hit-test bleed); 6.1 null-guard the resize handler so post-logout rotation doesn't throw on boardObj.resize; 7.3 login token input type=text→password (matches settings modal); 7.4 modal-actions flex-wrap + 380px-class column layout so 4 buttons don't overflow on 320px phones; 4.1 voice indicator hidden behind any open modal-backdrop. IMPROVEMENTS: 5.5 position-nav buttons bumped to min-height 44 with padding 10/14 on mobile; 1.9/6.3 rAF-throttle the resize handler so rotation animations don't fire 60×/s of board.resize+renderArrows; 8.1 best-effort screen wake lock on showMainApp + visibilitychange-visible re-acquire (with post-await guard against logout-during-acquire race so the sentinel isn't leaked); 8.4 dedicated pauseEvalWorkerForVisibility helper that terminates evalSfWorker on hidden while preserving evalSfResult so the bar shows the previous value when the tab returns (re-init lazily on next requestEvalWorkerAnalysis); 8.3 mobile Stockfish hash default 256→128 MB to relieve OOM pressure on 3-4 GB Android (power of 2 to match the settings slider's integer-log2 increments — first pass set 96 which round-trip-mismatched the slider, caught in scan); 8.6 deferred Maia 43.5 MB cold-start prefetch — lazy chain via compileMaia → await prefetchMaia handles first continuation, with sw.js v2 caching subsequent visits. All edits validated: index.html JS syntax, sw.js JS syntax, CSS brace balance 469/469, HTML tag balance unchanged from HEAD.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1865,7 +1931,7 @@
 <!-- Detected tactics review modal (Step 5) -->
 <div class="modal-backdrop hidden" id="detectedTacticsModal"
      onclick="if(event.target===this)closeDetectedTacticsModal()">
-  <div class="modal" style="width:560px;max-width:92vw;max-height:85vh;overflow-y:auto;">
+  <div class="modal" style="width:560px;max-width:92vw;">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
       <h3 style="margin:0;">⚡ Detected Tactics</h3>
       <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="closeDetectedTacticsModal()">✕</button>
@@ -1952,6 +2018,8 @@
       </div>
     </div>
     <div class="modal-actions">
+      <button class="btn btn-ghost btn-sm" onclick="closeSettings(); logout();"
+              style="border-color:var(--red);color:var(--red);margin-right:auto;">Change user</button>
       <button class="btn btn-ghost btn-sm" onclick="disconnectGist()">Disconnect</button>
       <button class="btn btn-ghost btn-sm" onclick="closeSettings()">Cancel</button>
       <button class="btn btn-primary btn-sm" onclick="saveSettingsGist()">Save & Sync</button>
@@ -2024,7 +2092,14 @@ let firstAttemptFailed = false;  // tracks if first try on current position was 
 let srsRecorded = false;         // true after SRS grade is recorded; prevents retry from re-grading
 let evalBarEnabled = localStorage.getItem('evalBarEnabled') !== 'false'; // user toggle (default on)
 let mobileDepthOffset = parseInt(localStorage.getItem('mobileDepthOffset') || '1', 10); // reduce depth on mobile
-let sfHashMB = parseInt(localStorage.getItem('sfHashMB') || (window.innerWidth <= 768 ? '256' : '512'), 10); // main worker hash in MB
+// 8.3: mobile default lowered 256→128. 256MB on a 3-4GB Android (typical
+// budget device) was a real OOM risk after Stockfish + Maia + page + browser
+// chrome. 128MB is plenty for depth 30 multipv 3 (Stockfish CLI defaults to
+// 16MB; Lichess web uses ~16MB). Power of 2 because the settings slider
+// uses integer log2 values — 96 would round-trip-mismatch (slider would
+// display 128 while the real value was 96). Existing users with an
+// explicit setting keep theirs — localStorage.getItem short-circuits.
+let sfHashMB = parseInt(localStorage.getItem('sfHashMB') || (window.innerWidth <= 768 ? '128' : '512'), 10); // main worker hash in MB
 let evalBarRevealed = false;     // true after first attempt on current position
 let continuationEvalBarOn = false; // transient: user-toggle during continuation practice (always starts OFF)
 // --- Eval bar dedicated Stockfish worker (two-phase: quick depth then deep when idle) ---
@@ -4078,6 +4153,11 @@ function saveGistConfig() {
 }
 
 function openSettings() {
+  // 7.1: close the drawer first so the modal isn't hidden behind it.
+  // Mobile-toolbar's ⚙ stays tappable while the drawer is open (drawer is left-side
+  // only), so without this the user taps ⚙, drawer-backdrop (z-199) covers the
+  // settings modal-backdrop (z-100), and nothing visibly happens.
+  closeDrawer();
   document.getElementById('settingsToken').value = gistToken;
   document.getElementById('settingsGistId').value = gistId;
   document.getElementById('settingsMsg').textContent = '';
@@ -4966,6 +5046,26 @@ function stopEvalWorkerSearch() {
     evalSfReady = false;
     evalSfSearchActive = false;
   }
+}
+
+/** 8.4: Pause the eval worker when the tab goes hidden.
+ *  Same teardown as stopEvalWorkerSearch, but DELIBERATELY preserves
+ *  evalSfResult and evalSfCurrentFen so the eval bar shows the last
+ *  known value when the tab returns. Any subsequent user interaction
+ *  (move, navigation) re-triggers requestEvalWorkerAnalysis via the
+ *  existing flow and a fresh worker is initialized lazily. */
+function pauseEvalWorkerForVisibility() {
+  if (!evalSfSearchActive || !evalSfWorker) return;
+  clearTimeout(evalSfDebounceTimer);
+  clearInterval(evalSfPhase2PollTimer);
+  evalSfPhase2PollTimer = null;
+  evalSfSession++;  // invalidates any in-flight message handlers
+  evalSfPhase = 0;
+  drainEvalSfPendingResolvers();
+  evalSfWorker.terminate();
+  evalSfWorker = null;
+  evalSfReady = false;
+  evalSfSearchActive = false;
 }
 
 // ─── Silent eval queue: deep re-evaluation of continuation moves ───
@@ -9256,6 +9356,55 @@ function updateLoginUX() {
 }
 
 // ─── Login / Logout ───
+// ─── 8.1: Screen wake lock ───
+// Hold a screen-wake-lock while the user is logged in so the phone doesn't
+// sleep mid-think (Stockfish in a worker keeps running when the screen sleeps,
+// but the user can't see anything). Browser auto-releases the sentinel when
+// the page becomes hidden; the visibilitychange handler at the bottom of this
+// file re-acquires when the tab returns.
+//
+// Best-effort: silent failure on platforms without WakeLock API or when the
+// user/OS denies the request. This is purely a power optimization, not load-
+// bearing.
+let _wakeLock = null;
+let _wakeLockWanted = false;
+
+async function acquireWakeLock() {
+  _wakeLockWanted = true;
+  if (!('wakeLock' in navigator)) return;
+  if (_wakeLock) return; // already held
+  try {
+    const sentinel = await navigator.wakeLock.request('screen');
+    // 8.1 fix: if releaseWakeLock fired while we were awaiting (rapid logout
+    // before the request resolved), drop the sentinel instead of holding it
+    // for the rest of the page lifetime. _wakeLockWanted is set to false by
+    // releaseWakeLock; if it's flipped back to false here, our request lost
+    // the race against teardown.
+    if (!_wakeLockWanted) {
+      sentinel.release().catch(() => {});
+      return;
+    }
+    _wakeLock = sentinel;
+    _wakeLock.addEventListener('release', () => {
+      // Could fire from visibility change, OS power policy, or our explicit
+      // .release() call — in any case, drop the local ref so the next
+      // re-acquire path actually requests a new sentinel.
+      _wakeLock = null;
+    });
+  } catch (e) {
+    // Permission denied / NotAllowedError / iframe context restrictions, etc.
+    _wakeLock = null;
+  }
+}
+
+function releaseWakeLock() {
+  _wakeLockWanted = false;
+  if (_wakeLock) {
+    _wakeLock.release().catch(() => {});
+    _wakeLock = null;
+  }
+}
+
 function logout() {
   // Flush any pending progress sync
   clearTimeout(syncDebounceTimer);
@@ -9278,6 +9427,8 @@ function logout() {
 
   appShown = false;
   currentUsername = '';
+  // 8.1: release the screen wake lock acquired in showMainApp.
+  releaseWakeLock();
   knownUsernames.clear();
   localStorage.removeItem('mistakelab_username');
   allGames = []; allMistakes = []; filteredMistakes = [];
@@ -11499,6 +11650,11 @@ function showMainApp() {
   if (appShown) return; // prevent double initialization
   appShown = true;
 
+  // 8.1: best-effort screen wake lock for the duration of the session.
+  // Auto-released by the browser on tab hidden; re-acquired by the
+  // visibilitychange handler when the tab returns.
+  acquireWakeLock();
+
   loadContSettings();
   loadVoiceSettings();
 
@@ -11533,10 +11689,13 @@ function showMainApp() {
   updateSessionProgress();
   initStockfish();
 
-  // Start Maia prefetch (phases 1-3: script + mappings + 43.5MB model download).
-  // Pure async I/O — doesn't block main thread. WASM compilation (phase 4) deferred
-  // to first continuation practice use.
-  prefetchMaia();
+  // 8.6: Maia prefetch deferred. Was eager here ("Pure async I/O — doesn't
+  // block main thread"); but a 43.5 MB download per cold-start cost users
+  // who never enter continuation. The lazy chain at advanceContinuation
+  // line ~18695 (`if (!_maiaCompilePromise) compileMaia()`) triggers it on
+  // first need; compileMaia internally `await prefetchMaia()`. The existing
+  // 5s Promise.race fallback to Stockfish at line ~18758 covers slow first
+  // downloads. With sw.js v2 caching .onnx (8.2), subsequent visits are fast.
 
   // Clear any legacy localStorage fen cache entries (now stored in IndexedDB)
   migrateOldLocalStorageFenCache();
@@ -11748,6 +11907,11 @@ function renderGameList() {
 
 // ─── Review mode ───
 function activatePanelTab(tab) {
+  // 2.3: close the mobile drawer if open. Tab buttons live inside panel-left,
+  // which IS the drawer on mobile — without this, user taps Repertoire and
+  // the panel content swaps under the still-open drawer (functionally fine
+  // but confusing UX since they came to see the tab content).
+  closeDrawer();
   if (analysisMode) exitAnalysisMode();
   // Detect an actual tab transition so we can wipe any stale feedback/overlays
   // from the previous context (e.g. a completed "Checkmate!" feedback leaking
@@ -11915,13 +12079,29 @@ function initBoard() {
     onDrop: onDrop,
     onSnapEnd: onSnapEnd,
   });
+  let _resizeRafScheduled = false;
   window.addEventListener('resize', () => {
-    boardObj.resize();
-    renderArrows();
-    // IMP-001 followup: re-evaluate note panel placement on orientation change
-    // if it's currently open (panel may need to move between inside/outside
-    // board-container based on viewport).
-    if (notePanelOpen) reparentNotePanelForViewport();
+    // 6.1: this handler stays registered for the page lifetime, but boardObj
+    // is set to null on logout (see logout() ~line 9322). Without this guard,
+    // any resize between logout and the next loadPosition (e.g. user rotates
+    // the phone while on the login screen) throws TypeError on .resize().
+    if (!boardObj) return;
+    // 1.9 / 6.3: rAF-throttle. Resize fires ~60×/s during rotation animations
+    // and viewport size negotiations on mobile. boardObj.resize() + renderArrows
+    // is non-trivial (DOM measurements + SVG re-layout) — coalesce to once per
+    // frame.
+    if (_resizeRafScheduled) return;
+    _resizeRafScheduled = true;
+    requestAnimationFrame(() => {
+      _resizeRafScheduled = false;
+      if (!boardObj) return; // re-check: logout could have fired between schedule and frame
+      boardObj.resize();
+      renderArrows();
+      // IMP-001 followup: re-evaluate note panel placement on orientation change
+      // if it's currently open (panel may need to move between inside/outside
+      // board-container based on viewport).
+      if (notePanelOpen) reparentNotePanelForViewport();
+    });
   });
   // Strip chessboard.js highlight classes the instant they're added (during drag)
   new MutationObserver(muts => {
@@ -12127,6 +12307,46 @@ function onBoardClick(e) {
 
   const turn = gameEngine.turn();
   const piece = gameEngine.get(sq);
+
+  // 3.1: tap-to-premove during opponent's turn (mirrors onDrop's premove branch
+  // at line ~12918). Without this, taps on user's own pieces fall through —
+  // the existing logic below uses `piece.color === turn` to identify selectable
+  // pieces, but during opponent's turn `turn` IS the opponent's color, so the
+  // user's piece never matches and selectSquare is never called. Tap-to-move
+  // appears silent on mobile during opponent's turn.
+  //
+  // Only engages in continuationMode + opponent's turn. All other taps fall
+  // through to the existing (working) logic below.
+  if (continuationMode && isOpponentTurn()) {
+    const userColorTap = m.playerColor === 'white' ? 'w' : 'b';
+    if (selectedSquare) {
+      if (sq === selectedSquare) {
+        deselectionPending = true; // mouseup will deselect
+        return;
+      }
+      // Reselecting another own piece — keep waiting for opponent
+      if (piece && piece.color === userColorTap) {
+        clearSelection();
+        selectSquare(sq);
+        return;
+      }
+      // Destination tap → queue premove (works for empty squares AND captures;
+      // illegal premoves are silently cleared when the opponent's move arrives,
+      // matching onDrop's behavior at line ~18872)
+      e.stopPropagation();
+      e.preventDefault();
+      const fromSq = selectedSquare;
+      clearSelection();
+      clearArrows();
+      setPremove(fromSq, sq, 'q');
+      return;
+    }
+    // First tap on user's own piece during opponent's turn → select
+    if (piece && piece.color === userColorTap) {
+      selectSquare(sq);
+    }
+    return;
+  }
 
   if (selectedSquare) {
     if (sq === selectedSquare) {
@@ -12404,6 +12624,11 @@ function renderQueue() {
 function loadPosition(globalIdx, skipAnimation = false) {
   if (voiceMode) voiceStop();
   cancelRepertoireAutoNext();
+  // 2.2: close the mobile drawer if open. Without this, tapping a queue/game
+  // item from the drawer leaves it covering 85% of the screen — user has to
+  // manually dismiss before they can see what they just loaded. Safe no-op
+  // on desktop and when drawer-open class isn't set.
+  closeDrawer();
   // Clean up any synthetic practice item from filter continuation.
   // Note: after splice, an index that pointed AT the practice item now points to
   // the next item. Silently proceeding would load the wrong position — so when the
@@ -15847,8 +16072,18 @@ function resumeContSession(session) {
 
 // Save on page hide (Android tab discard, screen off, app switch)
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden' && continuationMode && contLine) {
-    saveContSession();
+  if (document.visibilityState === 'hidden') {
+    if (continuationMode && contLine) saveContSession();
+    // 8.4: stop the eval worker's depth-30 search when the tab goes hidden.
+    // Keeps evalSfResult/evalSfCurrentFen so the bar shows the previous
+    // value when the tab returns; user interaction re-triggers the worker
+    // through the existing requestEvalWorkerAnalysis flow.
+    pauseEvalWorkerForVisibility();
+  } else if (document.visibilityState === 'visible') {
+    // 8.1: the wake lock auto-releases on hidden — re-acquire on visible
+    // when the user is still wanting it (i.e. logged in, hasn't called
+    // releaseWakeLock).
+    if (_wakeLockWanted && !_wakeLock) acquireWakeLock();
   }
 });
 document.addEventListener('pagehide', (e) => {
