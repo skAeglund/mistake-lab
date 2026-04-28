@@ -1709,7 +1709,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Mobile UX scan: 24 fixes. SEVERE: 8.2 sw.js v2 — precache app shell + Stockfish, cache-first for cross-origin CDN deps + Maia ONNX, network-first for HTML, removed .onnx/.wasm skip; 5.1 base .modal max-height 85dvh + overflow-y auto so settings buttons stay reachable; 5.2 hide subtitle / progress-bar-track / btnLogout on mobile to fit 360px viewport; 7.1 closeDrawer at top of openSettings so the modal doesn't open behind the drawer-backdrop (z-199 over modal-backdrop z-100); 7.5 added Change user button to settings modal action row — logout was previously unreachable in mobile-training (where the entire header is hidden). BUGS: 1.4/4.2 voice indicator z-9999 lifted above line-nav-bar (bottom: 132px) and hidden behind any modal-backdrop via :has(); 2.1 moved body.drawer-open rules into mobile @media so landscape rotation past 768px doesn't leave a stuck black overlay; 2.2/2.3 closeDrawer in loadPosition + activatePanelTab so drawer closes on item / tab tap; 2.4/3.4 tap targets to 44×44 (drawer-close-btn 32→44, mobile-toolbar-btn 38→44, nav-btn 36→44 with toolbar padding 6→3 to keep total height stable); 3.1 tap-to-premove on mobile during opponent's turn — mirrors onDrop's premove branch in onBoardClick's tap path so taps on user pieces during opp's turn no longer fall through silently; 5.3/5.4 invisible ::after pseudo for 44×44 tap area on toggle-switch and cont-settings-toggle while keeping the visual track small (math: extensions stay within parent margins so no neighbor-row hit-test bleed); 6.1 null-guard the resize handler so post-logout rotation doesn't throw on boardObj.resize; 7.3 login token input type=text→password (matches settings modal); 7.4 modal-actions flex-wrap + 380px-class column layout so 4 buttons don't overflow on 320px phones; 4.1 voice indicator hidden behind any open modal-backdrop. IMPROVEMENTS: 5.5 position-nav buttons bumped to min-height 44 with padding 10/14 on mobile; 1.9/6.3 rAF-throttle the resize handler so rotation animations don't fire 60×/s of board.resize+renderArrows; 8.1 best-effort screen wake lock on showMainApp + visibilitychange-visible re-acquire (with post-await guard against logout-during-acquire race so the sentinel isn't leaked); 8.4 dedicated pauseEvalWorkerForVisibility helper that terminates evalSfWorker on hidden while preserving evalSfResult so the bar shows the previous value when the tab returns (re-init lazily on next requestEvalWorkerAnalysis); 8.3 mobile Stockfish hash default 256→128 MB to relieve OOM pressure on 3-4 GB Android (power of 2 to match the settings slider's integer-log2 increments — first pass set 96 which round-trip-mismatched the slider, caught in scan); 8.6 deferred Maia 43.5 MB cold-start prefetch — lazy chain via compileMaia → await prefetchMaia handles first continuation, with sw.js v2 caching subsequent visits. All edits validated: index.html JS syntax, sw.js JS syntax, CSS brace balance 469/469, HTML tag balance unchanged from HEAD.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Position Notes scan: 12 fixes. CRITICAL — #A note deletion now propagates via tombstones. mergeGistData (post-H2 read-merge-write) merged notes by `updated` last-write-wins but only iterated `local.notes` keys, so a key removed from local couldn't be communicated to merged (clone of remote) and syncToGist silently restored every deletion within the 3s debounce. deleteNote writes `{ deleted: true, updated: now }` instead of `delete`. getNoteForFen + 📝 review-list badge filter tombstones. Both repertoire study cleanup loops (no-studies-configured early-return + post-import positions-no-longer-in-any-study sweep) write study-source tombstones; user-initiated deleteNote does NOT carry source so 🗑 stays final across study refreshes. Import path distinguishes: real user note (no source, not deleted) → preserve; user-deleted tombstone → respect-forever; study-source tombstone → overwrite on re-add; real study note → overwrite on refresh. mergeGistData unchanged — its last-write-wins by `updated` already handles tombstones. HIGH — #1 repertoire auto-open. By evaluateRepertoireMove's correct/reveal branch, gameEngine has been advanced to post-move FEN; openNotePanel() re-deriving via getCurrentNoteFen() → null lookup → New Note edit panel for the wrong position; saving created a stray note at post-move key. openNotePanel now accepts optional explicit fen; both auto-open sites pass m.fenBefore. User-initiated toggle keeps live-fen default. MEDIUM — #2 closeNotePanel didn't refresh btnNote.has-note class on close, so post-variation-click-close left the button highlighted for the original anchor; subsequent click would open New Note panel for the variation position. Now ends with updateNoteButton; safe re-entrance because notePanelOpen is false at that point. #3 manual Prev/Next/Skip silently discarded unsaved edit-mode text via loadPosition→checkForNote→closeNotePanel chain. New hasUnsavedNoteChanges + confirmDiscardNote helpers wired into the three nav functions; cancel keeps the panel and editor state intact. Text-only check (arrow/circle changes during edit not detected — acceptable simplification). #4 closeNotePanel now clears note arrows on dismiss per spec/instructions ("note arrows clear when the user dismisses the note panel"); previously re-applied showNoteArrows when a note still existed at the live fen, leaving annotations on the board after ✕. #5 noteJumpedAway latch + noteActiveVarParent/Idx now also reset in clearFeedbackAndOverlays so tab switches close the previous reset gap (loadPosition + enterOpeningFilter were the only resets before). State-cleanliness fix; no reproducible failure prior because jumpToNoteMove is gated against tactic/continuation modes and prev/next/skip from drill all route through loadPosition. Other broad teardowns (analysis exit, contLineReview exit) still don't reset the latch — separately tracked if a future regression makes them reachable. LOW — #6 checkForNote(fen) parameter was dead — every caller passed what getCurrentNoteFen() would return at the same moment. Dropped the arg, updated all 5 callers. #7 saveNote now caps arrows/circles at 30 each (3× the spec's ~10) with console.warn on truncation — guards against pathological accumulation; realistic notes never approach the cap. #8 known limitation documented in the IMP-007 comment block: literal `@@StartV@@`/`@@EndV@@` in plain text is parsed as variation markers; collision rare in practice (markers normally inserted only via "+ Insert line" toolbar), parser-level escape adds more complexity than the edge case justifies. #9 review-list 📝 badge now also checks the post-correct-move FEN where data is available — tactic items use m.tacticMoves[length-1].fen directly (analyzer-stored), repertoire items apply m.repertoireMove.uci to m.fenBefore via chess.js. Mistake / advantage / practice items are skipped (analyzer's mistake records intentionally don't store bestMoveUci, so the post-correct-move FEN can't be derived without re-running the engine). Cost is at most one chess.move per item per render; cheap given default 50-item display limit and user-action-driven render frequency. #10 legacy-key migration collision handler now flips `source` to user-note when exactly one side is study-source, so user edits survive future study refreshes via the import path's `existing.source !== 'study'` guard (paired with the tombstone-aware merge from #A). #11 noteArrows/noteCircles render blocks gated on notePanelOpen — defensive, today the arrays are managed in lockstep with panel state, but a future code path forgetting hideNoteArrows would otherwise leak stale annotations until the next explicit clear. #12 launchFilterPractice now unhides btnNote (paired with cleanupPracticeCont re-hide) — filter practice bypassed loadPosition, the only path that normally exposed the button, leaving notes unreachable for the entire session. JS syntax validated after every change.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2853,6 +2853,34 @@ function migrateLegacyPosKeys() {
         // Collision: merge into existing (prefer existing text; concat arrows/circles)
         const ex = out[nk];
         if (note && typeof note === 'object') {
+          // Finding A: tombstone collision — last-write-wins by `updated`.
+          // The text/arrow/circle merge below is meaningless when either side
+          // is a tombstone (no text/arrows/circles), and concatenating them
+          // would corrupt the tombstone shape (a tombstone with text/arrows
+          // is no longer recognized as deleted by getNoteForFen).
+          if (ex.deleted || note.deleted) {
+            const exTime = new Date(ex.updated || 0).getTime();
+            const noteTime = new Date(note.updated || 0).getTime();
+            if (noteTime > exTime) out[nk] = note;
+            continue;
+          }
+          // Finding 10: source-precedence on collision. If exactly one side
+          // has source:'study' (auto-imported) and the other doesn't (user
+          // note), the user side must win the `source` field — otherwise
+          // the merged result inherits source:'study' and the next study
+          // refresh would silently overwrite the user's edits via the
+          // import path's `existing.source !== 'study'` guard. Keep the
+          // text/arrow concatenation behavior for actual content; only the
+          // source field flips to the user-note shape.
+          const exIsStudy = ex.source === 'study';
+          const noteIsStudy = note.source === 'study';
+          if (exIsStudy && !noteIsStudy) {
+            // Drop study marker so the merged result is treated as a
+            // user note from here on (no future refresh overwrites).
+            delete ex.source;
+          }
+          // (If !exIsStudy && noteIsStudy: ex already has no source — fine,
+          //  user-side already wins. No flip needed.)
           if (note.text && ex.text && !ex.text.includes(note.text)) {
             ex.text = ex.text + '\n\n' + note.text;
           } else if (note.text && !ex.text) {
@@ -12037,7 +12065,56 @@ function renderReviewList() {
       statusText = '<span style="color:var(--yellow)">Due</span>';
     }
 
-    const hasNote = gistData?.notes && gistData.notes[fenPositionKey(m.fenBefore)];
+    // Finding 9: a note saved while staring at the position AFTER solving
+    // a tactic / repertoire item is keyed at the post-move FEN (that's
+    // what getCurrentNoteFen() returns once gameEngine has been advanced).
+    // Checking only m.fenBefore would miss those notes in the review list,
+    // leaving the user with no visible indicator that the item has a note
+    // attached.
+    //
+    // Per item type:
+    //   - repertoire: m.fenBefore + m.repertoireMove.uci (computed via
+    //     chess.js — fall through silently on rejection)
+    //   - tactic: use the final move's stored .fen directly (the analyzer
+    //     pre-computes per-move FENs in m.tacticMoves) — covers the common
+    //     post-solve "Tactic complete!" position. Notes at intermediate
+    //     positions during a multi-move tactic remain unsurfaced.
+    //   - mistake / advantage / practice: no usable data — analyzer's
+    //     mistake records intentionally don't store bestMoveUci (only
+    //     cpBefore/cpAfter and the user's `sanPlayed`), so we can't compute
+    //     the post-correct-move FEN without re-running the engine.
+    //
+    // Failures (chess.js rejects, missing fields) silently fall through to
+    // the fenBefore-only check. Cost is at most one chess.move per item per
+    // render; the review list is short (<= 50 items by default) and
+    // renderReviewList is invoked on user action, not in a hot loop.
+    const noteEntryBefore = gistData?.notes && gistData.notes[fenPositionKey(m.fenBefore)];
+    let noteEntryAfter = null;
+    try {
+      let postFen = null;
+      if (m.type === 'tactic' && Array.isArray(m.tacticMoves) && m.tacticMoves.length > 0) {
+        // Use the analyzer-stored final-move fen directly — no chess.js compute.
+        const lastMv = m.tacticMoves[m.tacticMoves.length - 1];
+        if (lastMv?.fen) postFen = lastMv.fen;
+      } else if (m.type === 'repertoire' && m.repertoireMove?.uci && m.fenBefore) {
+        const probe = new Chess(m.fenBefore);
+        const uci = m.repertoireMove.uci;
+        const promo = uci.length > 4 ? uci[4] : undefined;
+        const mv = probe.move({
+          from: uci.substring(0, 2),
+          to: uci.substring(2, 4),
+          promotion: promo,
+        });
+        if (mv) postFen = probe.fen();
+      }
+      if (postFen) {
+        noteEntryAfter = gistData?.notes && gistData.notes[fenPositionKey(postFen)];
+      }
+    } catch (_) { /* fall through — fenBefore check still runs */ }
+    // Finding A: skip tombstones (`{ deleted: true, ... }`) — they live in
+    // gistData.notes for cross-device sync but are not user-visible.
+    const hasNote = (noteEntryBefore && !noteEntryBefore.deleted) ||
+                    (noteEntryAfter && !noteEntryAfter.deleted);
 
     const moveLabel = isAdvantage
       ? `${ICON_ADVANTAGE} Move ${m.moveNumber}${m.playerColor==='white'?'.':'…'} <span style="color:#4caf50">+${(m.peakCp/100).toFixed(1)}</span>`
@@ -12960,7 +13037,7 @@ function loadPosition(globalIdx, skipAnimation = false) {
     startPreAnalysis(m.fenBefore);
     sfLog('loadPosition', `idx=${globalIdx} startPreAnalysis called, newSession=${preAnalysisSession}`);
   }
-  checkForNote(m.fenBefore);
+  checkForNote();
 }
 
 // ─── Board interaction ───
@@ -16807,6 +16884,14 @@ function launchFilterPractice() {
   // move lands and triggers renderContLine
   document.getElementById('contLineContainer').innerHTML = '';
   document.getElementById('emptyMsg').classList.add('hidden');
+  // Finding 12: filter practice bypasses loadPosition (which is the only
+  // path that normally unhides btnNote), so without this the 📝 button —
+  // and the N keyboard shortcut, gated on `!btn.classList.contains('hidden')`
+  // — were unavailable for the entire practice session. Notes about freely
+  // chosen practice positions are useful ("Poisoned Pawn — typical idea
+  // Bxe6"); paired with cleanupPracticeCont's hide on tab-switch exit, the
+  // button is shown only during the active practice session.
+  document.getElementById('btnNote').classList.remove('hidden');
   if (document.body.classList.contains('mobile-browsing')) {
     document.body.classList.remove('mobile-browsing');
     document.body.classList.add('mobile-training');
@@ -16860,6 +16945,15 @@ function cleanupPracticeCont() {
   practiceRepIgnored = false;
   explorerApiNotified = false;
   currentMistakeIdx = -1;
+  // Finding 12: re-hide btnNote here (symmetric to the unhide in
+  // launchFilterPractice) so that after a tab-switch exit the button
+  // doesn't linger in the new tab's context (where currentMistakeIdx=-1
+  // and clicking 📝 would anchor to whatever stale gameEngine.fen()
+  // happens to read). loadPosition's L12701 unhide will re-expose it on
+  // the next mistake/tactic/repertoire item; startContLineReview's L17580
+  // unhide also re-exposes it for the post-practice review path.
+  const btnNote = document.getElementById('btnNote');
+  if (btnNote) btnNote.classList.add('hidden');
 }
 
 function recordPracticeResult(result, finalCpWhite) {
@@ -18037,7 +18131,7 @@ function goToReviewLine(moveIdx, lineIdx) {
   // handled by renderEngineLine above.
   const moves = document.querySelectorAll('#feedbackContainer > .feedback-box .engine-line-moves .move');
   moves.forEach((el, i) => el.classList.toggle('active', i === lineIdx));
-  checkForNote(lm.fen);
+  checkForNote();
 }
 
 function stepReviewBestLine(delta) {
@@ -18107,7 +18201,7 @@ function stepReviewBestLine(delta) {
     // renderEngineLine call above.
     const moves = document.querySelectorAll('#feedbackContainer > .feedback-box .engine-line-moves .move');
     moves.forEach(el => el.classList.remove('active'));
-    checkForNote(data.preFen);
+    checkForNote();
     // Finding #5: refresh eval bar for the pre-move position.
     if (evalBarEnabled && evalBarRevealed && !tacticMode) {
       requestEvalWorkerAnalysis(data.preFen);
@@ -19093,6 +19187,11 @@ function prevPosition() {
   if (detectedTacticSolveMode) { abandonDetectedTacticSolve(); return; }
   if (openingFilterMode) { filterUndoMove(); return; }
   if (currentMistakeIdx <= 0) return;
+  // Finding 3: confirm before discarding unsaved edit-mode note text.
+  // loadPosition → checkForNote → closeNotePanel would otherwise wipe the
+  // textarea contents silently. Return here aborts navigation; the panel
+  // stays open and the user can save/cancel/keep editing as they intend.
+  if (!confirmDiscardNote()) return;
   clearArrows()
   if (reviewMode) {
     const currentInQueue = reviewQueue.findIndex(m => filteredMistakes.indexOf(m) === currentMistakeIdx);
@@ -19113,6 +19212,8 @@ function nextPosition() {
   if (detectedTacticSolveMode) { abandonDetectedTacticSolve(); return; }
   if (openingFilterMode) { filterRedoMove(); return; }
   if (currentMistakeIdx < 0) return;
+  // Finding 3: see prevPosition for rationale.
+  if (!confirmDiscardNote()) return;
   clearArrows()
   if (reviewMode) {
     advanceReviewQueue();
@@ -19129,6 +19230,8 @@ function nextPosition() {
 function skipPosition() {
   if (detectedTacticSolveMode) { abandonDetectedTacticSolve(); return; }
   if (currentMistakeIdx < 0) return;
+  // Finding 3: see prevPosition for rationale.
+  if (!confirmDiscardNote()) return;
   clearArrows()
   const m = filteredMistakes[currentMistakeIdx];
   // Skip = record as "Again" so it comes back soon (only if not already graded).
@@ -19212,6 +19315,12 @@ function retryPosition() {
     // move back because `inReviewContext = … || keyMoves.length > 0` is true.
     // exitContLineReview is a safe no-op when no review state is present.
     exitContLineReview();
+    // Finding 12 follow-up: exitContLineReview hides btnNote (L18534), but
+    // for the practice retry path we want it visible during play (parity
+    // with launchFilterPractice's unhide). Without this, Stop & Review →
+    // Try Again leaves the 📝 button hidden for the rest of the practice
+    // session even though notes are supposed to work during practice play.
+    document.getElementById('btnNote').classList.remove('hidden');
     currentAttempts = 0;
     // L3: reset progressive hint scalars. clearBoardOverlays below wipes
     // .square-hint and hintArrow visuals, and btnHint is hidden a few lines
@@ -19496,6 +19605,23 @@ function clearFeedbackAndOverlays() {
   analysisPvArrows = [];
   if (activeArrows && typeof activeArrows.clear === 'function') activeArrows.clear();
   if (activeCircles && typeof activeCircles.clear === 'function') activeCircles.clear();
+  // Finding 5: reset noteJumpedAway latch + variation browse pointer.
+  // jumpBoardToNoteFen sets noteJumpedAway=true to block onDragStart /
+  // onBoardClick from evaluating moves against the stale drill context
+  // while the board is showing a variation position. The latch is cleared
+  // by loadPosition (the most common reset path) and by enterOpeningFilter,
+  // but tab switches (the only caller of clearFeedbackAndOverlays, in
+  // activatePanelTab) left it stuck. Practically this couldn't reach a
+  // reproducible failure because jumpToNoteMove is gated on !tacticMode &&
+  // !continuationMode and prev/next/skip from drill mode all route through
+  // loadPosition, but a stale latch surviving a tab switch is a state-
+  // cleanliness leak worth closing. Note: this only covers tab-switch
+  // teardown — if a future regression exposes the latch in other contexts
+  // (analysis exit, contLineReview exit, etc.) the resets would need to
+  // be added at those teardown sites separately.
+  noteJumpedAway = false;
+  noteActiveVarParent = null;
+  noteActiveVarIdx = -1;
   // Cancel any in-flight best-line preview animation (supersession check inside
   // the loop aborts on null).
   window._reviewBestLine = null;
@@ -19800,9 +19926,17 @@ function renderArrows() {
       drawOne(bestMoveArrow.from, bestMoveArrow.to, 'rgba(62, 207, 142, 0.7)', 1);
     }
     // Note arrows (semi-transparent, behind hint/user arrows)
-    for (const na of noteArrows) {
-      const c = DRAW_COLOR_MAP[na.color] || DRAW_COLOR_MAP.green;
-      drawOne(na.from, na.to, c.arrow, 0.55);
+    // Finding 11: defensive gate on notePanelOpen. Today the noteArrows /
+    // noteCircles arrays are managed in lockstep with panel state (showNoteArrows
+    // populates them on open, hideNoteArrows clears on close), so the gate is
+    // belt-and-braces — but a future code path that forgets hideNoteArrows
+    // would otherwise leak stale annotations onto the board until the next
+    // explicit clear. The flag-based check makes the policy explicit.
+    if (notePanelOpen) {
+      for (const na of noteArrows) {
+        const c = DRAW_COLOR_MAP[na.color] || DRAW_COLOR_MAP.green;
+        drawOne(na.from, na.to, c.arrow, 0.55);
+      }
     }
     // Hint arrow
     if (hintArrow) drawOne(hintArrow.from, hintArrow.to, 'rgba(66, 133, 244, 0.7)', 1);
@@ -19820,12 +19954,15 @@ function renderArrows() {
       html += `<circle cx="${center.x}" cy="${center.y}" r="${r}" fill="none" stroke="${DRAW_COLOR_MAP[color].circle}" stroke-width="${circleStroke}" opacity="0.9" />`;
     });
     // Note circles (semi-transparent)
-    for (const nc of noteCircles) {
-      const center = sqCenter(nc.square);
-      if (!center) continue;
-      const r = sqSize * 0.46;
-      const c = DRAW_COLOR_MAP[nc.color] || DRAW_COLOR_MAP.green;
-      html += `<circle cx="${center.x}" cy="${center.y}" r="${r}" fill="none" stroke="${c.circle}" stroke-width="${circleStroke}" opacity="0.55" />`;
+    // Finding 11: same notePanelOpen gate as note arrows above.
+    if (notePanelOpen) {
+      for (const nc of noteCircles) {
+        const center = sqCenter(nc.square);
+        if (!center) continue;
+        const r = sqSize * 0.46;
+        const c = DRAW_COLOR_MAP[nc.color] || DRAW_COLOR_MAP.green;
+        html += `<circle cx="${center.x}" cy="${center.y}" r="${r}" fill="none" stroke="${c.circle}" stroke-width="${circleStroke}" opacity="0.55" />`;
+      }
     }
     // Ghost circle (preview while right-click held, before drag)
     if (ghostCircle) {
@@ -20345,9 +20482,17 @@ async function loadRepertoireTrie() {
     // identified but didn't actually fix.
     if (gistData?.notes) {
       let cleaned = 0;
+      const now = new Date().toISOString();
       for (const [key, note] of Object.entries(gistData.notes)) {
+        // Skip tombstones — already deleted, no work to do.
+        if (note.deleted) continue;
         if (note.source === 'study') {
-          delete gistData.notes[key];
+          // Finding A: tombstone instead of `delete` so syncToGist's
+          // read-merge-write actually propagates the cleanup to remote.
+          // Carry forward source:'study' so the import path at L20479 can
+          // distinguish a re-importable cleanup tombstone from a user
+          // deletion (which stays as `deleted` without source).
+          gistData.notes[key] = { deleted: true, updated: now, source: 'study' };
           cleaned++;
         }
       }
@@ -20477,11 +20622,26 @@ async function loadRepertoireTrie() {
   // session's loadFromGist brought the stale notes back in a permanent loop.
   if (gistData) {
     if (!gistData.notes) gistData.notes = {};
+    // Single timestamp used by both the import loop and the cleanup loop
+    // below — semantically a single batch operation. Originally `now` was
+    // declared per-iteration inside the import loop, but my Finding A edit
+    // added a `now` reference inside the cleanup loop where the import-loop
+    // const is out of scope (block-scoped to each iteration of the for-of).
+    // Lifting it here covers both loops with one timestamp.
+    const now = new Date().toISOString();
     let imported = 0;
     for (const [posKey, commentData] of allComments) {
       const existing = gistData.notes[posKey];
-      if (existing && existing.source !== 'study') continue; // don't overwrite user notes
-      const now = new Date().toISOString();
+      // Finding A: tombstone-aware skip logic.
+      //   - Real user note (no source, not deleted): preserve, never overwrite.
+      //   - User-deleted tombstone (deleted, no source): respect — user
+      //     explicitly removed this; don't resurrect on re-import.
+      //   - Study-source tombstone (deleted, source:'study'): overwrite — the
+      //     study cleanup loop tombstoned this when the position was no longer
+      //     in any study, but now it's back, so re-import normally.
+      //   - Real study note (source:'study', not deleted): overwrite (refresh).
+      if (existing && !existing.deleted && existing.source !== 'study') continue;
+      if (existing && existing.deleted && existing.source !== 'study') continue;
       gistData.notes[posKey] = {
         text: commentData.text || '',
         arrows: commentData.arrows || [],
@@ -20495,8 +20655,11 @@ async function loadRepertoireTrie() {
     // Clean up study notes for positions no longer in any study
     let cleaned = 0;
     for (const [key, note] of Object.entries(gistData.notes)) {
+      // Skip tombstones — already deleted, no work to do.
+      if (note.deleted) continue;
       if (note.source === 'study' && !allComments.has(key)) {
-        delete gistData.notes[key];
+        // Finding A: tombstone instead of `delete` — see L20349 for rationale.
+        gistData.notes[key] = { deleted: true, updated: now, source: 'study' };
         cleaned++;
       }
     }
@@ -21599,7 +21762,13 @@ function evaluateRepertoireMove(source, target, move) {
     showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
       `♟ Correct! <code>${escHtml(move.san)}</code>`,
       `That's your repertoire move.${srsInfo}${contBtns}${chessableBtn(m)}${lichessStudyBtn(m)}${nextBtn}`);
-    if (repNote && !repertoireAutoNext) openNotePanel();
+    // Finding 1: pass m.fenBefore explicitly. By this point gameEngine has
+    // been advanced to the post-move position by chessboard.js's onDrop, so
+    // openNotePanel()'s default getCurrentNoteFen() would return the wrong
+    // position and drop the user into edit mode for a brand-new note instead
+    // of viewing the existing one (the repNote check above used m.fenBefore
+    // for the lookup, but openNotePanel was re-deriving the fen).
+    if (repNote && !repertoireAutoNext) openNotePanel(m.fenBefore);
     updateSessionProgress();
     renderQueue();
     scheduleRepertoireAutoNext(currentMistakeIdx);
@@ -21685,7 +21854,11 @@ function revealRepertoireAnswer(m, expected, isLastItem, userPlayedSan) {
   showColorFeedback('var(--red)', 'rgba(239,83,80,0.08)',
     `♟ The repertoire move is <code>${escHtml(expected.san)}</code>`,
     `${playedLine}${srsInfo}${contBtns}${chessableBtn(m)}${lichessStudyBtn(m)}${nextBtn}`);
-  if (repNote && !repertoireAutoNext) openNotePanel();
+  // Finding 1: see openNotePanel call in evaluateRepertoireMove correct path
+  // for rationale — gameEngine is at the POST-repertoire-move position by
+  // this point (revealRepertoireAnswer plays expected.san to set up the
+  // reveal arrow), so the live fen wouldn't match the note's anchor.
+  if (repNote && !repertoireAutoNext) openNotePanel(m.fenBefore);
   updateSessionProgress();
   renderQueue();
   scheduleRepertoireAutoNext(currentMistakeIdx);
@@ -21948,7 +22121,7 @@ function repContLineGoTo(idx) {
 
   repContBrowsing = idx < repContLine.moves.length - 1;
   renderRepContLine();
-  checkForNote(gameEngine.fen());
+  checkForNote();
 }
 
 function repContLineStep(delta) {
@@ -22613,7 +22786,7 @@ function repLeadUpGoTo(idx) {
 
   renderRepLeadUpLine();
   updateRepLeadUpInfo();
-  checkForNote(gameEngine.fen());
+  checkForNote();
 
   // If we've reached the end, transition to drill mode
   if (idx >= repLeadUpLine.moves.length - 1) {
@@ -22808,7 +22981,42 @@ function getCurrentNoteFen() {
 function getNoteForFen(fen) {
   if (!fen || !gistData?.notes) return null;
   const key = fenPositionKey(fen);
-  return gistData.notes[key] || null;
+  const note = gistData.notes[key];
+  // Finding A: tombstones (`{ deleted: true, updated: ... }`) live in
+  // gistData.notes alongside real notes so cross-device sync can propagate
+  // user deletions. Treat them as absent at every read site.
+  if (!note || note.deleted) return null;
+  return note;
+}
+
+// Finding 3: detect whether the user has unsaved note text in the open edit
+// panel. Compares the live textarea value against the saved note's text at
+// the panel's anchor position. Used by Prev/Next/Skip to confirm before
+// silently discarding edits via the loadPosition → checkForNote → closeNotePanel
+// chain. Note: only tracks text changes — arrow/circle changes during edit
+// are NOT detected here (acceptable simplification; the rare arrow-only
+// edit case loses unsaved annotations on navigation, but text is the
+// common case worth protecting).
+function hasUnsavedNoteChanges() {
+  if (!noteEditMode) return false;
+  const ta = document.getElementById('noteText');
+  if (!ta) return false;
+  const fen = noteAnchorFen;
+  if (!fen) return !!ta.value.trim();
+  const saved = gistData?.notes?.[fenPositionKey(fen)];
+  // getNoteForFen() filters tombstones, but here we want the literal stored
+  // text — a tombstone has no text, so treat it as empty saved state. A
+  // user opening edit on a tombstone-cleared position and typing should
+  // prompt on discard since the typed text is genuinely unsaved.
+  const savedText = (saved && !saved.deleted) ? (saved.text || '') : '';
+  return ta.value !== savedText;
+}
+
+// Returns true if the caller may proceed with a destructive navigation
+// (Prev/Next/Skip). False if the user opted to keep editing.
+function confirmDiscardNote() {
+  if (!hasUnsavedNoteChanges()) return true;
+  return confirm('You have unsaved note changes. Discard them?');
 }
 
 function updateNoteButton() {
@@ -22857,6 +23065,14 @@ function toggleNotePanel() {
 // everything after it, since the chess state is ambiguous past that point)
 // renders as plain struck-through text. Markers themselves are not shown
 // in view mode.
+//
+// Finding 8 (known limitation): if a user's plain note text happens to
+// contain the literal strings `@@StartV@@` or `@@EndV@@`, the parser will
+// treat them as variation markers. The markers are normally produced only
+// by the "+ Insert line" toolbar button, so the collision is unlikely in
+// practice; adding an escape mechanism would complicate the parser more
+// than the edge case justifies. Workaround for the affected user: edit
+// the note to break up the literal sequence (e.g. `@@ StartV@@`).
 
 const NOTE_VAR_START = '@@StartV@@';
 const NOTE_VAR_END = '@@EndV@@';
@@ -23185,11 +23401,20 @@ function insertVariationMarkers() {
   ta.setSelectionRange(caret, caret);
 }
 
-function openNotePanel() {
+function openNotePanel(explicitFen) {
   const panel = document.getElementById('notePanel');
   if (!panel) return;
 
-  const fen = getCurrentNoteFen();
+  // Finding 1: optional explicit fen lets auto-open callers (the repertoire
+  // drill correct/reveal paths) target the deviation's pre-move position
+  // where the study comment is keyed, rather than gameEngine.fen() which by
+  // that point has been advanced by chessboard.js's onDrop to the post-move
+  // position. Without this, getCurrentNoteFen() returned the post-move FEN,
+  // getNoteForFen returned null, and enterNoteEditMode dropped the user
+  // into a "New Note" panel even though a real note existed at fenBefore.
+  // User-initiated paths (toggleNotePanel via 📝 button or N key) keep
+  // using the live position.
+  const fen = explicitFen || getCurrentNoteFen();
   if (!fen) return;
   const note = getNoteForFen(fen);
 
@@ -23453,14 +23678,31 @@ function closeNotePanel() {
     activeArrows.clear();
     activeCircles.clear();
   }
-  // Re-show saved note arrows if a note exists
-  const fen = getCurrentNoteFen();
-  const note = getNoteForFen(fen);
-  if (note) {
-    showNoteArrows(note);
-  } else {
-    renderArrows();
-  }
+  // Finding 4: clear note arrows on dismiss. Per spec ("note arrows… clear
+  // when the user dismisses the note panel or moves to a different position")
+  // and per the project instructions ("noteArrows/noteCircles rendered by
+  // renderArrows() only when note panel is OPEN"), the arrows should not
+  // persist after the panel is closed. The previous behavior re-applied
+  // showNoteArrows here when a note existed at the live fen — usually
+  // identical to what was just shown, but it left annotations on the board
+  // after ✕, contradicting the design intent. Now: always clear, regardless
+  // of whether a note exists at the current position. hideNoteArrows()
+  // calls renderArrows() internally, so the cleared activeArrows / circles
+  // (set above when wasEditing) get picked up in the same render pass.
+  hideNoteArrows();
+  // Finding 2: refresh btnNote.has-note class so it matches the current
+  // board position. Without this, after the user clicks a variation move
+  // (which sets the live fen to the variation position) and then hits ✕,
+  // the button still reads .has-note from the original anchor's note —
+  // pressing 📝 again would then openNotePanel for the variation position,
+  // get null from getNoteForFen, and drop into a "New Note" edit panel for
+  // a position the user never intended to write a note for. Calling
+  // updateNoteButton here re-evaluates against gameEngine.fen() and clears
+  // .has-note when there's no note at the variation position.
+  // Safe re-entrance: notePanelOpen is already false at the top of this
+  // function, so updateNoteButton's `if (notePanelOpen) closeNotePanel()`
+  // guard short-circuits — no infinite loop.
+  updateNoteButton();
 }
 
 function saveNote() {
@@ -23483,6 +23725,23 @@ function saveNote() {
   activeCircles.forEach((color, sq) => {
     circles.push({ square: sq, color });
   });
+
+  // Finding 7: cap arrow/circle counts. The original Position Notes spec
+  // called for ~10 of each; no cap was ever enforced in code. 30 each is a
+  // generous limit (3× the spec) that still guards against pathological
+  // accumulation if a user loops over the entire board with right-click.
+  // Silent truncation with a console warn — refusing to save would be more
+  // disruptive than discarding the tail in a rare case.
+  const NOTE_ARROW_CAP = 30;
+  const NOTE_CIRCLE_CAP = 30;
+  if (arrows.length > NOTE_ARROW_CAP) {
+    console.warn(`[Note] Truncated ${arrows.length} → ${NOTE_ARROW_CAP} arrows on save`);
+    arrows.length = NOTE_ARROW_CAP;
+  }
+  if (circles.length > NOTE_CIRCLE_CAP) {
+    console.warn(`[Note] Truncated ${circles.length} → ${NOTE_CIRCLE_CAP} circles on save`);
+    circles.length = NOTE_CIRCLE_CAP;
+  }
 
   // Must have text or at least one annotation
   if (!text && arrows.length === 0 && circles.length === 0) {
@@ -23529,9 +23788,29 @@ function deleteNote() {
   const fen = noteAnchorFen || getCurrentNoteFen();
   if (!fen || !gistData?.notes) return;
   const key = fenPositionKey(fen);
-  if (!gistData.notes[key]) { closeNotePanel(); return; }
+  const existing = gistData.notes[key];
+  // Bail if there's nothing user-visible to delete (no entry, or already a tombstone).
+  if (!existing || existing.deleted) { closeNotePanel(); return; }
 
-  delete gistData.notes[key];
+  // Finding A: write a tombstone instead of `delete gistData.notes[key]`.
+  // mergeGistData merges notes by `updated` timestamp last-write-wins, but it
+  // only iterates `local.notes` keys — a key that's been removed from local
+  // can't be communicated to merged (which starts as a clone of remote), so
+  // syncToGist read-merge-write was silently restoring deletions on every
+  // sync. A tombstone with a fresh `updated` timestamp survives the merge
+  // (older remote note loses to newer local tombstone) and reads filter it
+  // out so the user sees the same UX as before.
+  //
+  // Crucially: do NOT carry forward `source` here. A user-initiated delete
+  // is final — the import path at L20479 must skip this tombstone forever
+  // (matched by `deleted && source !== 'study'`). The two study cleanup
+  // loops set source:'study' on their tombstones so re-adding the study can
+  // re-import the comment, but a user clicking 🗑 expresses an explicit
+  // "never bring this back" intent that overrides the study refresh.
+  gistData.notes[key] = {
+    deleted: true,
+    updated: new Date().toISOString(),
+  };
 
   // Trigger sync — see saveNote comment above for the dirty-flag rationale.
   debounceSyncToGist();
@@ -23562,7 +23841,12 @@ function deleteNote() {
   if (reviewMode) renderReviewList();
 }
 
-function checkForNote(fen) {
+// Finding 6: `checkForNote` previously accepted a `fen` argument that was
+// never read — every call site happens to pass a fen that matches whatever
+// `getCurrentNoteFen()` (used inside `updateNoteButton`) would return at
+// the same moment. Drop the dead parameter to remove the false signal that
+// the function tracks a specific FEN. Callers updated to drop their args.
+function checkForNote() {
   // Called on position changes — update button state, hide stale arrows
   hideNoteArrows();
   if (notePanelOpen) closeNotePanel();
