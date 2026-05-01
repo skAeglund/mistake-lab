@@ -1709,7 +1709,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Position Notes scan: 12 fixes. CRITICAL — #A note deletion now propagates via tombstones. mergeGistData (post-H2 read-merge-write) merged notes by `updated` last-write-wins but only iterated `local.notes` keys, so a key removed from local couldn't be communicated to merged (clone of remote) and syncToGist silently restored every deletion within the 3s debounce. deleteNote writes `{ deleted: true, updated: now }` instead of `delete`. getNoteForFen + 📝 review-list badge filter tombstones. Both repertoire study cleanup loops (no-studies-configured early-return + post-import positions-no-longer-in-any-study sweep) write study-source tombstones; user-initiated deleteNote does NOT carry source so 🗑 stays final across study refreshes. Import path distinguishes: real user note (no source, not deleted) → preserve; user-deleted tombstone → respect-forever; study-source tombstone → overwrite on re-add; real study note → overwrite on refresh. mergeGistData unchanged — its last-write-wins by `updated` already handles tombstones. HIGH — #1 repertoire auto-open. By evaluateRepertoireMove's correct/reveal branch, gameEngine has been advanced to post-move FEN; openNotePanel() re-deriving via getCurrentNoteFen() → null lookup → New Note edit panel for the wrong position; saving created a stray note at post-move key. openNotePanel now accepts optional explicit fen; both auto-open sites pass m.fenBefore. User-initiated toggle keeps live-fen default. MEDIUM — #2 closeNotePanel didn't refresh btnNote.has-note class on close, so post-variation-click-close left the button highlighted for the original anchor; subsequent click would open New Note panel for the variation position. Now ends with updateNoteButton; safe re-entrance because notePanelOpen is false at that point. #3 manual Prev/Next/Skip silently discarded unsaved edit-mode text via loadPosition→checkForNote→closeNotePanel chain. New hasUnsavedNoteChanges + confirmDiscardNote helpers wired into the three nav functions; cancel keeps the panel and editor state intact. Text-only check (arrow/circle changes during edit not detected — acceptable simplification). #4 closeNotePanel now clears note arrows on dismiss per spec/instructions ("note arrows clear when the user dismisses the note panel"); previously re-applied showNoteArrows when a note still existed at the live fen, leaving annotations on the board after ✕. #5 noteJumpedAway latch + noteActiveVarParent/Idx now also reset in clearFeedbackAndOverlays so tab switches close the previous reset gap (loadPosition + enterOpeningFilter were the only resets before). State-cleanliness fix; no reproducible failure prior because jumpToNoteMove is gated against tactic/continuation modes and prev/next/skip from drill all route through loadPosition. Other broad teardowns (analysis exit, contLineReview exit) still don't reset the latch — separately tracked if a future regression makes them reachable. LOW — #6 checkForNote(fen) parameter was dead — every caller passed what getCurrentNoteFen() would return at the same moment. Dropped the arg, updated all 5 callers. #7 saveNote now caps arrows/circles at 30 each (3× the spec's ~10) with console.warn on truncation — guards against pathological accumulation; realistic notes never approach the cap. #8 known limitation documented in the IMP-007 comment block: literal `@@StartV@@`/`@@EndV@@` in plain text is parsed as variation markers; collision rare in practice (markers normally inserted only via "+ Insert line" toolbar), parser-level escape adds more complexity than the edge case justifies. #9 review-list 📝 badge now also checks the post-correct-move FEN where data is available — tactic items use m.tacticMoves[length-1].fen directly (analyzer-stored), repertoire items apply m.repertoireMove.uci to m.fenBefore via chess.js. Mistake / advantage / practice items are skipped (analyzer's mistake records intentionally don't store bestMoveUci, so the post-correct-move FEN can't be derived without re-running the engine). Cost is at most one chess.move per item per render; cheap given default 50-item display limit and user-action-driven render frequency. #10 legacy-key migration collision handler now flips `source` to user-note when exactly one side is study-source, so user edits survive future study refreshes via the import path's `existing.source !== 'study'` guard (paired with the tombstone-aware merge from #A). #11 noteArrows/noteCircles render blocks gated on notePanelOpen — defensive, today the arrays are managed in lockstep with panel state, but a future code path forgetting hideNoteArrows would otherwise leak stale annotations until the next explicit clear. #12 launchFilterPractice now unhides btnNote (paired with cleanupPracticeCont re-hide) — filter practice bypassed loadPosition, the only path that normally exposed the button, leaving notes unreachable for the entire session. JS syntax validated after every change.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Annotations scan part 1/3 — H1 + H2 (highlight timing fixes). H1: clearBoardOverlays doc-comment correction. The comment claimed it covers `.square-hl last-move highlights (via clearHighlights)`, conflating two distinct overlays — `.square-hl` is the TRANSIENT animation overlay from highlightSquaresWithColor (good-move feedback fade), while the actual last-move highlight is `.square-lastmove`, which the next bullet correctly notes is intentionally untouched. Updated to clarify .square-hl is post-move feedback (NOT last-move), pointed callers needing last-move clearing to clearLastMoveHighlight separately (loadPosition / exitEngineLine / retryPosition / analysis-mode entry). Documentation bug only, no runtime change. H2: deferred-timer cancellation for showLastMoveHighlightDeferred + showCheckHighlightDeferred. Both functions schedule a 250ms re-apply (needed because chessboard.js animated boardObj.position() wipes square classes on completion). Previously fire-and-forget — fast nav (Next/Skip/Esc within 250ms of a move) would let the timer re-paint the OLD position's lastmove squares onto the NEW board. Worse for check: timer captures the OLD chess.js instance in closure; if OLD position had check at e8 and NEW does not, timer paints .square-check on e8 of the new board (which may now be empty); if OLD didn't have check but NEW does, the deferred call wipes the legitimate check painted by loadPosition. Both reachable via fast clicking. Fix: token-based cancellation. _lastMoveHighlightToken / _checkHighlightToken are bumped by clearLastMoveHighlight / clearCheckHighlight; deferred functions capture the token at schedule time and bail in the timer if a bump occurred meanwhile. Verified at runtime — let-after-function-decl works because functions are only called after the script body completes, by which point the let is initialized. Walked all four scenarios: happy path, fast nav, consecutive moves, and animation-completion-after-supersession; all behave correctly. JS syntax validated.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -19454,6 +19454,9 @@ function clearBoard() {
 }
 
 // ─── Previous-move highlights (persistent, Lichess-style) ───
+// Annot-H2: token bumped by clearLastMoveHighlight; deferred re-apply checks
+// the captured value before painting on a (potentially navigated-away) board.
+let _lastMoveHighlightToken = 0;
 function showLastMoveHighlight(from, to) {
   clearLastMoveHighlight();
   if (!from || !to) return;
@@ -19463,13 +19466,29 @@ function showLastMoveHighlight(from, to) {
   if (toEl) toEl.classList.add('square-lastmove');
 }
 function clearLastMoveHighlight() {
+  // Annot-H2: bump token so any in-flight deferred re-apply (250ms after a
+  // boardObj.position animation) bails before painting on a stale board.
+  // Without this, fast nav (Next/Skip/Esc within 250ms of a move) would let
+  // the timer re-paint the OLD position's lastmove squares onto the NEW
+  // board, leaving phantom highlights until the next user action.
+  _lastMoveHighlightToken++;
   document.querySelectorAll('.square-lastmove').forEach(el => el.classList.remove('square-lastmove'));
 }
 /** Apply lastmove highlight now AND re-apply after board animation settles (250ms).
  *  Needed because boardObj.position(fen, true) animation can wipe DOM classes on completion. */
 function showLastMoveHighlightDeferred(from, to) {
   showLastMoveHighlight(from, to);
-  setTimeout(() => showLastMoveHighlight(from, to), 250);
+  // Annot-H2: capture the token at schedule time. If anything bumps it before
+  // the timer fires (clearLastMoveHighlight runs from clearBoardOverlays /
+  // loadPosition / mode transitions; or another deferred call supersedes by
+  // calling showLastMoveHighlight → clearLastMoveHighlight), the timer
+  // becomes a no-op rather than re-applying stale (from, to) to whatever
+  // board is currently visible.
+  const myToken = _lastMoveHighlightToken;
+  setTimeout(() => {
+    if (_lastMoveHighlightToken !== myToken) return;
+    showLastMoveHighlight(from, to);
+  }, 250);
 }
 
 /** Find the square of the king of the given color in a chess.js instance.
@@ -19502,6 +19521,10 @@ function findKingSquare(chess, color /* 'w' | 'b' */) {
  *  Called wherever the board position is updated (loadPosition, goToContLineMove,
  *  onSnapEnd, advanceContinuation, analysis nav, filter nav, etc.). Safe no-op
  *  when chess is falsy. */
+// Annot-H2: token bumped by clearCheckHighlight; deferred re-apply checks
+// the captured value before painting based on a (closure-captured) chess
+// instance that may now reflect a navigated-away position.
+let _checkHighlightToken = 0;
 function showCheckHighlight(chess) {
   clearCheckHighlight();
   if (!chess || typeof chess.in_check !== 'function') return;
@@ -19514,6 +19537,13 @@ function showCheckHighlight(chess) {
 }
 
 function clearCheckHighlight() {
+  // Annot-H2: bump token so any in-flight deferred re-apply bails. The
+  // deferred function's closure captures the OLD chess.js instance — without
+  // this, fast nav can have the 250ms timer wipe the new position's
+  // legitimate check (showCheckHighlight clears first), then re-apply the
+  // OLD position's king square if the OLD instance had check, painting
+  // .square-check on a square the new board may have moved a piece onto.
+  _checkHighlightToken++;
   document.querySelectorAll('.square-check, .square-checkmate').forEach(el => {
     el.classList.remove('square-check', 'square-checkmate');
   });
@@ -19525,7 +19555,16 @@ function clearCheckHighlight() {
  *  the animation resolved. */
 function showCheckHighlightDeferred(chess) {
   showCheckHighlight(chess);
-  setTimeout(() => showCheckHighlight(chess), 250);
+  // Annot-H2: capture token after the immediate apply (which itself bumps via
+  // clearCheckHighlight). The 250ms re-apply only fires if no other clear /
+  // deferred-apply has run in the meantime. Critical because `chess` is a
+  // closure ref; if a new chess.js exists for a new position, re-applying
+  // would paint based on the OLD position's check state on the NEW board.
+  const myToken = _checkHighlightToken;
+  setTimeout(() => {
+    if (_checkHighlightToken !== myToken) return;
+    showCheckHighlight(chess);
+  }, 250);
 }
 
 /** Compute the previous move (opponent's move) that led to a mistake/tactic position */
@@ -19559,7 +19598,9 @@ function clearHighlights() {
 // legal-move dots, hint highlights, best-move arrows, or user annotations can't
 // leak into the new context. Covers:
 //   • piece selection + legal-move dots (via clearHighlights → clearSelection)
-//   • .square-hl last-move highlights (via clearHighlights)
+//   • .square-hl transient post-move feedback overlays (via clearHighlights —
+//     these are the colored fade animations from highlightSquaresWithColor,
+//     NOT the last-move highlight; see "Does NOT touch" below for that)
 //   • .square-hint + hintArrow (via clearHintHighlights)
 //   • bestMoveArrow, analysisArrow, moveClassBadge, ghost*, activeArrows/Circles,
 //     noteArrows/Circles, analysisPvArrows (via clearArrows — which also
@@ -19568,7 +19609,10 @@ function clearHighlights() {
 //     the previous position; the new position's check state is computed and
 //     re-applied by callers via showCheckHighlight after boardObj.position)
 // Does NOT touch: .square-lastmove (per-caller: many transitions repaint it for
-// the new position — clearing here would force repaints or cause flicker),
+// the new position — clearing here would force repaints or cause flicker;
+// callers that need it cleared call clearLastMoveHighlight separately —
+// loadPosition, exitEngineLine, retryPosition, and analysis-mode entry
+// among others),
 // .square-premove (separate clearPremove), filterArrows (scoped to filter mode),
 // or any feedback/contLine DOM (not board overlays). Idempotent.
 function clearBoardOverlays() {
