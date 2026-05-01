@@ -1709,7 +1709,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Annotations scan part 1/3 — H1 + H2 (highlight timing fixes). H1: clearBoardOverlays doc-comment correction. The comment claimed it covers `.square-hl last-move highlights (via clearHighlights)`, conflating two distinct overlays — `.square-hl` is the TRANSIENT animation overlay from highlightSquaresWithColor (good-move feedback fade), while the actual last-move highlight is `.square-lastmove`, which the next bullet correctly notes is intentionally untouched. Updated to clarify .square-hl is post-move feedback (NOT last-move), pointed callers needing last-move clearing to clearLastMoveHighlight separately (loadPosition / exitEngineLine / retryPosition / analysis-mode entry). Documentation bug only, no runtime change. H2: deferred-timer cancellation for showLastMoveHighlightDeferred + showCheckHighlightDeferred. Both functions schedule a 250ms re-apply (needed because chessboard.js animated boardObj.position() wipes square classes on completion). Previously fire-and-forget — fast nav (Next/Skip/Esc within 250ms of a move) would let the timer re-paint the OLD position's lastmove squares onto the NEW board. Worse for check: timer captures the OLD chess.js instance in closure; if OLD position had check at e8 and NEW does not, timer paints .square-check on e8 of the new board (which may now be empty); if OLD didn't have check but NEW does, the deferred call wipes the legitimate check painted by loadPosition. Both reachable via fast clicking. Fix: token-based cancellation. _lastMoveHighlightToken / _checkHighlightToken are bumped by clearLastMoveHighlight / clearCheckHighlight; deferred functions capture the token at schedule time and bail in the timer if a bump occurred meanwhile. Verified at runtime — let-after-function-decl works because functions are only called after the script body completes, by which point the let is initialized. Walked all four scenarios: happy path, fast nav, consecutive moves, and animation-completion-after-supersession; all behave correctly. JS syntax validated.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Annotations scan part 2/3 — gesture handling (M2 + L1 + L3). M2: orientation flip during arrow drag corrupts gesture. boardObj.orientation() is called from 31+ sites (analysisFlipBoard via F-key, color-filter chip click, mode entry/exit); none cancels an in-progress arrow gesture. arrowStartSquare references the OLD orientation's square; getSquareFromMouseEvent reads the NEW orientation, so mouseup commits an arrow connecting two squares the user never gestured between. Fix: capture orientation at right-mousedown into new arrowStartOrientation; mousemove and mouseup compare against current boardObj.orientation() and call _abortArrowGesture() if changed. Detection at gesture boundary instead of cancelling at all 31 setter sites. L1: arrowStartSquare not reset on non-RMB mouseup. Some browsers fire fake mouseup with a different button on focus loss, dialog open, or synthetic input. Without an abort branch, gesture state stays wedged until next mousedown and ghostArrow can keep redrawing on subsequent mousemove events. Fix: mouseup checks `e.button !== 2 && arrowStartSquare` and calls _abortArrowGesture(). L3: ghostCircleWasColor reset asymmetry between desktop mouseup and mobileDrawTouchEnd. Mobile end resets it; desktop didn't. No reachable bug today (next RMB-mousedown re-assigns unconditionally), but a code-smell asymmetry that bit-rots into one. Fix: include ghostCircleWasColor + arrowStartOrientation in the desktop mouseup reset block. Consolidated all three into a single _abortArrowGesture helper that restores any preview circle stolen on mousedown (so user's prior annotation isn't lost when aborting mid-gesture). Walked through helper logic for all four ghostCircle states (no preview / circle-was-color preserved / dragged-away / dragged-back) — each transitions correctly. Two scan findings (M3 ghost-arrow-off-board, M4 right-click-on-border) were rejected during self-review as misdiagnoses where the original behavior was actually intentional Lichess-style UX. JS syntax validated.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2034,6 +2034,13 @@
 // ─── State ───
 // ─── Arrow drawing ───
 let arrowStartSquare = null;
+// Annot-M2: orientation captured at right-mousedown so mouseup/mousemove can
+// detect a flip (analysisFlipBoard via F-key, color-filter chip click, mode
+// entry/exit) and abort the in-progress arrow gesture rather than committing
+// a different "from"/"to" derived from the post-flip board geometry. There
+// are 31+ orientation setter sites; instead of cancelling at every one, we
+// detect at the gesture boundary.
+let arrowStartOrientation = null;
 let activeArrows = new Map(); // key "e2e4" → color ('green'|'red'|'blue')
 let activeCircles = new Map(); // square "e4" → color ('green'|'red'|'blue')
 let ghostCircle = null; // square string for preview circle during right-click hold
@@ -12279,6 +12286,10 @@ function onBoardClick(e) {
     const sq = getSquareFromMouseEvent(e);
     if (sq) {
       arrowStartSquare = sq;
+      // Annot-M2: snapshot orientation so mousemove/mouseup can abort if
+      // the board flipped mid-gesture (post-flip square geometry would map
+      // the user's cursor to a different square than they aimed for).
+      arrowStartOrientation = boardObj ? boardObj.orientation() : null;
       ghostArrow = null;
       currentDrawColor = getDrawColor(e);
       // If square already has a circle, pull it into ghost state (preview removal)
@@ -19737,9 +19748,41 @@ function initArrowListeners() {
   boardEl.addEventListener('contextmenu', (e) => e.preventDefault());
 
 
+  // Annot-M2/L1/L3: shared cleanup helper for arrow gestures. Used by
+  // mousemove (orientation-flip detected mid-drag) and mouseup (normal
+  // completion or any non-RMB mouseup that finds an active gesture).
+  // Resets ALL gesture state including ghostCircleWasColor (parity with
+  // mobileDrawTouchEnd which already does so; desktop mouseup previously
+  // left it stale until next mousedown).
+  const _abortArrowGesture = () => {
+    // Restore any preview circle we stole on mousedown so the user's prior
+    // annotation isn't lost when we abort mid-gesture.
+    if (ghostCircleWasColor && arrowStartSquare && !activeCircles.has(arrowStartSquare)) {
+      activeCircles.set(arrowStartSquare, ghostCircleWasColor);
+    }
+    arrowStartSquare = null;
+    arrowStartOrientation = null;
+    ghostArrow = null;
+    ghostCircle = null;
+    ghostCircleWasColor = null;
+    isRightClicking = false;
+    renderArrows();
+  };
+
   window.addEventListener('mousemove', (e) => {
     if (!arrowStartSquare) return;
-    
+
+    // Annot-M2: orientation flipped mid-gesture (analysisFlipBoard,
+    // color-filter chip, mode entry). The captured arrowStartSquare references
+    // the OLD orientation's square; getSquareFromMouseEvent reads the NEW
+    // orientation, mapping the user's cursor to a different square than they
+    // started on. Abort cleanly rather than commit a gesture the user didn't
+    // make.
+    if (boardObj && arrowStartOrientation && boardObj.orientation() !== arrowStartOrientation) {
+      _abortArrowGesture();
+      return;
+    }
+
     const currentSq = getSquareFromMouseEvent(e);
     if (currentSq && currentSq !== arrowStartSquare) {
       // Dragging away — cancel circle preview, arrow takes over
@@ -19750,19 +19793,41 @@ function initArrowListeners() {
       }
       ghostArrow = { from: arrowStartSquare, to: currentSq };
       renderArrows();
-    } else if (currentSq && currentSq === arrowStartSquare && ghostArrow) {
+    } else if (currentSq === arrowStartSquare && ghostArrow) {
       // Dragged back to start — cancel arrow, restore ghost circle
       ghostArrow = null;
       if (ghostCircleWasColor) activeCircles.delete(arrowStartSquare);
       ghostCircle = arrowStartSquare;
       renderArrows();
     }
+    // (Note: when currentSq===null — mouse off-board mid-drag — neither
+    // branch fires and ghostArrow stays at its last on-board endpoint.
+    // This is intentional/Lichess-style: the drag preview persists until
+    // mouseup, which itself reads endSq===null and skips commit branches,
+    // resetting state cleanly via the standard cleanup below.)
   });
 
   window.addEventListener('mouseup', (e) => {
+    // Annot-L1: also handle non-RMB mouseup if a gesture is in progress.
+    // Some browsers fire fake mouseup with a different button on focus
+    // loss, dialog open, or synthetic input. Without this branch, the
+    // gesture state stays wedged until the next mousedown and ghostArrow
+    // can keep redrawing on subsequent mousemove events.
+    if (e.button !== 2 && arrowStartSquare) {
+      _abortArrowGesture();
+      return;
+    }
     if (e.button === 2 && arrowStartSquare) {
+      // Annot-M2: if orientation changed mid-gesture, the captured
+      // arrowStartSquare is in the OLD coordinate system but endSq below
+      // would be in the NEW system. The two could form an arrow the user
+      // never intended. Abort instead.
+      if (boardObj && arrowStartOrientation && boardObj.orientation() !== arrowStartOrientation) {
+        _abortArrowGesture();
+        return;
+      }
       const endSq = getSquareFromMouseEvent(e);
-      
+
       if (endSq && endSq !== arrowStartSquare) {
         const arrowKey = `${arrowStartSquare}${endSq}`;
         // Toggle: same color removes, different color replaces
@@ -19782,10 +19847,16 @@ function initArrowListeners() {
           activeCircles.set(endSq, currentDrawColor);
         }
       }
-      
+
+      // Annot-L3: include ghostCircleWasColor + arrowStartOrientation in the
+      // reset for parity with mobileDrawTouchEnd. Previously left stale until
+      // next mousedown — no reachable bug today (next RMB-mousedown re-assigns
+      // unconditionally), but a code-smell asymmetry that bit-rots into one.
       arrowStartSquare = null;
+      arrowStartOrientation = null;
       ghostArrow = null;
       ghostCircle = null;
+      ghostCircleWasColor = null;
       isRightClicking = false;
       renderArrows();
     }
