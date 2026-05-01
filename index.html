@@ -1709,7 +1709,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Annotations scan part 2/3 — gesture handling (M2 + L1 + L3). M2: orientation flip during arrow drag corrupts gesture. boardObj.orientation() is called from 31+ sites (analysisFlipBoard via F-key, color-filter chip click, mode entry/exit); none cancels an in-progress arrow gesture. arrowStartSquare references the OLD orientation's square; getSquareFromMouseEvent reads the NEW orientation, so mouseup commits an arrow connecting two squares the user never gestured between. Fix: capture orientation at right-mousedown into new arrowStartOrientation; mousemove and mouseup compare against current boardObj.orientation() and call _abortArrowGesture() if changed. Detection at gesture boundary instead of cancelling at all 31 setter sites. L1: arrowStartSquare not reset on non-RMB mouseup. Some browsers fire fake mouseup with a different button on focus loss, dialog open, or synthetic input. Without an abort branch, gesture state stays wedged until next mousedown and ghostArrow can keep redrawing on subsequent mousemove events. Fix: mouseup checks `e.button !== 2 && arrowStartSquare` and calls _abortArrowGesture(). L3: ghostCircleWasColor reset asymmetry between desktop mouseup and mobileDrawTouchEnd. Mobile end resets it; desktop didn't. No reachable bug today (next RMB-mousedown re-assigns unconditionally), but a code-smell asymmetry that bit-rots into one. Fix: include ghostCircleWasColor + arrowStartOrientation in the desktop mouseup reset block. Consolidated all three into a single _abortArrowGesture helper that restores any preview circle stolen on mousedown (so user's prior annotation isn't lost when aborting mid-gesture). Walked through helper logic for all four ghostCircle states (no preview / circle-was-color preserved / dragged-away / dragged-back) — each transitions correctly. Two scan findings (M3 ghost-arrow-off-board, M4 right-click-on-border) were rejected during self-review as misdiagnoses where the original behavior was actually intentional Lichess-style UX. JS syntax validated.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Annotations scan part 3/3 — hint cleanup, refactor, dead code (M5 + L2 + L4 + L5 + L6 + L7 + L8). M5: clearArrows nulls hintArrow but leaves the .square-hint CSS class on the origin square. Reachable via prevPosition / nextPosition / skipPosition: each calls clearArrows() at top, then conditionally calls loadPosition (which would clear via clearBoardOverlays). At the boundaries (no-prev / no-next / no-skip-next branches) no loadPosition follows, so .square-hint persists indefinitely. Initial fix attempt to also strip .square-hint inside clearArrows itself caused a regression in the H→click→H multi-press progression (second H press would land at hintLevel===1 and only set hintArrow without re-adding the class, leaving a broken level-2 visual). Final fix is targeted: explicit clearHintHighlights() in each of the three nav functions, idempotent in the happy path. L2: clearFeedbackAndOverlays duplicated ~12 lines of clearArrows logic. Refactored to call clearArrows() instead — only behavioral diff is also resetting noteArrows / noteCircles to [] which is no-op-equivalent today (closeNotePanel clears on dismiss, and the render gate at notePanelOpen hides them anyway when panel is closed). Defensive `typeof === function` guards dropped — activeArrows / activeCircles are always Maps. L4: getSquareCenter dead code removed (comment claimed it was a fallback for getSquareFromMouseEvent but had no callers anywhere). L5: hideArrow dead code removed (defined but never called; drawArrow has 2 callers and is kept). L6: highlightSquaresWithColor.applyHl previously addEventListener'd a fresh animationend handler on every call. If clearHighlights ran before the 5s fade animation finished, the listener stayed bound; subsequent applies stacked listeners. {once:true} bounded the leak per-animation-event but worst-case allowed unbounded accumulation under rapid input. Fix: store handler reference on element via _hlAnimationEndHandler property, removeEventListener the previous handler before adding new one. L7: getSquareFromMouseEvent lacked the `if (!boardEl) return null` guard that getSquareFromEvent (touch variant) has. Defensive parity addition; currently unreachable because boardObj.clear() in logout doesn't remove the chessboard.js child element. L8: activeArrows / activeCircles / ghostArrow / ghostCircle render lines lacked the `|| DRAW_COLOR_MAP.green` fallback that note arrays have. Today all four colors getDrawColor returns (green/red/blue/yellow) exist in the map, but enterNoteEditMode populates from saved note data — a future schema or corrupted Gist with an unknown color would crash renderArrows mid-pass. Mirrored the fallback. Diff stats: +78 / -45. JS syntax validated.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -19204,6 +19204,13 @@ function prevPosition() {
   // stays open and the user can save/cancel/keep editing as they intend.
   if (!confirmDiscardNote()) return;
   clearArrows()
+  // Annot-M5: also clear .square-hint + hintArrow. clearArrows alone leaves
+  // the .square-hint CSS class painted (intentionally — see comment in
+  // clearArrows). Most nav calls follow with loadPosition which clears via
+  // clearBoardOverlays, but at the boundaries (no-prev / no-next / no-skip
+  // branches below) no loadPosition runs and the hint highlight would
+  // otherwise persist indefinitely. Idempotent in the loadPosition path.
+  clearHintHighlights();
   if (reviewMode) {
     const currentInQueue = reviewQueue.findIndex(m => filteredMistakes.indexOf(m) === currentMistakeIdx);
     if (currentInQueue > 0) {
@@ -19226,6 +19233,9 @@ function nextPosition() {
   // Finding 3: see prevPosition for rationale.
   if (!confirmDiscardNote()) return;
   clearArrows()
+  // Annot-M5: see prevPosition for rationale — explicit clearHintHighlights
+  // covers the no-next-position boundary case where loadPosition won't run.
+  clearHintHighlights();
   if (reviewMode) {
     advanceReviewQueue();
     return;
@@ -19244,6 +19254,10 @@ function skipPosition() {
   // Finding 3: see prevPosition for rationale.
   if (!confirmDiscardNote()) return;
   clearArrows()
+  // Annot-M5: see prevPosition for rationale — explicit clearHintHighlights
+  // covers the "no more positions in this game" boundary case where
+  // loadPosition won't run and the hint highlight would otherwise persist.
+  clearHintHighlights();
   const m = filteredMistakes[currentMistakeIdx];
   // Skip = record as "Again" so it comes back soon (only if not already graded).
   // Finding #17: exclude synthetic items (filter practice / resumed games) from
@@ -19649,17 +19663,15 @@ function clearFeedbackAndOverlays() {
   const infoContent = document.getElementById('posInfoContent');
   if (infoContent) infoContent.innerHTML = '';
 
-  // Arrow / badge overlay state
-  bestMoveArrow = null;
-  analysisArrow = null;
-  hintArrow = null;
-  moveClassBadge = null;
-  ghostArrow = null;
-  ghostCircle = null;
-  ghostCircleWasColor = null;
-  analysisPvArrows = [];
-  if (activeArrows && typeof activeArrows.clear === 'function') activeArrows.clear();
-  if (activeCircles && typeof activeCircles.clear === 'function') activeCircles.clear();
+  // Annot-L2: defer arrow/badge/ghost state reset to clearArrows. Was
+  // previously inlined here as ~12 lines of state nulls — code-duplication
+  // hazard (every new arrow type added needed updates in two places). The
+  // only behavioral diff: clearArrows also resets noteArrows / noteCircles
+  // to []. Today this is a no-op-equivalent because (a) closeNotePanel
+  // clears them on dismiss and (b) the render gate at notePanelOpen hides
+  // them anyway when the panel is closed. clearArrows internally calls
+  // renderArrows() to flush the SVG.
+  clearArrows();
   // Finding 5: reset noteJumpedAway latch + variation browse pointer.
   // jumpBoardToNoteFen sets noteJumpedAway=true to block onDragStart /
   // onBoardClick from evaluating moves against the stale drill context
@@ -19681,14 +19693,13 @@ function clearFeedbackAndOverlays() {
   // the loop aborts on null).
   window._reviewBestLine = null;
 
-  // Board square classes
+  // Board square classes (NOT covered by clearArrows — see IMP-004 comment
+  // on clearBoardOverlays for the canonical separation between arrow-shaped
+  // overlays and CSS-class-based square overlays).
   clearLastMoveHighlight();
   clearHighlights();
   clearHintHighlights();
   clearPremove();
-
-  // Flush SVG overlay
-  if (typeof renderArrows === 'function') renderArrows();
 }
 
 function clearPremove() {
@@ -19726,15 +19737,31 @@ function highlightSquaresWithColor(from, to, color) {
     // Remove existing highlight to allow re-triggering animation on same square
     el.classList.remove('square-hl');
     el.style.removeProperty('--hl-color');
+    // Annot-L6: also detach any previous animationend listener BEFORE adding
+    // a new one. Each applyHl call used to addEventListener({once:true}) — if
+    // clearHighlights ran (or another applyHl on the same square ran) before
+    // the 5s fade animation completed, the listener stayed bound. Subsequent
+    // calls then stacked listeners; on the next animationend all stacked
+    // listeners fired (idempotent class-removes, harmless individually) but
+    // the {once:true} cleanup fired N times wasting work. Under contrived
+    // rapid input the leak grows unbounded. Tracking the handler on the
+    // element via a non-DOM property lets us removeEventListener cleanly.
+    if (el._hlAnimationEndHandler) {
+      el.removeEventListener('animationend', el._hlAnimationEndHandler);
+      el._hlAnimationEndHandler = null;
+    }
     void el.offsetWidth; // force reflow to restart animation
     // Apply overlay
     el.style.setProperty('--hl-color', `rgba(${r},${g},${b},${alpha})`);
     el.classList.add('square-hl');
     // Clean up after fade animation completes
-    el.addEventListener('animationend', () => {
+    const handler = () => {
       el.classList.remove('square-hl');
       el.style.removeProperty('--hl-color');
-    }, { once: true });
+      el._hlAnimationEndHandler = null;
+    };
+    el._hlAnimationEndHandler = handler;
+    el.addEventListener('animationend', handler, { once: true });
   };
   applyHl(document.querySelector(`.square-${from}`), 0.5);
   applyHl(document.querySelector(`.square-${to}`), 0.7);
@@ -19865,6 +19892,12 @@ function initArrowListeners() {
 
 function getSquareFromMouseEvent(e) {
   const boardEl = document.querySelector('#board [class^="board-"]');
+  // Annot-L7: defensive null guard, parity with getSquareFromEvent (touch
+  // variant defined later in this file). Currently unreachable because
+  // boardObj.clear() in logout doesn't remove the child element — but a
+  // future destroy() call or pre-init mousemove would otherwise throw
+  // TypeError on the getBoundingClientRect call below.
+  if (!boardEl) return null;
   const rect = boardEl.getBoundingClientRect();
   const x = e.clientX - rect.left;
   const y = e.clientY - rect.top;
@@ -19942,6 +19975,14 @@ function clearArrows() {
   // smell — a caller asking to "clear arrows" should not leave one behind.
   // clearHintHighlights still clears it too; redundant set-to-null is safe.
   hintArrow = null;
+  // Annot-M5 (note): clearArrows intentionally does NOT remove the
+  // .square-hint CSS class. The hint is a stateful, multi-press progression
+  // (H→highlight, H→arrow added) — clearing the class on every clearArrows
+  // call (e.g. left-click between presses) would make the second H land on
+  // hintLevel===1 and only set hintArrow, leaving a broken level-2 visual
+  // missing the from-square highlight. Callers that genuinely want full
+  // hint cleanup (loadPosition, nav functions) call clearHintHighlights
+  // explicitly. See nextPosition / prevPosition / skipPosition.
   renderArrows();
 }
 
@@ -20056,9 +20097,20 @@ function renderArrows() {
     // Hint arrow
     if (hintArrow) drawOne(hintArrow.from, hintArrow.to, 'rgba(66, 133, 244, 0.7)', 1);
     // User-drawn arrows
-    activeArrows.forEach((color, key) => drawOne(key.substring(0, 2), key.substring(2, 4), DRAW_COLOR_MAP[color].arrow, 1));
+    // Annot-L8: defensive `|| DRAW_COLOR_MAP.green` fallback for parity with
+    // noteArrows/noteCircles. Today getDrawColor only returns colors known to
+    // DRAW_COLOR_MAP, but enterNoteEditMode populates activeArrows from saved
+    // note data — a future schema or corrupted Gist with an unknown color
+    // would crash renderArrows mid-pass without this guard.
+    activeArrows.forEach((color, key) => {
+      const c = DRAW_COLOR_MAP[color] || DRAW_COLOR_MAP.green;
+      drawOne(key.substring(0, 2), key.substring(2, 4), c.arrow, 1);
+    });
     // Ghost arrow while dragging
-    if (ghostArrow) drawOne(ghostArrow.from, ghostArrow.to, DRAW_COLOR_MAP[currentDrawColor].arrow, 0.6);
+    if (ghostArrow) {
+      const gc = DRAW_COLOR_MAP[currentDrawColor] || DRAW_COLOR_MAP.green;
+      drawOne(ghostArrow.from, ghostArrow.to, gc.arrow, 0.6);
+    }
 
     // User-drawn circles (right-click on same square, Lichess-style)
     const circleStroke = sqSize * 0.056;
@@ -20066,7 +20118,9 @@ function renderArrows() {
       const center = sqCenter(sq);
       if (!center) return;
       const r = sqSize * 0.46;
-      html += `<circle cx="${center.x}" cy="${center.y}" r="${r}" fill="none" stroke="${DRAW_COLOR_MAP[color].circle}" stroke-width="${circleStroke}" opacity="0.9" />`;
+      // Annot-L8: same defensive fallback as activeArrows above.
+      const c = DRAW_COLOR_MAP[color] || DRAW_COLOR_MAP.green;
+      html += `<circle cx="${center.x}" cy="${center.y}" r="${r}" fill="none" stroke="${c.circle}" stroke-width="${circleStroke}" opacity="0.9" />`;
     });
     // Note circles (semi-transparent)
     // Finding 11: same notePanelOpen gate as note arrows above.
@@ -20084,7 +20138,9 @@ function renderArrows() {
       const center = sqCenter(ghostCircle);
       if (center) {
         const r = sqSize * 0.46;
-        html += `<circle cx="${center.x}" cy="${center.y}" r="${r}" fill="none" stroke="${DRAW_COLOR_MAP[currentDrawColor].ghost}" stroke-width="${circleStroke * 0.7}" opacity="0.5" />`;
+        // Annot-L8: same defensive fallback as activeArrows / activeCircles.
+        const gcc = DRAW_COLOR_MAP[currentDrawColor] || DRAW_COLOR_MAP.green;
+        html += `<circle cx="${center.x}" cy="${center.y}" r="${r}" fill="none" stroke="${gcc.ghost}" stroke-width="${circleStroke * 0.7}" opacity="0.5" />`;
       }
     }
 
@@ -20123,31 +20179,8 @@ function renderArrows() {
     svg.innerHTML = html;
 }
 
-function getSquareCenter(sq, boardWidth) {
-  // Used by getSquareFromMouseEvent fallback — mathematical calculation
-  const isWhite = boardObj.orientation() === 'white';
-  const file = sq.charCodeAt(0) - 97;
-  const rank = parseInt(sq[1]) - 1;
-
-  const sqSize = boardWidth / 8;
-  const fIdx = isWhite ? file : 7 - file;
-  const rIdx = isWhite ? 7 - rank : rank;
-
-  return {
-    x: (fIdx + 0.5) * sqSize,
-    y: (rIdx + 0.5) * sqSize
-  };
-}
-
 function drawArrow(from, to) {
   bestMoveArrow = { from, to };
-  renderArrows();
-}
-
-function hideArrow() {
-  bestMoveArrow = null;
-  analysisArrow = null;
-  moveClassBadge = null;
   renderArrows();
 }
 
