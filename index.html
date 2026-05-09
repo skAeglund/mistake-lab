@@ -1299,8 +1299,14 @@
     /* Bottom padding when line nav bar is visible */
     body.line-nav-active .panel-right { padding-bottom: 128px; }
 
-    /* Hide old inline ‹ › nav row when mobile bottom bar is active */
-    body.line-nav-active .engine-line-nav { display: none !important; }
+    /* Hide duplicate ‹ › step buttons + the "← → to step" hint when the
+       mobile bottom nav-bar is active. The Back button and 📋 stay visible
+       — the bottom bar duplicates ‹ › only, so without this Back becomes
+       unreachable on mobile (especially critical for game-review's Show
+       Line / Show Refutation branch flow, where Back is the only path
+       back to the review card). */
+    body.line-nav-active .engine-line-nav .engine-line-step-btn,
+    body.line-nav-active .engine-line-nav .engine-line-step-hint { display: none !important; }
 
     /* Merged continuation header: "Continuation Practice · Opponent played X (Source)" */
     .cont-line-header { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 8px; }
@@ -1709,7 +1715,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Annotations scan part 3/3 — hint cleanup, refactor, dead code (M5 + L2 + L4 + L5 + L6 + L7 + L8). M5: clearArrows nulls hintArrow but leaves the .square-hint CSS class on the origin square. Reachable via prevPosition / nextPosition / skipPosition: each calls clearArrows() at top, then conditionally calls loadPosition (which would clear via clearBoardOverlays). At the boundaries (no-prev / no-next / no-skip-next branches) no loadPosition follows, so .square-hint persists indefinitely. Initial fix attempt to also strip .square-hint inside clearArrows itself caused a regression in the H→click→H multi-press progression (second H press would land at hintLevel===1 and only set hintArrow without re-adding the class, leaving a broken level-2 visual). Final fix is targeted: explicit clearHintHighlights() in each of the three nav functions, idempotent in the happy path. L2: clearFeedbackAndOverlays duplicated ~12 lines of clearArrows logic. Refactored to call clearArrows() instead — only behavioral diff is also resetting noteArrows / noteCircles to [] which is no-op-equivalent today (closeNotePanel clears on dismiss, and the render gate at notePanelOpen hides them anyway when panel is closed). Defensive `typeof === function` guards dropped — activeArrows / activeCircles are always Maps. L4: getSquareCenter dead code removed (comment claimed it was a fallback for getSquareFromMouseEvent but had no callers anywhere). L5: hideArrow dead code removed (defined but never called; drawArrow has 2 callers and is kept). L6: highlightSquaresWithColor.applyHl previously addEventListener'd a fresh animationend handler on every call. If clearHighlights ran before the 5s fade animation finished, the listener stayed bound; subsequent applies stacked listeners. {once:true} bounded the leak per-animation-event but worst-case allowed unbounded accumulation under rapid input. Fix: store handler reference on element via _hlAnimationEndHandler property, removeEventListener the previous handler before adding new one. L7: getSquareFromMouseEvent lacked the `if (!boardEl) return null` guard that getSquareFromEvent (touch variant) has. Defensive parity addition; currently unreachable because boardObj.clear() in logout doesn't remove the chessboard.js child element. L8: activeArrows / activeCircles / ghostArrow / ghostCircle render lines lacked the `|| DRAW_COLOR_MAP.green` fallback that note arrays have. Today all four colors getDrawColor returns (green/red/blue/yellow) exist in the map, but enterNoteEditMode populates from saved note data — a future schema or corrupted Gist with an unknown color would crash renderArrows mid-pass. Mirrored the fallback. Diff stats: +78 / -45. JS syntax validated.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Game review: always-reachable Back-to-review path from engine line. Fixes a mobile trap where pressing Show Line / Show Refutation on a key-move card and then making an alt move on the board left the user with no way back to the review. Three things conspired: (1) handleEngineLineBranch wipes feedbackContainer, destroying the original "← Back to review" button rendered by showReviewBestLine / showReviewRefutation. (2) The freshly-rendered engineLineBox's Back button called exitEngineLine, which clears the engineLine but leaves window._reviewBestLine orphaned and never restores the key-move review card. (3) On mobile, body.line-nav-active hid the entire .engine-line-nav row because the bottom nav-bar duplicates ‹ › — but the bar doesn't duplicate Back, so on mobile there was no exit at all (Escape works on desktop via the existing _reviewBestLine check at line 24020, but mobile has no Escape). Fixes: renderEngineLine's Back button is now context-aware — when window._reviewBestLine is set it labels "← Back to review" and calls exitReviewBestLine(moveIdx); otherwise unchanged. ‹ › buttons + the now-misleading "← → to step" hint get classes (engine-line-step-btn, engine-line-step-hint) so the mobile CSS can target them precisely instead of hiding the whole row. exitReviewBestLine gains exitEngineLine's SF cleanup (clearAnalysisArrow + main-worker terminate-and-reinit when sfSearchActive) so a still-running branch sfAnalyzeAdaptive doesn't keep the worker CPU-bound after exit (UCI `stop` is forbidden — it crashes SF18 lite-single). Also covers Show Refutation since it shares the same engineLine mirroring mechanism. Analysis Mode entry from review was already correct (analysisSavedState.reviewSnapshot path).</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -15678,15 +15684,27 @@ function renderEngineLine() {
     }
   }
 
+  // Back button is context-aware: when this engineLine is mirrored from a
+  // game-review Show Line / Show Refutation (window._reviewBestLine set),
+  // exiting must route through exitReviewBestLine so the key-move review
+  // card is restored. Plain exitEngineLine here would clear the engineLine
+  // but leave _reviewBestLine orphaned — and since handleEngineLineBranch
+  // wipes feedbackContainer (destroying the original "← Back to review"
+  // button), the user would have no way back to the review.
+  const reviewMoveIdx = window._reviewBestLine?.moveIdx;
+  const inReview = reviewMoveIdx !== undefined;
+  const backBtn = inReview
+    ? `<button class="btn btn-ghost btn-sm" onclick="exitReviewBestLine(${reviewMoveIdx})">← Back to review</button>`
+    : `<button class="btn btn-ghost btn-sm" onclick="exitEngineLine()">Back</button>`;
   div.innerHTML = `
     <h4>Engine Line</h4>
     <div class="engine-line-moves">${movesHtml}</div>
     <div class="engine-line-nav">
-      <button class="btn btn-ghost btn-sm" onclick="lineStep(-1)">‹</button>
-      <button class="btn btn-ghost btn-sm" onclick="lineStep(1)">›</button>
-      <button class="btn btn-ghost btn-sm" onclick="exitEngineLine()">Back</button>
+      <button class="btn btn-ghost btn-sm engine-line-step-btn" onclick="lineStep(-1)">‹</button>
+      <button class="btn btn-ghost btn-sm engine-line-step-btn" onclick="lineStep(1)">›</button>
+      ${backBtn}
       <button class="btn btn-ghost btn-sm" onclick="copyEngineLinePgn(this)" title="Copy line as PGN" aria-label="Copy line as PGN">📋</button>
-      <span class="hint">← → to step · make a move to branch</span>
+      <span class="hint engine-line-step-hint">← → to step · make a move to branch</span>
     </div>
   `;
 
@@ -18238,6 +18256,24 @@ function exitReviewBestLine(moveIdx) {
   // last-browsed line position) doesn't keep feeding updateEvalBar via the
   // `browsingLine && evalSfResult` branch once we're back at the key-move card.
   stopEvalWorkerSearch();
+  // Mirror exitEngineLine's SF cleanup. If the user clicked Back while
+  // handleEngineLineBranch's sfAnalyzeAdaptive was still running for a
+  // freshly-created alt, the post-await `engineLine === el` guard makes
+  // the result a no-op — but the worker keeps churning on its `go`
+  // command until bestmove arrives, draining mobile battery. Cancelling
+  // requires terminate + reinit (UCI `stop` crashes SF18 lite-single).
+  // Also clears any analysis arrow the branch's onUpdate callback last
+  // painted before the engineLine === el guard started failing.
+  clearAnalysisArrow();
+  if (sfSearchActive && sfWorker) {
+    drainSfPendingResolvers();
+    try { sfWorker.terminate(); } catch (_) {}
+    sfWorker = null;
+    sfReady = false;
+    sfSearchActive = false;
+    preAnalysisListener = null;
+    initStockfish();
+  }
   updateEvalBar();
   updateLineNavBar();
   // Coming back from a retry-context refutation: restore the retry result card
