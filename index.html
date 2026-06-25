@@ -1715,7 +1715,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Game review: always-reachable Back-to-review path from engine line. Fixes a mobile trap where pressing Show Line / Show Refutation on a key-move card and then making an alt move on the board left the user with no way back to the review. Three things conspired: (1) handleEngineLineBranch wipes feedbackContainer, destroying the original "← Back to review" button rendered by showReviewBestLine / showReviewRefutation. (2) The freshly-rendered engineLineBox's Back button called exitEngineLine, which clears the engineLine but leaves window._reviewBestLine orphaned and never restores the key-move review card. (3) On mobile, body.line-nav-active hid the entire .engine-line-nav row because the bottom nav-bar duplicates ‹ › — but the bar doesn't duplicate Back, so on mobile there was no exit at all (Escape works on desktop via the existing _reviewBestLine check at line 24020, but mobile has no Escape). Fixes: renderEngineLine's Back button is now context-aware — when window._reviewBestLine is set it labels "← Back to review" and calls exitReviewBestLine(moveIdx); otherwise unchanged. ‹ › buttons + the now-misleading "← → to step" hint get classes (engine-line-step-btn, engine-line-step-hint) so the mobile CSS can target them precisely instead of hiding the whole row. exitReviewBestLine gains exitEngineLine's SF cleanup (clearAnalysisArrow + main-worker terminate-and-reinit when sfSearchActive) so a still-running branch sfAnalyzeAdaptive doesn't keep the worker CPU-bound after exit (UCI `stop` is forbidden — it crashes SF18 lite-single). Also covers Show Refutation since it shares the same engineLine mirroring mechanism. Analysis Mode entry from review was already correct (analysisSavedState.reviewSnapshot path).</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire variation-checklist (1/3): generation + data foundation. generateTodoVariations(studyId, color) ranks a study's lines by the cumulative probability of the opponent's moves (Lichess Explorer, fixed 1600+ non-bullet pool, preset-independent): forced user moves from the trie, top-K opponent branching, eps pruning, transposition memo, 120ms inter-call delay, 500-call cap; uncovered opponent moves above eps collected as gaps. fetchExplorerMoves gains a {ratings, speeds, force} override so ranking uses the fixed pool while live practice keeps the user's settings. recordPracticeResult gains an optional preset tag in practiceScoreboard entries (the single source for later checklist completion). mergeGistData merges repertoire.todoLists by id. No drill or UI wiring yet.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3229,6 +3229,17 @@ function mergeGistData(local, remote) {
         ...local.repertoire.dismissed,
       ]);
       merged.repertoire.dismissed = [...set];
+    }
+    // todoLists: variation-checklist definitions (one per study). Merge by list
+    // id, local wins — these are regenerable definitions, not progress. Actual
+    // completion is derived from practiceScoreboard (merged below), keyed by
+    // each variation's leaf position + preset, so there's nothing per-variation
+    // to reconcile here.
+    if (local.repertoire.todoLists) {
+      const byId = new Map();
+      for (const t of merged.repertoire.todoLists || []) byId.set(t.id, t);
+      for (const t of local.repertoire.todoLists) byId.set(t.id, t);
+      merged.repertoire.todoLists = [...byId.values()];
     }
   }
 
@@ -16527,14 +16538,22 @@ function saveContSettings() {
   } catch(e) {}
 }
 
-async function fetchExplorerMoves(fen) {
-  if (!explorerEnabled || explorerRatings.length === 0 || explorerSpeeds.length === 0) return null;
+async function fetchExplorerMoves(fen, opts = {}) {
+  // opts.ratings / opts.speeds override the cont-settings globals — used by the
+  // repertoire variation-list generator, which ranks lines against a fixed pool
+  // (1600+, non-bullet) independent of the user's practice difficulty presets.
+  // opts.force bypasses the explorerEnabled / empty-globals guard so generation
+  // works even when the user has the practice DB toggled off for normal play.
+  const ratings = opts.ratings || explorerRatings;
+  const speeds = opts.speeds || explorerSpeeds;
+  if (!opts.force && (!explorerEnabled || explorerRatings.length === 0 || explorerSpeeds.length === 0)) return null;
+  if (ratings.length === 0 || speeds.length === 0) return null;
   if (!lichessToken) return null; // Explorer requires Lichess authentication
   const params = new URLSearchParams({
     fen,
     variant: 'standard',
-    speeds: explorerSpeeds.join(','),
-    ratings: explorerRatings.join(','),
+    speeds: speeds.join(','),
+    ratings: ratings.join(','),
     topGames: '0',
     recentGames: '0',
     moves: '12',
@@ -16985,19 +17004,24 @@ function cleanupPracticeCont() {
   if (btnNote) btnNote.classList.add('hidden');
 }
 
-function recordPracticeResult(result, finalCpWhite) {
+function recordPracticeResult(result, finalCpWhite, meta = {}) {
   if (!practiceContItem) return;
   ensureGistData();
   if (!gistData.practiceScoreboard) gistData.practiceScoreboard = {};
   const posKey = fenPositionKey(practiceContItem.fenBefore);
   if (!gistData.practiceScoreboard[posKey]) gistData.practiceScoreboard[posKey] = [];
   const moveCount = contLine ? contLine.moves.filter(mv => mv.isUser).length : 0;
-  gistData.practiceScoreboard[posKey].push({
+  const entry = {
     ts: Date.now(),
     result, // 'win' | 'draw' | 'loss'
     finalCp: finalCpWhite != null ? Math.round(finalCpWhite) : null,
     moves: moveCount,
-  });
+  };
+  // meta.preset ('easy'|'medium'|'hard') tags a result produced by a repertoire
+  // variation-checklist drill, so completion can be derived by querying this
+  // scoreboard per leaf position + preset. Absent for normal filter practice.
+  if (meta.preset) entry.preset = meta.preset;
+  gistData.practiceScoreboard[posKey].push(entry);
   debounceSyncToGist();
   console.log(`[Practice] Recorded ${result} at ${posKey.split(' ').slice(0,1).join('')}… (${moveCount} moves)`);
 }
@@ -22106,6 +22130,143 @@ function retryFailedRepertoirePositions() {
 // ── Gap exploration ──
 
 // ── Repertoire Continuation (ungraded line practice) ──
+
+// ─── Repertoire variation-checklist generator ───
+// Ranks a study's lines by the cumulative probability of the OPPONENT's moves
+// (Lichess Explorer, fixed pool below — independent of the practice difficulty
+// presets). User moves are forced by the study trie; at each opponent node we
+// branch over the top-K explorer replies, multiplying cumulative probability.
+// A branch terminates at targetPly (→ a checkable variation) or is pruned when
+// its cumulative probability drops below eps. An opponent move above eps whose
+// resulting position is NOT in the trie is recorded as a repertoire GAP (a hole
+// in coverage; surfaced opt-in — may include transpositions the repertoire
+// covers via a different move order, kept as a deliberate double-check).
+// Generation is rare and slow-tolerant; an in-memory memo dedupes transpositions
+// within a single run. Standard-start chapters only — chapters that begin from a
+// custom [FEN] are not reachable from the initial position (known v1 limit).
+const TODO_RANK_RATINGS = [1600, 1800, 2000, 2200, 2500]; // 1600+ explorer buckets
+const TODO_RANK_SPEEDS = ['blitz', 'rapid', 'classical', 'correspondence']; // all but (ultra)bullet
+
+async function generateTodoVariations(studyId, color, opts = {}) {
+  const targetPly = opts.targetPly || 10;
+  const topK = opts.topK || 4;
+  const eps = opts.eps != null ? opts.eps : 0.015;
+  const maxCalls = opts.maxExplorerCalls || 500;
+  const onProgress = opts.onProgress || null;
+
+  const pgn = await fetchStudyPGN(studyId);
+  if (!pgn) return { variations: [], gaps: [], error: 'study-fetch-failed' };
+  const parsed = parseRepertoirePGN(pgn, color);
+  const trie = parsed && parsed.trie;
+  if (!trie || trie.size === 0) return { variations: [], gaps: [], error: 'empty-trie' };
+
+  const memo = new Map(); // posKey → explorer data (transposition dedupe, this run only)
+  let calls = 0;
+  async function explorer(fen) {
+    const key = fenPositionKey(fen);
+    if (memo.has(key)) return memo.get(key);
+    calls++;
+    if (onProgress) onProgress(calls);
+    const data = await fetchExplorerMoves(fen, {
+      ratings: TODO_RANK_RATINGS, speeds: TODO_RANK_SPEEDS, force: true,
+    });
+    memo.set(key, data);
+    // Be polite to the explorer endpoint between distinct network calls.
+    await new Promise(r => setTimeout(r, 120));
+    return data;
+  }
+
+  const startFen = new Chess().fen();
+  const frontier = [{ fen: startFen, lineUci: [], lineSan: [], cumProb: 1, ply: 0 }];
+  const leaves = [];
+  const gaps = [];
+
+  while (frontier.length) {
+    if (calls >= maxCalls) break; // safety cap against pathological branching
+    // Best-first by cumulative probability so the cap keeps the most-likely lines.
+    frontier.sort((a, b) => b.cumProb - a.cumProb);
+    const node = frontier.shift();
+
+    if (node.ply >= targetPly) { leaves.push(node); continue; }
+
+    const chess = new Chess(node.fen);
+    const posKey = fenPositionKey(node.fen);
+    const userTurn = (chess.turn() === 'w') === (color === 'white');
+
+    if (userTurn) {
+      // Forced prep move. (Reachable only via a covered opponent move or the
+      // start; if the trie somehow lacks it, the branch simply ends.)
+      const entry = trie.get(posKey);
+      if (!entry) continue;
+      const mv = chess.move(entry.san, { sloppy: true });
+      if (!mv) continue;
+      frontier.push({
+        fen: chess.fen(), ply: node.ply + 1, cumProb: node.cumProb,
+        lineUci: [...node.lineUci, entry.uci],
+        lineSan: [...node.lineSan, mv.san],
+      });
+    } else {
+      const data = await explorer(node.fen);
+      if (!data || !data.moves || !data.moves.length) continue;
+      const total = data.white + data.draws + data.black;
+      if (!total) continue;
+      const ranked = data.moves
+        .map(m => ({ uci: m.uci, san: m.san, p: (m.white + m.draws + m.black) / total }))
+        .sort((a, b) => b.p - a.p)
+        .slice(0, topK);
+      for (const m of ranked) {
+        const childCum = node.cumProb * m.p;
+        if (childCum < eps) continue;
+        const c = new Chess(node.fen);
+        const cm = c.move(m.uci, { sloppy: true });
+        if (!cm) continue;
+        const childKey = fenPositionKey(c.fen());
+        if (trie.has(childKey)) {
+          frontier.push({
+            fen: c.fen(), ply: node.ply + 1, cumProb: childCum,
+            lineUci: [...node.lineUci, m.uci],
+            lineSan: [...node.lineSan, cm.san],
+          });
+        } else {
+          gaps.push({
+            afterFen: c.fen(),
+            lineUci: [...node.lineUci, m.uci],
+            lineSan: [...node.lineSan, cm.san],
+            cumProb: childCum,
+          });
+        }
+      }
+    }
+  }
+
+  leaves.sort((a, b) => b.cumProb - a.cumProb);
+  const variations = leaves
+    .filter(l => l.lineUci.length > 0)
+    .slice(0, opts.maxVariations || 10)
+    .map(l => ({
+      leafKey: fenPositionKey(l.fen),
+      leafFen: l.fen,
+      lineUci: l.lineUci,
+      lineSan: l.lineSan,
+      cumProb: l.cumProb,
+      openingName: lookupOpeningName(l.fen) || null,
+    }));
+
+  // Collapse gaps that transpose to the same position, keeping the most-probable
+  // path to each; sort by probability, cap.
+  const gapByKey = new Map();
+  for (const g of gaps) {
+    const k = fenPositionKey(g.afterFen);
+    const prev = gapByKey.get(k);
+    if (!prev || g.cumProb > prev.cumProb) gapByKey.set(k, g);
+  }
+  const gapList = [...gapByKey.values()]
+    .sort((a, b) => b.cumProb - a.cumProb)
+    .slice(0, opts.maxGaps || 10)
+    .map(g => ({ ...g, openingName: lookupOpeningName(g.afterFen) || null }));
+
+  return { variations, gaps: gapList };
+}
 
 function getRepertoireContinuations(fen) {
   // From a position where it's the opponent's turn, find all opponent moves
