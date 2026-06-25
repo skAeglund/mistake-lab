@@ -1715,7 +1715,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire variation-checklist (2/3): drill core. startTodoVariation(variation, preset) runs a strict scripted lead-up (user plays their own prep; deviations rejected and retried) then hands over at the leaf to a free continuation reusing advantage-mode machinery (DB→Maia at the preset, silent, Claim-Victory at +1000x3, checkmate ends). The eval-collapse auto-end is suppressed while repTodoActive so an equal opening doesn't end on move 1; opponent-mate still records a loss. finishAdvantage routes to finishTodoDrill, writing win/draw/loss to practiceScoreboard tagged with the preset; todoCompletedPresets derives completion per leaf. New mode flag repTodoActive in inOtherMode, the Escape chain (→ abandonTodoDrill), and loadPosition teardown; presets override explorer/Maia globals and restore on every exit. Entry clears stale engine-line/practice-item/premove/pre-analysis state. Presets: Easy 1600-1800/Maia1600, Medium 1600-2200/1900, Hard 2000-2500/2100. No UI yet (console-triggerable).</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire variation-checklist — complete (generation + drill + UI). A "Variation checklist" section on the Repertoire tab: per study, a Generate/Regenerate button (+ ply selector 6–12) runs generateTodoVariations — a best-first walk ranking the study's lines by the cumulative probability of the opponent's moves (Lichess Explorer, fixed 1600+ non-bullet pool, preset-independent): forced user moves from the trie, top-K opponent branching, eps pruning, transposition memo, 120ms inter-call delay, 500-call cap. Results persist to gistData.repertoire.todoLists (merged by id in mergeGistData). Each variation renders as a row: move-numbered SAN, a probability bar, and Easy/Medium/Hard chips that unlock in sequence and turn green when won. Clicking a chip runs the drill (startTodoVariation): a strict scripted lead-up (user plays their own prep; deviations are rejected and retried) hands over at the leaf to a free continuation reusing advantage-mode machinery (DB→Maia at the chosen preset, silent, Claim-Victory at +1000×3, checkmate ends). The eval-collapse auto-end is suppressed while repTodoActive so an equal opening doesn't end on move 1; opponent-mate still records a loss. finishAdvantage routes to finishTodoDrill, recording win/draw/loss to practiceScoreboard tagged with the preset — the single source from which chip completion is derived (todoCompletedPresets, keyed by leaf position). Opt-in "Uncovered lines to double-check" lists generation-found gaps (opponent moves above eps with no prepped reply; transpositions collapsed), each opening in the explorer for exploration. New mode flag repTodoActive in inOtherMode, Escape (→ abandonTodoDrill), and loadPosition teardown; presets override explorer/Maia globals and restore on every exit. fetchExplorerMoves gained a {ratings, speeds, force} override; recordPracticeResult an optional preset tag. Presets: Easy 1600–1800/Maia1600, Medium 1600–2200/1900, Hard 2000–2500/2100. UNTESTED in-browser — node --check + static audit only.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -21393,6 +21393,9 @@ function renderRepertoirePanel() {
     html += `</div>`;
   }
 
+  // Variation checklist (generated lines ranked by opponent probability)
+  html += renderTodoChecklistSection(studies);
+
   panel.innerHTML = html;
   renderRepertoireConfig();
 }
@@ -22665,6 +22668,180 @@ function todoCompletedPresets(leafKey) {
     if (e.result === 'win' && e.preset && REP_TODO_PRESETS[e.preset]) done.add(e.preset);
   }
   return done;
+}
+
+// ─── Variation-checklist UI (Repertoire tab) ───
+
+function getTodoList(studyId) {
+  return gistData?.repertoire?.todoLists?.find(t => t.studyId === studyId) || null;
+}
+
+// Format a SAN array with move numbers: ['e4','e5','Nf3'] → "1.e4 e5 2.Nf3".
+// Lines always start from the standard position (white to move), so numbering
+// from white is correct regardless of repertoire color.
+function formatTodoLineSan(sans) {
+  let out = '', moveNum = 1, white = true;
+  for (let i = 0; i < sans.length; i++) {
+    out += white ? `${moveNum}.${sans[i]} ` : `${sans[i]} `;
+    if (!white) moveNum++;
+    white = !white;
+  }
+  return out.trim();
+}
+
+async function generateTodoListForStudy(studyId) {
+  const s = getRepertoireConfig().find(x => x.id === studyId);
+  if (!s || !lichessToken || window._todoGenerating) return;
+  const plySel = document.getElementById('todoPly_' + studyId);
+  const targetPly = plySel ? (parseInt(plySel.value) || 10) : 10;
+
+  window._todoGenerating = studyId;
+  if (repertoireMode) renderRepertoirePanel();
+
+  const onProgress = (n) => {
+    const el = document.getElementById('todoStatus_' + studyId);
+    if (el) el.textContent = `Querying explorer… (${n})`;
+  };
+  let gen;
+  try {
+    gen = await generateTodoVariations(studyId, s.color, { targetPly, onProgress });
+  } catch (e) {
+    console.error('[TODO] generation failed', e);
+    gen = { variations: [], gaps: [], error: 'exception' };
+  }
+  window._todoGenerating = null;
+
+  if (gen.error || !gen.variations.length) {
+    if (repertoireMode) renderRepertoirePanel();
+    const el = document.getElementById('todoStatus_' + studyId);
+    if (el) el.textContent = gen.error ? `Generation failed (${gen.error})` : 'No variations found.';
+    return;
+  }
+
+  ensureGistData();
+  if (!gistData.repertoire) gistData.repertoire = {};
+  if (!gistData.repertoire.todoLists) gistData.repertoire.todoLists = [];
+  const list = {
+    id: 'todo_' + studyId, studyId, name: s.name || studyId, color: s.color,
+    targetPly, createdAt: Date.now(), variations: gen.variations, gaps: gen.gaps,
+  };
+  const idx = gistData.repertoire.todoLists.findIndex(t => t.studyId === studyId);
+  if (idx >= 0) gistData.repertoire.todoLists[idx] = list;
+  else gistData.repertoire.todoLists.push(list);
+  debounceSyncToGist();
+  if (repertoireMode) renderRepertoirePanel();
+}
+
+function startTodoFromList(studyId, vIdx, preset) {
+  const list = getTodoList(studyId);
+  if (!list || !list.variations[vIdx]) return;
+  const variation = Object.assign({}, list.variations[vIdx], { color: list.color });
+  if (repertoireMode) toggleRepertoireMode(); // close the panel so the board shows
+  startTodoVariation(variation, preset);
+}
+
+function toggleTodoGaps(studyId) {
+  if (!window._todoGapsOpen) window._todoGapsOpen = new Set();
+  if (window._todoGapsOpen.has(studyId)) window._todoGapsOpen.delete(studyId);
+  else window._todoGapsOpen.add(studyId);
+  if (repertoireMode) renderRepertoirePanel();
+}
+
+// A gap = an uncovered opponent move; afterFen is the position the user lands in
+// (their turn). Open it in the opening filter for free exploration/practice.
+function exploreTodoGap(studyId, gapIdx) {
+  const list = getTodoList(studyId);
+  if (!list || !list.gaps[gapIdx]) return;
+  const gap = list.gaps[gapIdx];
+  if (repertoireDrillMode) exitRepertoireDrill();
+  if (repertoireMode) toggleRepertoireMode();
+  openingFilterFen = fenPositionKey(gap.afterFen);
+  filterChess = new Chess(gap.afterFen);
+  filterMoveHistory = [filterChess.fen()];
+  filterMoveIdx = 0;
+  const userTurn = gap.afterFen.split(' ')[1]; // user is to move at the gap position
+  savedFilterOrientation = userTurn === 'w' ? 'white' : 'black';
+  enterOpeningFilter();
+}
+
+function renderTodoChecklistSection(studies) {
+  if (!studies || !studies.length) return '';
+  let html = `<div style="padding:8px 12px;border-top:1px solid var(--border);">
+    <div style="font-size:12px;font-weight:600;color:var(--text-primary);margin-bottom:2px;">Variation checklist</div>
+    <div style="font-size:10px;color:var(--text-muted);margin-bottom:6px;">Most-likely lines ranked by opponent move probability. Win each at Easy → Medium → Hard to check it off.</div>`;
+  if (!lichessToken) {
+    html += `<div class="hint" style="font-size:11px;">Connect Lichess (above) to generate — ranking uses the opening explorer.</div>`;
+  }
+  for (const s of studies) html += renderTodoStudyBlock(s);
+  html += `</div>`;
+  return html;
+}
+
+function renderTodoStudyBlock(s) {
+  const list = getTodoList(s.id);
+  const generating = window._todoGenerating === s.id;
+  const plyVal = (list && list.targetPly) || 10;
+  let html = `<div style="margin:8px 0;padding:6px 8px;border:1px solid var(--border);border-radius:8px;">`;
+  html += `<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:4px;">
+    <span style="flex:1;min-width:0;font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(s.name || s.id)} <span style="opacity:0.5;font-weight:400;">(${s.color})</span></span>
+    <label style="font-size:10px;color:var(--text-muted);">ply
+      <select id="todoPly_${s.id}" style="font-size:10px;padding:1px 2px;border-radius:4px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);">
+        ${[6, 8, 10, 12].map(p => `<option value="${p}"${p === plyVal ? ' selected' : ''}>${p}</option>`).join('')}
+      </select>
+    </label>
+    <button class="btn btn-ghost btn-sm" ${generating || !lichessToken ? 'disabled' : ''} onclick="generateTodoListForStudy('${s.id}')" style="font-size:10px;padding:2px 6px;">${generating ? '⟳ Generating…' : (list ? '↻ Regenerate' : 'Generate')}</button>
+  </div>`;
+  html += `<div id="todoStatus_${s.id}" style="font-size:10px;color:var(--text-muted);min-height:12px;"></div>`;
+
+  if (list && list.variations && list.variations.length) {
+    const maxCum = Math.max(...list.variations.map(v => v.cumProb || 0), 0.0001);
+    list.variations.forEach((v, vi) => {
+      const done = todoCompletedPresets(v.leafKey);
+      const chips = REP_TODO_PRESET_ORDER.map((pk, i) => {
+        const p = REP_TODO_PRESETS[pk];
+        const isDone = done.has(pk);
+        const unlocked = i === 0 || done.has(REP_TODO_PRESET_ORDER[i - 1]);
+        const clickable = isDone || unlocked;
+        const bg = isDone ? '#4caf50' : (unlocked ? 'var(--bg-secondary)' : 'transparent');
+        const colr = isDone ? '#fff' : (unlocked ? 'var(--text-primary)' : 'var(--text-muted)');
+        const onclick = clickable ? `onclick="startTodoFromList('${s.id}',${vi},'${pk}')"` : '';
+        return `<span ${onclick} style="font-size:10px;padding:2px 7px;border-radius:10px;background:${bg};color:${colr};opacity:${clickable ? 1 : 0.4};cursor:${clickable ? 'pointer' : 'default'};border:1px solid var(--border);">${isDone ? '✓ ' : ''}${p.label}</span>`;
+      }).join(' ');
+      const pct = (v.cumProb || 0) * 100;
+      const barW = Math.max(3, ((v.cumProb || 0) / maxCum) * 100);
+      html += `<div style="padding:5px 0;border-top:1px solid var(--border);">
+        <div style="font-size:11px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escHtml(v.lineSan.join(' '))}">${escHtml(formatTodoLineSan(v.lineSan))}</div>
+        <div style="display:flex;align-items:center;gap:6px;margin-top:3px;">
+          <div style="flex:1;height:4px;background:var(--bg-secondary);border-radius:2px;overflow:hidden;"><div style="height:100%;width:${barW}%;background:var(--blue);"></div></div>
+          <span style="font-size:9px;color:var(--text-muted);min-width:34px;text-align:right;">${pct.toFixed(pct < 10 ? 1 : 0)}%</span>
+        </div>
+        <div style="margin-top:4px;display:flex;gap:4px;flex-wrap:wrap;">${chips}</div>
+      </div>`;
+    });
+
+    if (list.gaps && list.gaps.length) {
+      const open = window._todoGapsOpen && window._todoGapsOpen.has(s.id);
+      html += `<div style="margin-top:6px;">
+        <button class="btn btn-ghost btn-sm" onclick="toggleTodoGaps('${s.id}')" style="font-size:10px;padding:2px 6px;">${open ? '▾' : '▸'} Uncovered lines to double-check (${list.gaps.length})</button>`;
+      if (open) {
+        html += `<div style="margin-top:4px;">`;
+        list.gaps.forEach((g, gi) => {
+          const gpct = (g.cumProb || 0) * 100;
+          html += `<div class="game-card" style="padding:5px 8px;margin:2px 0;font-size:11px;cursor:pointer;" onclick="exploreTodoGap('${s.id}',${gi})" title="${escHtml(g.lineSan.join(' '))}">
+            <span style="font-family:monospace;">${escHtml(formatTodoLineSan(g.lineSan))}</span>
+            <span style="float:right;color:var(--text-muted);font-size:9px;">${gpct.toFixed(gpct < 10 ? 1 : 0)}% · explore →</span>
+          </div>`;
+        });
+        html += `</div>`;
+      }
+      html += `</div>`;
+    }
+  } else if (list) {
+    html += `<div class="hint" style="font-size:10px;">No variations generated (study empty or explorer returned no data).</div>`;
+  }
+
+  html += `</div>`;
+  return html;
 }
 
 function getRepertoireContinuations(fen) {
