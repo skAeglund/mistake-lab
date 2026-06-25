@@ -1715,7 +1715,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire variation-checklist — complete (generation + drill + UI). A "Variation checklist" section on the Repertoire tab: per study, a Generate/Regenerate button (+ ply selector 6–12) runs generateTodoVariations — a best-first walk ranking the study's lines by the cumulative probability of the opponent's moves (Lichess Explorer, fixed 1600+ non-bullet pool, preset-independent): forced user moves from the trie, top-K opponent branching, eps pruning, transposition memo, 120ms inter-call delay, 500-call cap. Results persist to gistData.repertoire.todoLists (merged by id in mergeGistData). Each variation renders as a row: move-numbered SAN, a probability bar, and Easy/Medium/Hard chips that unlock in sequence and turn green when won. Clicking a chip runs the drill (startTodoVariation): a strict scripted lead-up (user plays their own prep; deviations are rejected and retried) hands over at the leaf to a free continuation reusing advantage-mode machinery (DB→Maia at the chosen preset, silent, Claim-Victory at +1000×3, checkmate ends). The eval-collapse auto-end is suppressed while repTodoActive so an equal opening doesn't end on move 1; opponent-mate still records a loss. finishAdvantage routes to finishTodoDrill, recording win/draw/loss to practiceScoreboard tagged with the preset — the single source from which chip completion is derived (todoCompletedPresets, keyed by leaf position). Opt-in "Uncovered lines to double-check" lists generation-found gaps (opponent moves above eps with no prepped reply; transpositions collapsed), each opening in the explorer for exploration. New mode flag repTodoActive in inOtherMode, Escape (→ abandonTodoDrill), and loadPosition teardown; presets override explorer/Maia globals and restore on every exit. fetchExplorerMoves gained a {ratings, speeds, force} override; recordPracticeResult an optional preset tag. Presets: Easy 1600–1800/Maia1600, Medium 1600–2200/1900, Hard 2000–2500/2100. UNTESTED in-browser — node --check + static audit only.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire PGN parser: robust, bracket-safe header stripping. parseRepertoirePGN previously stripped headers with a global /\[[^\]]*\]/ that stops at the first ']', so a tag value containing a bracket (e.g. a chapter named with "[...]") leaked the tag remainder (like d5"]) into the movetext. That junk token was rejected and then desynced the move stream — the next real move was attempted on the wrong side to move and also rejected (e.g. "Invalid move: Nf3" with Black to move), cascading and dropping real moves so the repertoire trie came out sparse. Replaced with a line-based filter that removes full [Key "Value"] header lines regardless of brackets in the value. Also stops pre-stripping in-comment [%cal]/[%csl] annotations, so tokenizePGN can now extract study arrows/circles. Affects all repertoire parsing (deviations, drills, and variation-checklist generation).</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -20438,7 +20438,20 @@ function parseRepertoirePGN(pgnText, repertoireColor) {
 
   const games = pgnText.split(/\n\n(?=\[Event )/);
   for (const gamePgn of games) {
-    const movetext = gamePgn.replace(/\[[^\]]*\]\s*/g, '').trim();
+    // Strip PGN header lines robustly. The old global /\[[^\]]*\]\s*/g matched
+    // only up to the first ']', so a tag value containing a bracket (e.g. a
+    // chapter named with "[...]") leaked the tag's remainder (like d5"]) into
+    // the movetext. That injected a junk token, which desynced the move stream:
+    // the bad token was rejected, then the next real move was tried on the wrong
+    // side to move and also rejected, cascading and dropping real moves from the
+    // trie. PGN tags are always full single lines [Key "Value"], so filter by
+    // line instead — this is bracket-safe and also leaves in-comment
+    // [%cal]/[%csl] annotations intact for tokenizePGN to extract.
+    const movetext = gamePgn
+      .split(/\r?\n/)
+      .filter(line => !/^\s*\[[A-Za-z0-9_]+\s+".*"\]\s*$/.test(line))
+      .join('\n')
+      .trim();
     if (!movetext) continue;
 
     // Check for FEN header (non-standard starting position)
