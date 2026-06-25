@@ -1715,7 +1715,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire variation-checklist: placement + generation diagnostics. Moved the checklist section up in the Repertoire panel — it now renders just under "Add position", above Deviations and Gaps, so it is reachable without scrolling past long lists. generateTodoVariations now logs diagnostics to the console (trie size, color, target ply, token presence; the first explorer call result; and a final summary of leaves / gaps / explorer calls with ok/empty/null counts and covered-vs-gap tallies) plus a one-line warning naming the failure mode when no variations are produced (explorer-null vs sparse-trie vs ply-too-deep), to diagnose the "No variations found" case.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire variation-checklist: fix empty generation (eps floor too high). generateTodoVariations pruned opponent branches whose cumulative probability fell below eps, but eps was 0.015 - far above the probability of a deep line (reaching a specific position at ply 10 multiplies ~5 opponent frequencies, so even the single most likely line has cumProb ~0.01-0.03 there). Every branch was pruned one ply short of the target, so leaves=0 despite the explorer working and coverage being good (covered=19). Lowered eps default to 0.0005 and raised the explorer-call cap to 800; best-first expansion + topK already bound the work. Added epsPruned and userDead diagnostic counters to the [TODO] summary log so a future empty result is legible.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -22181,8 +22181,14 @@ const TODO_RANK_SPEEDS = ['blitz', 'rapid', 'classical', 'correspondence']; // a
 async function generateTodoVariations(studyId, color, opts = {}) {
   const targetPly = opts.targetPly || 10;
   const topK = opts.topK || 4;
-  const eps = opts.eps != null ? opts.eps : 0.015;
-  const maxCalls = opts.maxExplorerCalls || 500;
+  // eps is an absolute cumulative-probability floor. It must be well below the
+  // probability of a deep line: reaching a specific position at ply 10 means
+  // multiplying ~5 opponent move frequencies, so even the single most likely
+  // line has cumProb ~0.01-0.03 there. A high floor (the old 0.015) pruned every
+  // branch one ply short of the target → zero leaves. Keep it tiny; best-first
+  // expansion + topK + the call cap already bound the work.
+  const eps = opts.eps != null ? opts.eps : 0.0005;
+  const maxCalls = opts.maxExplorerCalls || 800;
   const onProgress = opts.onProgress || null;
 
   const pgn = await fetchStudyPGN(studyId);
@@ -22194,7 +22200,7 @@ async function generateTodoVariations(studyId, color, opts = {}) {
 
   const memo = new Map(); // posKey → explorer data (transposition dedupe, this run only)
   let calls = 0;
-  const diag = { expNull: 0, expOk: 0, expEmpty: 0, covered: 0, gapHits: 0 };
+  const diag = { expNull: 0, expOk: 0, expEmpty: 0, covered: 0, gapHits: 0, epsPruned: 0, userDead: 0 };
   async function explorer(fen) {
     const key = fenPositionKey(fen);
     if (memo.has(key)) return memo.get(key);
@@ -22234,7 +22240,7 @@ async function generateTodoVariations(studyId, color, opts = {}) {
       // Forced prep move. (Reachable only via a covered opponent move or the
       // start; if the trie somehow lacks it, the branch simply ends.)
       const entry = trie.get(posKey);
-      if (!entry) continue;
+      if (!entry) { diag.userDead++; continue; }
       const mv = chess.move(entry.san, { sloppy: true });
       if (!mv) continue;
       frontier.push({
@@ -22253,7 +22259,7 @@ async function generateTodoVariations(studyId, color, opts = {}) {
         .slice(0, topK);
       for (const m of ranked) {
         const childCum = node.cumProb * m.p;
-        if (childCum < eps) continue;
+        if (childCum < eps) { diag.epsPruned++; continue; }
         const c = new Chess(node.fen);
         const cm = c.move(m.uci, { sloppy: true });
         if (!cm) continue;
@@ -22280,7 +22286,8 @@ async function generateTodoVariations(studyId, color, opts = {}) {
 
   leaves.sort((a, b) => b.cumProb - a.cumProb);
   console.log(`[TODO] done: leaves=${leaves.length} gaps=${gaps.length} explorerCalls=${calls} ` +
-    `explorer{ok:${diag.expOk},empty:${diag.expEmpty},null:${diag.expNull}} covered=${diag.covered} gapHits=${diag.gapHits}`);
+    `explorer{ok:${diag.expOk},empty:${diag.expEmpty},null:${diag.expNull}} covered=${diag.covered} gapHits=${diag.gapHits} ` +
+    `epsPruned=${diag.epsPruned} userDead=${diag.userDead}`);
   if (!leaves.length) {
     if (diag.expNull > 0 && diag.expOk === 0) console.warn('[TODO] explorer returned null for every call — check Lichess token / connectivity / rate limit.');
     else if (diag.covered === 0 && diag.gapHits > 0) console.warn('[TODO] explorer worked but no opponent reply led back into the trie — trie may be sparse (parser) or targetPly too deep for this study.');
