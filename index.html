@@ -1715,7 +1715,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire variation-checklist: trie-driven generation + list-length control. Reworked generateTodoVariations to match the goal "give me the X most important variations in my study". Branching is now TRIE-DRIVEN: at each opponent node it enumerates every move the study covers (like getRepertoireContinuations), no matter how rare in the database; the explorer is used ONLY to score/rank those moves (a covered move absent from the DB still continues with a tiny floor probability), so a position with no DB data no longer stops enumeration. Best-first by cumulative probability with leaves collected on pop, so they emerge in exact importance order and the walk stops once X are collected — yielding the true top X without enumerating the whole tree. A visited-by-position set dedups transpositions and breaks cycles. Previously the explorer DROVE branching (top-K DB moves + an eps floor), so study lines the DB didn't favor were never enumerated and the list could come back with 1 entry on a 50-variation study. Added a per-study count input (1-50, default 10, persisted) feeding maxVariations. Gaps are now notable uncovered opponent moves (>=8% DB frequency) found along the explored lines. Diagnostics updated (covered/terminal/gapHits).</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire variation-checklist: fix lead-up phase rejecting all moves. During the scripted lead-up the user plays their own prep moves, but currentMistakeIdx is -1 (no SRS item), so both input handlers hit `const m = filteredMistakes[currentMistakeIdx]; if(!m) return` and blocked every piece pickup/selection (arrows use a separate right-click handler, so they kept working - which is why the board felt half-dead). Added a lead-up bypass to BOTH paths: onDragStart now allows dragging the user's own pieces on the user's turn, and the tap-to-move handler selects and plays the move inline, routing it to evaluateTodoLeadUpMove (which keeps a correct prep move and advances, or undoes a wrong one). Both bypasses sit before the m-gate and check gameEngine.turn() so taps during the opponent's auto-play window are ignored. onDrop already dispatched to the lead-up evaluator; this makes drag-pickup and tap consistent with it.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -12399,6 +12399,41 @@ function onBoardClick(e) {
   // variation position would be evaluated against stale mistake state.
   if (noteJumpedAway) return;
 
+  // Repertoire-checklist drill, scripted lead-up: tap-to-move for the user's
+  // prep moves. currentMistakeIdx is -1 here, so the m-based flow below can't
+  // run — handle selection and the move inline and route it to the lead-up
+  // evaluator (which keeps a correct move + advances, or undoes a wrong one).
+  if (repTodoActive && repTodoState && repTodoState.phase === 'leadup') {
+    if (!gameEngine || gameEngine.game_over()) return;
+    const squareEl = e.target.closest('[data-square]');
+    if (!squareEl) return;
+    const sq = squareEl.getAttribute('data-square');
+    if (!sq) return;
+    const userPrefix = repTodoState.color === 'white' ? 'w' : 'b';
+    if (gameEngine.turn() !== userPrefix) return; // opponent is auto-playing
+    const piece = gameEngine.get(sq);
+    if (selectedSquare) {
+      if (sq === selectedSquare) { deselectionPending = true; return; }
+      // Reselect another of the user's own pieces.
+      if (piece && piece.color === userPrefix) { clearSelection(); selectSquare(sq); return; }
+      // Destination tap → play the prep move (no drop animation, so reposition).
+      e.stopPropagation(); e.preventDefault();
+      const from = selectedSquare;
+      const move = gameEngine.move({ from, to: sq, promotion: 'q' });
+      clearSelection();
+      if (!move) return;
+      clearArrows();
+      boardObj.position(gameEngine.fen());
+      showLastMoveHighlight(move.from, move.to);
+      showCheckHighlight(gameEngine);
+      evaluateTodoLeadUpMove(move.from, move.to, move);
+      return;
+    }
+    // First tap on one of the user's own pieces → select.
+    if (piece && piece.color === userPrefix) selectSquare(sq);
+    return;
+  }
+
   const m = filteredMistakes[currentMistakeIdx];
   if (!m) return;
 
@@ -13094,6 +13129,20 @@ function onDragStart(source, piece) {
     if (filterChess.game_over()) return false;
     if ((filterChess.turn() === 'w' && piece.search(/^b/) !== -1) ||
         (filterChess.turn() === 'b' && piece.search(/^w/) !== -1)) return false;
+    if (selectedSquare !== source) clearSelection();
+    selectSquare(source);
+    return true;
+  }
+  // Repertoire-checklist drill, scripted lead-up: the user plays their own prep
+  // moves against gameEngine, but currentMistakeIdx is -1 (no SRS item), so the
+  // m-based gating below would block every drag. Allow the user's own pieces on
+  // their turn here. (The continuation phase sets a practiceContItem, so it falls
+  // through to the normal continuation handling.)
+  if (repTodoActive && repTodoState && repTodoState.phase === 'leadup') {
+    if (!gameEngine || gameEngine.game_over()) return false;
+    const userPrefix = repTodoState.color === 'white' ? 'w' : 'b';
+    if (gameEngine.turn() !== userPrefix) return false;     // not the user's turn (opponent auto-playing)
+    if (piece.charAt(0) !== userPrefix) return false;       // only the user's own pieces
     if (selectedSquare !== source) clearSelection();
     selectSquare(source);
     return true;
