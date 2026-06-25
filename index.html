@@ -1715,7 +1715,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire PGN parser: robust, bracket-safe header stripping. parseRepertoirePGN previously stripped headers with a global /\[[^\]]*\]/ that stops at the first ']', so a tag value containing a bracket (e.g. a chapter named with "[...]") leaked the tag remainder (like d5"]) into the movetext. That junk token was rejected and then desynced the move stream — the next real move was attempted on the wrong side to move and also rejected (e.g. "Invalid move: Nf3" with Black to move), cascading and dropping real moves so the repertoire trie came out sparse. Replaced with a line-based filter that removes full [Key "Value"] header lines regardless of brackets in the value. Also stops pre-stripping in-comment [%cal]/[%csl] annotations, so tokenizePGN can now extract study arrows/circles. Affects all repertoire parsing (deviations, drills, and variation-checklist generation).</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire variation-checklist: placement + generation diagnostics. Moved the checklist section up in the Repertoire panel — it now renders just under "Add position", above Deviations and Gaps, so it is reachable without scrolling past long lists. generateTodoVariations now logs diagnostics to the console (trie size, color, target ply, token presence; the first explorer call result; and a final summary of leaves / gaps / explorer calls with ok/empty/null counts and covered-vs-gap tallies) plus a one-line warning naming the failure mode when no variations are produced (explorer-null vs sparse-trie vs ply-too-deep), to diagnose the "No variations found" case.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -21313,6 +21313,10 @@ function renderRepertoirePanel() {
     </div>
   </div>`;
 
+  // Variation checklist (generated lines ranked by opponent probability) —
+  // placed high so it's reachable without scrolling past long Deviations/Gaps.
+  html += renderTodoChecklistSection(studies);
+
   // Deviations list
   if (repertoireDeviations.length) {
     const dueCountForBtn = repertoireDeviations.filter(d => isDue(posId(d))).length;
@@ -21405,9 +21409,6 @@ function renderRepertoirePanel() {
     }
     html += `</div>`;
   }
-
-  // Variation checklist (generated lines ranked by opponent probability)
-  html += renderTodoChecklistSection(studies);
 
   panel.innerHTML = html;
   renderRepertoireConfig();
@@ -22189,9 +22190,11 @@ async function generateTodoVariations(studyId, color, opts = {}) {
   const parsed = parseRepertoirePGN(pgn, color);
   const trie = parsed && parsed.trie;
   if (!trie || trie.size === 0) return { variations: [], gaps: [], error: 'empty-trie' };
+  console.log(`[TODO] study ${studyId} color=${color} trie=${trie.size} targetPly=${targetPly} token=${!!lichessToken}`);
 
   const memo = new Map(); // posKey → explorer data (transposition dedupe, this run only)
   let calls = 0;
+  const diag = { expNull: 0, expOk: 0, expEmpty: 0, covered: 0, gapHits: 0 };
   async function explorer(fen) {
     const key = fenPositionKey(fen);
     if (memo.has(key)) return memo.get(key);
@@ -22200,6 +22203,10 @@ async function generateTodoVariations(studyId, color, opts = {}) {
     const data = await fetchExplorerMoves(fen, {
       ratings: TODO_RANK_RATINGS, speeds: TODO_RANK_SPEEDS, force: true,
     });
+    if (!data) diag.expNull++;
+    else if (!data.moves || !data.moves.length) diag.expEmpty++;
+    else diag.expOk++;
+    if (calls === 1) console.log('[TODO] first explorer call →', data ? `${(data.moves || []).length} moves` : 'null (API/token failure)');
     memo.set(key, data);
     // Be polite to the explorer endpoint between distinct network calls.
     await new Promise(r => setTimeout(r, 120));
@@ -22252,12 +22259,14 @@ async function generateTodoVariations(studyId, color, opts = {}) {
         if (!cm) continue;
         const childKey = fenPositionKey(c.fen());
         if (trie.has(childKey)) {
+          diag.covered++;
           frontier.push({
             fen: c.fen(), ply: node.ply + 1, cumProb: childCum,
             lineUci: [...node.lineUci, m.uci],
             lineSan: [...node.lineSan, cm.san],
           });
         } else {
+          diag.gapHits++;
           gaps.push({
             afterFen: c.fen(),
             lineUci: [...node.lineUci, m.uci],
@@ -22270,6 +22279,13 @@ async function generateTodoVariations(studyId, color, opts = {}) {
   }
 
   leaves.sort((a, b) => b.cumProb - a.cumProb);
+  console.log(`[TODO] done: leaves=${leaves.length} gaps=${gaps.length} explorerCalls=${calls} ` +
+    `explorer{ok:${diag.expOk},empty:${diag.expEmpty},null:${diag.expNull}} covered=${diag.covered} gapHits=${diag.gapHits}`);
+  if (!leaves.length) {
+    if (diag.expNull > 0 && diag.expOk === 0) console.warn('[TODO] explorer returned null for every call — check Lichess token / connectivity / rate limit.');
+    else if (diag.covered === 0 && diag.gapHits > 0) console.warn('[TODO] explorer worked but no opponent reply led back into the trie — trie may be sparse (parser) or targetPly too deep for this study.');
+    else console.warn('[TODO] no leaves reached targetPly — try a lower ply or check the study color matches.');
+  }
   const variations = leaves
     .filter(l => l.lineUci.length > 0)
     .slice(0, opts.maxVariations || 10)
