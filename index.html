@@ -1715,7 +1715,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire variation-checklist: fix empty generation (eps floor too high). generateTodoVariations pruned opponent branches whose cumulative probability fell below eps, but eps was 0.015 - far above the probability of a deep line (reaching a specific position at ply 10 multiplies ~5 opponent frequencies, so even the single most likely line has cumProb ~0.01-0.03 there). Every branch was pruned one ply short of the target, so leaves=0 despite the explorer working and coverage being good (covered=19). Lowered eps default to 0.0005 and raised the explorer-call cap to 800; best-first expansion + topK already bound the work. Added epsPruned and userDead diagnostic counters to the [TODO] summary log so a future empty result is legible.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire variation-checklist: trie-driven generation + list-length control. Reworked generateTodoVariations to match the goal "give me the X most important variations in my study". Branching is now TRIE-DRIVEN: at each opponent node it enumerates every move the study covers (like getRepertoireContinuations), no matter how rare in the database; the explorer is used ONLY to score/rank those moves (a covered move absent from the DB still continues with a tiny floor probability), so a position with no DB data no longer stops enumeration. Best-first by cumulative probability with leaves collected on pop, so they emerge in exact importance order and the walk stops once X are collected — yielding the true top X without enumerating the whole tree. A visited-by-position set dedups transpositions and breaks cycles. Previously the explorer DROVE branching (top-K DB moves + an eps floor), so study lines the DB didn't favor were never enumerated and the list could come back with 1 entry on a 50-variation study. Added a per-study count input (1-50, default 10, persisted) feeding maxVariations. Gaps are now notable uncovered opponent moves (>=8% DB frequency) found along the explored lines. Diagnostics updated (covered/terminal/gapHits).</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -22180,15 +22180,11 @@ const TODO_RANK_SPEEDS = ['blitz', 'rapid', 'classical', 'correspondence']; // a
 
 async function generateTodoVariations(studyId, color, opts = {}) {
   const targetPly = opts.targetPly || 10;
-  const topK = opts.topK || 4;
-  // eps is an absolute cumulative-probability floor. It must be well below the
-  // probability of a deep line: reaching a specific position at ply 10 means
-  // multiplying ~5 opponent move frequencies, so even the single most likely
-  // line has cumProb ~0.01-0.03 there. A high floor (the old 0.015) pruned every
-  // branch one ply short of the target → zero leaves. Keep it tiny; best-first
-  // expansion + topK + the call cap already bound the work.
-  const eps = opts.eps != null ? opts.eps : 0.0005;
-  const maxCalls = opts.maxExplorerCalls || 800;
+  const maxVariations = opts.maxVariations || 10;
+  const maxGaps = opts.maxGaps || 10;
+  const maxCalls = opts.maxExplorerCalls || 2500; // scoring-call safety cap
+  const MISSING_PROB = 0.0002; // covered move absent from the explorer DB → tiny importance, still enumerated
+  const GAP_MIN_PROB = 0.08;   // an uncovered opponent move counts as a gap only if reasonably common
   const onProgress = opts.onProgress || null;
 
   const pgn = await fetchStudyPGN(studyId);
@@ -22196,12 +22192,17 @@ async function generateTodoVariations(studyId, color, opts = {}) {
   const parsed = parseRepertoirePGN(pgn, color);
   const trie = parsed && parsed.trie;
   if (!trie || trie.size === 0) return { variations: [], gaps: [], error: 'empty-trie' };
-  console.log(`[TODO] study ${studyId} color=${color} trie=${trie.size} targetPly=${targetPly} token=${!!lichessToken}`);
+  console.log(`[TODO] study ${studyId} color=${color} trie=${trie.size} targetPly=${targetPly} want=${maxVariations} token=${!!lichessToken}`);
 
-  const memo = new Map(); // posKey → explorer data (transposition dedupe, this run only)
+  // The walk is TRIE-DRIVEN: at opponent nodes it branches over every move the
+  // study covers, no matter how rare in the database. The explorer is used ONLY
+  // to score (rank) those moves; a covered move that's absent from the DB still
+  // continues with a tiny floor probability. So every study line is enumerated
+  // and the list is "the X most important variations", not "lines the DB likes".
+  const memo = new Map(); // posKey → Map<uci, probability>
   let calls = 0;
-  const diag = { expNull: 0, expOk: 0, expEmpty: 0, covered: 0, gapHits: 0, epsPruned: 0, userDead: 0 };
-  async function explorer(fen) {
+  const diag = { expNull: 0, expOk: 0, expEmpty: 0, covered: 0, gapHits: 0, terminal: 0 };
+  async function moveProbs(fen) {
     const key = fenPositionKey(fen);
     if (memo.has(key)) return memo.get(key);
     calls++;
@@ -22209,104 +22210,104 @@ async function generateTodoVariations(studyId, color, opts = {}) {
     const data = await fetchExplorerMoves(fen, {
       ratings: TODO_RANK_RATINGS, speeds: TODO_RANK_SPEEDS, force: true,
     });
+    const probs = new Map();
     if (!data) diag.expNull++;
     else if (!data.moves || !data.moves.length) diag.expEmpty++;
-    else diag.expOk++;
+    else {
+      diag.expOk++;
+      const total = data.white + data.draws + data.black;
+      if (total) for (const mv of data.moves) probs.set(mv.uci, (mv.white + mv.draws + mv.black) / total);
+    }
     if (calls === 1) console.log('[TODO] first explorer call →', data ? `${(data.moves || []).length} moves` : 'null (API/token failure)');
-    memo.set(key, data);
-    // Be polite to the explorer endpoint between distinct network calls.
-    await new Promise(r => setTimeout(r, 120));
-    return data;
+    memo.set(key, probs);
+    await new Promise(r => setTimeout(r, 120)); // be polite to the endpoint
+    return probs;
   }
 
   const startFen = new Chess().fen();
   const frontier = [{ fen: startFen, lineUci: [], lineSan: [], cumProb: 1, ply: 0 }];
   const leaves = [];
   const gaps = [];
+  const visited = new Set(); // positionKey → expanded once (dedup transpositions / break cycles)
 
-  while (frontier.length) {
-    if (calls >= maxCalls) break; // safety cap against pathological branching
-    // Best-first by cumulative probability so the cap keeps the most-likely lines.
+  // Best-first by cumulative probability. cumProb only decreases along a path, so
+  // leaves are reached in non-increasing importance order. Leaves stay in the
+  // priority queue and are collected WHEN POPPED — so the first maxVariations
+  // popped leaves are exactly the top X, and we can stop without enumerating the
+  // whole (possibly large) study tree.
+  while (frontier.length && leaves.length < maxVariations) {
+    if (calls >= maxCalls) break;
     frontier.sort((a, b) => b.cumProb - a.cumProb);
     const node = frontier.shift();
+    const posKey = fenPositionKey(node.fen);
+    if (visited.has(posKey)) continue;
+    visited.add(posKey);
 
-    if (node.ply >= targetPly) { leaves.push(node); continue; }
+    if (node.ply >= targetPly) { if (node.lineUci.length) leaves.push(node); continue; }
 
     const chess = new Chess(node.fen);
-    const posKey = fenPositionKey(node.fen);
     const userTurn = (chess.turn() === 'w') === (color === 'white');
 
     if (userTurn) {
-      // Forced prep move. (Reachable only via a covered opponent move or the
-      // start; if the trie somehow lacks it, the branch simply ends.)
+      // Forced prep move. If the study has none here, the line ends → leaf.
       const entry = trie.get(posKey);
-      if (!entry) { diag.userDead++; continue; }
+      if (!entry) { if (node.lineUci.length) { leaves.push(node); diag.terminal++; } continue; }
       const mv = chess.move(entry.san, { sloppy: true });
-      if (!mv) continue;
+      if (!mv) { if (node.lineUci.length) { leaves.push(node); diag.terminal++; } continue; }
       frontier.push({
         fen: chess.fen(), ply: node.ply + 1, cumProb: node.cumProb,
-        lineUci: [...node.lineUci, entry.uci],
-        lineSan: [...node.lineSan, mv.san],
+        lineUci: [...node.lineUci, entry.uci], lineSan: [...node.lineSan, mv.san],
       });
     } else {
-      const data = await explorer(node.fen);
-      if (!data || !data.moves || !data.moves.length) continue;
-      const total = data.white + data.draws + data.black;
-      if (!total) continue;
-      const ranked = data.moves
-        .map(m => ({ uci: m.uci, san: m.san, p: (m.white + m.draws + m.black) / total }))
-        .sort((a, b) => b.p - a.p)
-        .slice(0, topK);
-      for (const m of ranked) {
-        const childCum = node.cumProb * m.p;
-        if (childCum < eps) { diag.epsPruned++; continue; }
-        const c = new Chess(node.fen);
-        const cm = c.move(m.uci, { sloppy: true });
-        if (!cm) continue;
-        const childKey = fenPositionKey(c.fen());
+      // Opponent node: branch over every covered move; collect notable uncovered
+      // moves as gaps. Score by explorer frequency (floor for covered-but-absent).
+      const probs = await moveProbs(node.fen);
+      let coveredHere = 0;
+      for (const lm of chess.moves({ verbose: true })) {
+        chess.move(lm);
+        const childFen = chess.fen();
+        const childKey = fenPositionKey(childFen);
+        chess.undo();
+        const uci = lm.from + lm.to + (lm.promotion || '');
+        const p = probs.get(uci);
         if (trie.has(childKey)) {
-          diag.covered++;
+          coveredHere++; diag.covered++;
           frontier.push({
-            fen: c.fen(), ply: node.ply + 1, cumProb: childCum,
-            lineUci: [...node.lineUci, m.uci],
-            lineSan: [...node.lineSan, cm.san],
+            fen: childFen, ply: node.ply + 1, cumProb: node.cumProb * (p != null ? p : MISSING_PROB),
+            lineUci: [...node.lineUci, uci], lineSan: [...node.lineSan, lm.san],
           });
-        } else {
+        } else if (p != null && p >= GAP_MIN_PROB) {
           diag.gapHits++;
           gaps.push({
-            afterFen: c.fen(),
-            lineUci: [...node.lineUci, m.uci],
-            lineSan: [...node.lineSan, cm.san],
-            cumProb: childCum,
+            afterFen: childFen, lineUci: [...node.lineUci, uci], lineSan: [...node.lineSan, lm.san],
+            cumProb: node.cumProb * p,
           });
         }
       }
+      // Study coverage ends here (no covered opponent reply) → leaf.
+      if (coveredHere === 0 && node.lineUci.length) { leaves.push(node); diag.terminal++; }
     }
   }
 
-  leaves.sort((a, b) => b.cumProb - a.cumProb);
-  console.log(`[TODO] done: leaves=${leaves.length} gaps=${gaps.length} explorerCalls=${calls} ` +
-    `explorer{ok:${diag.expOk},empty:${diag.expEmpty},null:${diag.expNull}} covered=${diag.covered} gapHits=${diag.gapHits} ` +
-    `epsPruned=${diag.epsPruned} userDead=${diag.userDead}`);
-  if (!leaves.length) {
-    if (diag.expNull > 0 && diag.expOk === 0) console.warn('[TODO] explorer returned null for every call — check Lichess token / connectivity / rate limit.');
-    else if (diag.covered === 0 && diag.gapHits > 0) console.warn('[TODO] explorer worked but no opponent reply led back into the trie — trie may be sparse (parser) or targetPly too deep for this study.');
-    else console.warn('[TODO] no leaves reached targetPly — try a lower ply or check the study color matches.');
+  const ranked = leaves.sort((a, b) => b.cumProb - a.cumProb).slice(0, maxVariations);
+  console.log(`[TODO] done: variations=${ranked.length} (collected=${leaves.length}) gaps=${gaps.length} ` +
+    `explorerCalls=${calls} explorer{ok:${diag.expOk},empty:${diag.expEmpty},null:${diag.expNull}} ` +
+    `covered=${diag.covered} terminal=${diag.terminal} gapHits=${diag.gapHits}`);
+  if (!ranked.length) {
+    if (diag.covered === 0) console.warn('[TODO] no covered opponent moves — the study color likely does not match, or the trie is sparse (parser).');
+    else console.warn('[TODO] covered moves found but no variation formed — unexpected; check targetPly.');
   }
-  const variations = leaves
-    .filter(l => l.lineUci.length > 0)
-    .slice(0, opts.maxVariations || 10)
-    .map(l => ({
-      leafKey: fenPositionKey(l.fen),
-      leafFen: l.fen,
-      lineUci: l.lineUci,
-      lineSan: l.lineSan,
-      cumProb: l.cumProb,
-      openingName: lookupOpeningName(l.fen) || null,
-    }));
 
-  // Collapse gaps that transpose to the same position, keeping the most-probable
-  // path to each; sort by probability, cap.
+  const variations = ranked.map(l => ({
+    leafKey: fenPositionKey(l.fen),
+    leafFen: l.fen,
+    lineUci: l.lineUci,
+    lineSan: l.lineSan,
+    cumProb: l.cumProb,
+    openingName: lookupOpeningName(l.fen) || null,
+  }));
+
+  // Collapse gaps that transpose to the same position; sort by importance, cap.
   const gapByKey = new Map();
   for (const g of gaps) {
     const k = fenPositionKey(g.afterFen);
@@ -22315,7 +22316,7 @@ async function generateTodoVariations(studyId, color, opts = {}) {
   }
   const gapList = [...gapByKey.values()]
     .sort((a, b) => b.cumProb - a.cumProb)
-    .slice(0, opts.maxGaps || 10)
+    .slice(0, maxGaps)
     .map(g => ({ ...g, openingName: lookupOpeningName(g.afterFen) || null }));
 
   return { variations, gaps: gapList };
@@ -22730,6 +22731,9 @@ async function generateTodoListForStudy(studyId) {
   if (!s || !lichessToken || window._todoGenerating) return;
   const plySel = document.getElementById('todoPly_' + studyId);
   const targetPly = plySel ? (parseInt(plySel.value) || 10) : 10;
+  const countInp = document.getElementById('todoCount_' + studyId);
+  let maxVariations = countInp ? (parseInt(countInp.value) || 10) : 10;
+  maxVariations = Math.max(1, Math.min(50, maxVariations));
 
   window._todoGenerating = studyId;
   if (repertoireMode) renderRepertoirePanel();
@@ -22740,7 +22744,7 @@ async function generateTodoListForStudy(studyId) {
   };
   let gen;
   try {
-    gen = await generateTodoVariations(studyId, s.color, { targetPly, onProgress });
+    gen = await generateTodoVariations(studyId, s.color, { targetPly, maxVariations, onProgress });
   } catch (e) {
     console.error('[TODO] generation failed', e);
     gen = { variations: [], gaps: [], error: 'exception' };
@@ -22759,7 +22763,7 @@ async function generateTodoListForStudy(studyId) {
   if (!gistData.repertoire.todoLists) gistData.repertoire.todoLists = [];
   const list = {
     id: 'todo_' + studyId, studyId, name: s.name || studyId, color: s.color,
-    targetPly, createdAt: Date.now(), variations: gen.variations, gaps: gen.gaps,
+    targetPly, maxVariations, createdAt: Date.now(), variations: gen.variations, gaps: gen.gaps,
   };
   const idx = gistData.repertoire.todoLists.findIndex(t => t.studyId === studyId);
   if (idx >= 0) gistData.repertoire.todoLists[idx] = list;
@@ -22817,9 +22821,13 @@ function renderTodoStudyBlock(s) {
   const list = getTodoList(s.id);
   const generating = window._todoGenerating === s.id;
   const plyVal = (list && list.targetPly) || 10;
+  const countVal = (list && list.maxVariations) || 10;
   let html = `<div style="margin:8px 0;padding:6px 8px;border:1px solid var(--border);border-radius:8px;">`;
   html += `<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:4px;">
     <span style="flex:1;min-width:0;font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(s.name || s.id)} <span style="opacity:0.5;font-weight:400;">(${s.color})</span></span>
+    <label style="font-size:10px;color:var(--text-muted);">count
+      <input type="number" id="todoCount_${s.id}" min="1" max="50" value="${countVal}" style="width:42px;font-size:10px;padding:1px 3px;border-radius:4px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);">
+    </label>
     <label style="font-size:10px;color:var(--text-muted);">ply
       <select id="todoPly_${s.id}" style="font-size:10px;padding:1px 2px;border-radius:4px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);">
         ${[6, 8, 10, 12].map(p => `<option value="${p}"${p === plyVal ? ' selected' : ''}>${p}</option>`).join('')}
