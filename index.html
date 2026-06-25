@@ -1715,7 +1715,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire variation-checklist (1/3): generation + data foundation. generateTodoVariations(studyId, color) ranks a study's lines by the cumulative probability of the opponent's moves (Lichess Explorer, fixed 1600+ non-bullet pool, preset-independent): forced user moves from the trie, top-K opponent branching, eps pruning, transposition memo, 120ms inter-call delay, 500-call cap; uncovered opponent moves above eps collected as gaps. fetchExplorerMoves gains a {ratings, speeds, force} override so ranking uses the fixed pool while live practice keeps the user's settings. recordPracticeResult gains an optional preset tag in practiceScoreboard entries (the single source for later checklist completion). mergeGistData merges repertoire.todoLists by id. No drill or UI wiring yet.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire variation-checklist (2/3): drill core. startTodoVariation(variation, preset) runs a strict scripted lead-up (user plays their own prep; deviations rejected and retried) then hands over at the leaf to a free continuation reusing advantage-mode machinery (DB→Maia at the preset, silent, Claim-Victory at +1000x3, checkmate ends). The eval-collapse auto-end is suppressed while repTodoActive so an equal opening doesn't end on move 1; opponent-mate still records a loss. finishAdvantage routes to finishTodoDrill, writing win/draw/loss to practiceScoreboard tagged with the preset; todoCompletedPresets derives completion per leaf. New mode flag repTodoActive in inOtherMode, the Escape chain (→ abandonTodoDrill), and loadPosition teardown; presets override explorer/Maia globals and restore on every exit. Entry clears stale engine-line/practice-item/premove/pre-analysis state. Presets: Easy 1600-1800/Maia1600, Medium 1600-2200/1900, Hard 2000-2500/2100. No UI yet (console-triggerable).</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -4613,7 +4613,7 @@ function handleSfCrash(err) {
       if (currentMistakeIdx < 0) return;
       const m = filteredMistakes[currentMistakeIdx];
       if (!m) return;
-      const inOtherMode = continuationMode || tacticMode || repertoireMode || analysisMode || advantageMode || openingFilterMode || detectedTacticSolveMode;
+      const inOtherMode = continuationMode || tacticMode || repertoireMode || analysisMode || advantageMode || openingFilterMode || detectedTacticSolveMode || repTodoActive;
       const isMistakeType = m.type === 'mistake';
       if (isMistakeType && !inOtherMode) {
         sfLog('CRASH', `restarting pre-analysis for current mistake idx=${currentMistakeIdx}`);
@@ -12734,6 +12734,10 @@ function loadPosition(globalIdx, skipAnimation = false) {
   // manually dismiss before they can see what they just loaded. Safe no-op
   // on desktop and when drawer-open class isn't set.
   closeDrawer();
+  // If a repertoire-checklist drill is active, navigating away restores its
+  // preset overrides and clears its flags (the practiceContItem splice below
+  // removes the synthetic item).
+  if (repTodoActive) endTodoDrill();
   // Clean up any synthetic practice item from filter continuation.
   // Note: after splice, an index that pointed AT the practice item now points to
   // the next item. Silently proceeding would load the wrong position — so when the
@@ -13332,7 +13336,9 @@ function onDrop(source, target) {
     return undefined;
   }
 
-  if (repLeadUpActive) {
+  if (repTodoActive && repTodoState && repTodoState.phase === 'leadup') {
+    evaluateTodoLeadUpMove(source, target, move);
+  } else if (repLeadUpActive) {
     repLeadUpPlayMove(source, target, move);
   } else {
     currentAttempts++;
@@ -14716,8 +14722,11 @@ function handleEvalResult(cpLoss, bestCp, move, from, to, bestMoveSan, m, contUc
     // Wrong move — mark first attempt as failed
     if (currentAttempts === 1) firstAttemptFailed = true;
 
-    if (continuationMode && advantageMode && afterCpPlayer <= 100) {
-      // Advantage mode: eval collapsed — end drill immediately
+    if (continuationMode && advantageMode && afterCpPlayer <= 100 && !repTodoActive) {
+      // Advantage mode: eval collapsed — end drill immediately.
+      // (Suppressed for repertoire-checklist drills, which start from a roughly
+      // equal opening — the eval is ≤ +1.0 by definition, so this would fire on
+      // move 1. A checklist drill only ends on checkmate or Claim Victory.)
       if (silentContinuation) {
         // In silent mode, still record the move before finishing
         addContLineMove(move.san, from + to + (move.promotion || ''), gameEngine.fen(), true, window._pendingContEvalData || undefined);
@@ -17319,8 +17328,10 @@ function updateAdvantageTracking(afterCpPlayer, wpDrop = 0) {
     advantageMinCpReached = afterCpPlayer;
   }
 
-  // Check for eval collapse — user lost the advantage
-  if (afterCpPlayer <= 100) {
+  // Check for eval collapse — user lost the advantage.
+  // Suppressed for repertoire-checklist drills (start from ~equal, would fire
+  // immediately); those end only on checkmate or Claim Victory.
+  if (afterCpPlayer <= 100 && !repTodoActive) {
     finishAdvantage('collapse');
     return;
   }
@@ -17358,6 +17369,9 @@ function finishAdvantage(outcome) {
   // outcome: 'victory' (claim or checkmate), 'collapse' (eval ≤ 100cp), 'draw',
   //          'interrupted' (engine/explorer failure — NO SRS grade recorded)
   if (!advantageMode) return;
+  // Repertoire-checklist drills reuse advantage-mode machinery but record a
+  // checklist result (scoreboard + preset) rather than an SRS grade.
+  if (repTodoActive) { finishTodoDrill(outcome); return; }
   if (voiceMode) voiceStop();
   advantageMode = false;
   silentContinuation = false;
@@ -22268,6 +22282,391 @@ async function generateTodoVariations(studyId, color, opts = {}) {
   return { variations, gaps: gapList };
 }
 
+// ─── Repertoire variation-checklist DRILL ───
+// A drill = scripted lead-up (user plays their own prep, opponent on rails; a
+// deviation is rejected and must be retried) → free continuation from the leaf
+// using the advantage-mode machinery (DB→Maia opponent at the chosen difficulty
+// preset, Claim-Victory button at +1000×3, checkmate ends). "Win" (claim or
+// mate) checks the variation off for that preset. Completion is recorded to
+// practiceScoreboard (keyed by the leaf position) tagged with the preset.
+//
+// Difficulty presets only affect the OPPONENT during the free-continuation
+// phase — never the ranking of the list. Rating buckets are clamped to the
+// explorer's available set (floor 1600); Easy uses 1600–1800.
+const REP_TODO_PRESETS = {
+  easy:   { label: 'Easy',   order: 0, ratings: [1600, 1800],             maiaElo: 1600, maiaPrecision: 0.65 },
+  medium: { label: 'Medium', order: 1, ratings: [1600, 1800, 2000, 2200], maiaElo: 1900, maiaPrecision: 0.75 },
+  hard:   { label: 'Hard',   order: 2, ratings: [2000, 2200, 2500],       maiaElo: 2100, maiaPrecision: 0.85 },
+};
+const REP_TODO_PRESET_ORDER = ['easy', 'medium', 'hard'];
+
+let repTodoActive = false;       // a variation-checklist drill is in progress
+let repTodoState = null;         // { variation, preset, phase: 'leadup'|'cont' }
+let repTodoLeadUp = null;        // [{ uci, san, fen, fenBefore, isUser, from, to, promotion }]
+let repTodoLeadUpIdx = 0;        // next lead-up move to play
+let _repTodoSavedContSettings = null; // explorer/Maia globals saved for restore on exit
+let _lastTodoDrill = null;       // { variation, preset } for the "Play again" button
+
+// Replay the variation's UCI line from the standard start, tagging each ply with
+// who plays it (relative to the repertoire color). Mirrors buildLeadUpFromTrie's
+// move-object shape so the existing board-playback helpers consume it directly.
+function buildTodoLeadUp(lineUci, color) {
+  const chess = new Chess();
+  const line = [];
+  for (const uci of lineUci) {
+    const fenBefore = chess.fen();
+    const turn = chess.turn();
+    const isUser = (turn === 'w') === (color === 'white');
+    const mv = chess.move({ from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: uci.slice(4) || undefined });
+    if (!mv) break; // malformed line — stop where it breaks
+    line.push({ uci, san: mv.san, fen: chess.fen(), fenBefore, isUser,
+                from: mv.from, to: mv.to, promotion: mv.promotion || undefined });
+  }
+  return line;
+}
+
+function applyTodoPreset(presetKey) {
+  const p = REP_TODO_PRESETS[presetKey];
+  if (!p) return;
+  // Save the live cont-setting globals so a drill never persists its preset
+  // into the user's normal practice settings (restored in endTodoDrill).
+  _repTodoSavedContSettings = {
+    explorerEnabled, explorerRatings, explorerSpeeds, maiaElo, maiaPrecision,
+  };
+  explorerEnabled = true;
+  explorerRatings = p.ratings.slice();
+  explorerSpeeds = TODO_RANK_SPEEDS.slice();
+  maiaElo = p.maiaElo;
+  maiaPrecision = p.maiaPrecision;
+}
+
+function restoreTodoContSettings() {
+  if (!_repTodoSavedContSettings) return;
+  const s = _repTodoSavedContSettings;
+  explorerEnabled = s.explorerEnabled;
+  explorerRatings = s.explorerRatings;
+  explorerSpeeds = s.explorerSpeeds;
+  maiaElo = s.maiaElo;
+  maiaPrecision = s.maiaPrecision;
+  _repTodoSavedContSettings = null;
+}
+
+// Entry point. variation = a generateTodoVariations() leaf object; preset is a
+// REP_TODO_PRESETS key. Console-triggerable until the checklist UI lands.
+function startTodoVariation(variation, presetKey) {
+  if (!variation || !variation.lineUci || !variation.lineUci.length) return;
+  if (!REP_TODO_PRESETS[presetKey]) return;
+  if (!repertoireTrie) { console.warn('[TODO] No repertoire loaded'); return; }
+
+  // Tear down any other mode first (mirrors how other entries start clean).
+  if (repTodoActive) endTodoDrill();
+  // Clear state that could leak in from a prior session/drill and hijack the
+  // lead-up: a stale engine line (onDrop's browsingLine branch would intercept
+  // moves), a lingering synthetic practice item (replay-after-finish leaves one
+  // in filteredMistakes), a queued premove, or a running pre-analysis session.
+  stopPreAnalysis();
+  clearPremove();
+  if (practiceContItem) {
+    const pIdx = filteredMistakes.indexOf(practiceContItem);
+    if (pIdx >= 0) filteredMistakes.splice(pIdx, 1);
+    practiceContItem = null;
+  }
+
+  const color = variation.color ||
+    (boardObj && boardObj.orientation()) || 'white';
+  repTodoLeadUp = buildTodoLeadUp(variation.lineUci, color);
+  if (!repTodoLeadUp.length) { console.warn('[TODO] Lead-up failed to build'); return; }
+  repTodoLeadUpIdx = 0;
+  repTodoActive = true;
+  repTodoState = { variation, preset: presetKey, color, phase: 'leadup' };
+  _lastTodoDrill = { variation, preset: presetKey };
+  applyTodoPreset(presetKey);
+
+  // Reset board to the start; the lead-up plays out from there.
+  gameEngine = new Chess();
+  if (!boardObj) initBoard();
+  boardObj.orientation(color);
+  boardObj.position(gameEngine.fen(), false);
+  clearBoardOverlays();
+  clearLastMoveHighlight();
+  showCheckHighlight(gameEngine);
+
+  // No SRS card for a checklist drill; reset per-puzzle scalars.
+  currentMistakeIdx = -1;
+  currentAttempts = 0;
+  contLine = null;
+  contLineBrowsing = false;
+  browsingLine = false;
+  engineLine = null;
+  continuationMode = false; // lead-up is not continuation yet
+  silentContinuation = false;
+  advantageMode = false;
+  hintUsed = false; hintLevel = 0; hintMove = null;
+  document.getElementById('btnHint').classList.add('hidden');
+  document.getElementById('btnRetry').classList.add('hidden');
+  document.getElementById('emptyMsg').classList.add('hidden');
+  document.getElementById('feedbackContainer').innerHTML = '';
+  document.getElementById('contLineContainer').innerHTML = '';
+  document.getElementById('posInfoCard').style.display = '';
+  if (document.body.classList.contains('mobile-browsing')) {
+    document.body.classList.remove('mobile-browsing');
+    document.body.classList.add('mobile-training');
+  }
+
+  // Auto-play any opening opponent moves (e.g. white's 1st move when drilling a
+  // black repertoire) until it's the user's turn, then prompt.
+  advanceTodoLeadUpAfterUser();
+}
+
+function todoLeadUpPromptHtml() {
+  const v = repTodoState.variation;
+  const p = REP_TODO_PRESETS[repTodoState.preset];
+  const movesSoFar = repTodoLeadUp.slice(0, repTodoLeadUpIdx).map(x => x.san).join(' ');
+  return `
+    <div style="font-size:13px;line-height:1.7">
+      <div style="color:var(--blue);font-weight:600;">Repertoire variation · ${escHtml(p.label)}</div>
+      <div style="font-size:11px;color:var(--text-muted)">${escHtml(v.openingName || 'Repertoire line')}</div>
+      <div style="margin-top:4px;">Play your repertoire — move ${Math.floor(repTodoLeadUpIdx / 2) + 1}</div>
+      ${movesSoFar ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">${escHtml(movesSoFar)}</div>` : ''}
+    </div>`;
+}
+
+function showTodoLeadUpPrompt() {
+  document.getElementById('feedbackContainer').innerHTML = '';
+  document.getElementById('posInfoContent').innerHTML = todoLeadUpPromptHtml();
+}
+
+// After a correct user prep move (or at entry), auto-play the scripted opponent
+// reply (if any) and either prompt for the next user move or, at the end of the
+// line, hand over to the free-continuation phase.
+function advanceTodoLeadUpAfterUser() {
+  if (!repTodoActive || !repTodoState || repTodoState.phase !== 'leadup') return;
+  if (repTodoLeadUpIdx >= repTodoLeadUp.length) { startTodoContinuation(); return; }
+  const next = repTodoLeadUp[repTodoLeadUpIdx];
+  if (!next.isUser) {
+    setTimeout(() => {
+      if (!repTodoActive || !repTodoState || repTodoState.phase !== 'leadup') return;
+      gameEngine.move({ from: next.from, to: next.to, promotion: next.promotion });
+      boardObj.position(gameEngine.fen(), true);
+      showLastMoveHighlightDeferred(next.from, next.to);
+      showCheckHighlightDeferred(gameEngine);
+      repTodoLeadUpIdx++;
+      advanceTodoLeadUpAfterUser();
+    }, 350);
+  } else {
+    showTodoLeadUpPrompt();
+  }
+}
+
+// Strict lead-up move evaluation. The move is already applied to gameEngine by
+// onDrop; on a deviation we undo and require a retry.
+function evaluateTodoLeadUpMove(source, target, move) {
+  clearHintHighlights();
+  const expected = repTodoLeadUp[repTodoLeadUpIdx];
+  const playedUci = source + target + (move.promotion || '');
+  if (!expected || !expected.isUser || playedUci !== expected.uci) {
+    gameEngine.undo();
+    boardObj.position(gameEngine.fen(), true);
+    clearLastMoveHighlight();
+    showCheckHighlightDeferred(gameEngine);
+    showColorFeedback('var(--yellow)', 'rgba(255,193,7,0.08)',
+      `<code>${escHtml(move.san)}</code> isn't your repertoire move`,
+      `Play the prepared move to continue down this variation.`);
+    return;
+  }
+  // Correct — keep the move, advance, play opponent reply / finish.
+  showLastMoveHighlight(source, target);
+  showCheckHighlight(gameEngine);
+  repTodoLeadUpIdx++;
+  advanceTodoLeadUpAfterUser();
+}
+
+// Hand over from the scripted lead-up to free continuation at the leaf. Reuses
+// the advantage-mode machinery (silent continuation + Claim Victory + checkmate
+// ends); the eval-collapse auto-end is suppressed while repTodoActive (see
+// updateAdvantageTracking / evaluateMove) so an equal opening doesn't end
+// instantly.
+function startTodoContinuation() {
+  repTodoState.phase = 'cont';
+  const leafFen = gameEngine.fen();
+  const orientation = repTodoState.color;
+  const fenParts = leafFen.split(' ');
+  const moveNum = parseInt(fenParts[5]) || 1;
+  const v = repTodoState.variation;
+
+  practiceContItem = {
+    type: 'practice',
+    playerColor: orientation,
+    fenBefore: leafFen, // scoreboard key = fenPositionKey(leafFen) = variation.leafKey
+    gameId: '_rep_todo',
+    movePly: 0,
+    moveNumber: moveNum,
+    wpDrop: 0, cpLoss: 0, bestMove: null, bestMoveSan: null, bestCp: 0,
+    game: { id: '_rep_todo', opening: { name: v.openingName || 'Repertoire' },
+            speed: 'practice', _source: 'rep_todo', rated: false, players: {} },
+  };
+  filteredMistakes.push(practiceContItem);
+  currentMistakeIdx = filteredMistakes.length - 1;
+
+  // Advantage-mode continuation state.
+  contLine = { baseFen: leafFen, moves: [], currentIdx: -1 };
+  contLineBrowsing = false;
+  continuationMode = true;
+  continuationEvalBarOn = false;
+  silentContinuation = true;
+  advantageMode = true;
+  advantageMinCpReached = null;
+  advantageConsecutiveAbove1000 = 0;
+  srsRecorded = false;
+  firstAttemptFailed = false;
+  hintUsed = false; hintLevel = 0; hintMove = null;
+  lastContUserAfterCp = null;
+
+  document.getElementById('btnHint').classList.add('hidden');
+  document.getElementById('btnNote').classList.remove('hidden');
+  document.getElementById('feedbackContainer').innerHTML = '';
+  updateEvalBar();
+  if (voiceSettings.enabled) voiceStart();
+
+  const p = REP_TODO_PRESETS[repTodoState.preset];
+  document.getElementById('posInfoContent').innerHTML = `
+    <div style="font-size:13px;line-height:1.7">
+      <div style="color:#4caf50;font-weight:600;">Variation reached · ${escHtml(p.label)}</div>
+      <div>Play it out and win — checkmate or claim a winning position.</div>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">Opponent: DB → Maia (${p.maiaElo})</div>
+    </div>`;
+
+  const userTurnChar = orientation === 'white' ? 'w' : 'b';
+  if (fenParts[1] === userTurnChar) {
+    currentSolveFen = leafFen;
+    startPreAnalysis(currentSolveFen);
+  } else {
+    advanceContinuation('');
+  }
+}
+
+// Single teardown for restoring globals + clearing flags. Does NOT show UI.
+function endTodoDrill() {
+  restoreTodoContSettings();
+  repTodoActive = false;
+  repTodoState = null;
+  repTodoLeadUp = null;
+  repTodoLeadUpIdx = 0;
+}
+
+function todoOutcomeToResult(outcome) {
+  if (outcome === 'victory') return 'win';
+  if (outcome === 'collapse') return 'loss'; // only reachable via opponent mate (eval-collapse suppressed)
+  if (outcome === 'draw') return 'draw';
+  return null; // interrupted
+}
+
+// Called from finishAdvantage when repTodoActive (routes the advantage outcome
+// to checklist completion instead of an SRS grade).
+function finishTodoDrill(outcome) {
+  if (voiceMode) voiceStop();
+  advantageMode = false;
+  silentContinuation = false;
+  continuationMode = false;
+  lastContUserAfterCp = null;
+  clearContSession();
+  hideMaiaControls();
+  stopPreAnalysis();
+
+  const preset = repTodoState ? repTodoState.preset : null;
+  const presetLabel = preset && REP_TODO_PRESETS[preset] ? REP_TODO_PRESETS[preset].label : '';
+  const result = todoOutcomeToResult(outcome);
+  const cpWhite = (typeof afterMoveCpWhite !== 'undefined') ? afterMoveCpWhite : null;
+
+  // practiceContItem is still set → recordPracticeResult keys on the leaf and
+  // tags the preset, the single source of truth for checklist completion.
+  if (result) recordPracticeResult(result, cpWhite, { preset });
+
+  const claimBtn = document.getElementById('advantageClaimBtn');
+  if (claimBtn) claimBtn.remove();
+
+  let color, bg, title, body;
+  if (outcome === 'victory') {
+    color = '#4caf50'; bg = 'rgba(76,175,80,0.08)';
+    title = '✓ Variation won!';
+    body = `You won this line at <b>${escHtml(presetLabel)}</b> — checked off.`;
+  } else if (outcome === 'collapse') {
+    color = '#ef5f5f'; bg = 'rgba(239,95,95,0.08)';
+    title = 'Checkmated';
+    body = 'You were mated playing out this variation. Try again.';
+  } else if (outcome === 'draw') {
+    color = '#ef5f5f'; bg = 'rgba(239,95,95,0.08)';
+    title = 'Draw';
+    body = 'The line ended drawn — you need a win to check this off.';
+  } else {
+    color = 'var(--accent)'; bg = 'rgba(66,133,244,0.08)';
+    title = 'Drill interrupted';
+    body = 'Couldn\'t determine the opponent\'s response. Try again.';
+  }
+
+  const actionsHtml = continuationEndActionsHtml(true);
+  const againBtn = _lastTodoDrill
+    ? `<button class="btn btn-ghost btn-sm" style="font-size:12px;" onclick="replayLastTodoDrill()">▶ Play again</button>`
+    : '';
+  const wrapBtns = `<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">${againBtn}</div>`;
+
+  showColorFeedback(color, bg, title, body + actionsHtml + wrapBtns);
+  renderContLine(); // cont phase is always silent — show classification symbols
+
+  document.getElementById('btnRetry').classList.add('hidden');
+  document.getElementById('btnHint').classList.add('hidden');
+  clearHintHighlights();
+
+  // Restore globals + clear flags. practiceContItem is left in place so the
+  // post-game review (continuationEndActionsHtml) can read contLine; loadPosition
+  // splices it on the next navigation.
+  restoreTodoContSettings();
+  repTodoActive = false;
+  repTodoState = null;
+  repTodoLeadUp = null;
+  repTodoLeadUpIdx = 0;
+  updateSessionProgress();
+}
+
+// Escape / navigate-away teardown: no result recorded.
+function abandonTodoDrill() {
+  if (voiceMode) voiceStop();
+  advantageMode = false;
+  silentContinuation = false;
+  continuationMode = false;
+  stopPreAnalysis();
+  clearContSession();
+  hideMaiaControls();
+  clearHintHighlights();
+  // Remove the synthetic practice item if it was pushed during the cont phase.
+  if (practiceContItem) {
+    const idx = filteredMistakes.indexOf(practiceContItem);
+    if (idx >= 0) filteredMistakes.splice(idx, 1);
+    practiceContItem = null;
+    currentMistakeIdx = -1;
+  }
+  endTodoDrill();
+  document.getElementById('feedbackContainer').innerHTML = '';
+  document.getElementById('btnHint').classList.add('hidden');
+  document.getElementById('btnNote').classList.add('hidden');
+}
+
+function replayLastTodoDrill() {
+  if (_lastTodoDrill) startTodoVariation(_lastTodoDrill.variation, _lastTodoDrill.preset);
+}
+
+// Derive checklist completion for a variation: which presets have a recorded win
+// in practiceScoreboard at the variation's leaf position. Returns a Set of keys.
+function todoCompletedPresets(leafKey) {
+  const done = new Set();
+  const entries = gistData?.practiceScoreboard?.[leafKey];
+  if (!entries) return done;
+  for (const e of entries) {
+    if (e.result === 'win' && e.preset && REP_TODO_PRESETS[e.preset]) done.add(e.preset);
+  }
+  return done;
+}
+
 function getRepertoireContinuations(fen) {
   // From a position where it's the opponent's turn, find all opponent moves
   // that lead to positions in the repertoire trie (i.e., covered continuations)
@@ -24204,6 +24603,7 @@ document.addEventListener('keydown', (e) => {
     if (voiceMode && voicePendingMove) { voiceProcessResult({ type: 'confirm', value: false }); return; }
     if (analysisMode) { exitAnalysisMode(); return; }
     if (detectedTacticSolveMode) { abandonDetectedTacticSolve(); return; }
+    if (repTodoActive) { abandonTodoDrill(); return; }
     // If the detected-tactics modal is open (but not yet solving), close it
     const dtModal = document.getElementById('detectedTacticsModal');
     if (dtModal && !dtModal.classList.contains('hidden')) { closeDetectedTacticsModal(); return; }
