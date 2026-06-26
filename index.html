@@ -1715,7 +1715,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire variation-checklist: fix lead-up phase rejecting all moves. During the scripted lead-up the user plays their own prep moves, but currentMistakeIdx is -1 (no SRS item), so both input handlers hit `const m = filteredMistakes[currentMistakeIdx]; if(!m) return` and blocked every piece pickup/selection (arrows use a separate right-click handler, so they kept working - which is why the board felt half-dead). Added a lead-up bypass to BOTH paths: onDragStart now allows dragging the user's own pieces on the user's turn, and the tap-to-move handler selects and plays the move inline, routing it to evaluateTodoLeadUpMove (which keeps a correct prep move and advances, or undoes a wrong one). Both bypasses sit before the m-gate and check gameEngine.turn() so taps during the opponent's auto-play window are ignored. onDrop already dispatched to the lead-up evaluator; this makes drag-pickup and tap consistent with it.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire variation-checklist: reset stale drill state between drills. A completed drill ends with repTodoActive=false, so startTodoVariation's endTodoDrill() guard was skipped and residue from the first drill's continuation/review/note phase leaked into the next drill. mobileDrawMode left on (note panel closed without resetting it) turned the board into a draw surface - arrows worked but drags/taps did not; contLineReviewMode / tacticLine / noteJumpedAway gated the cont-phase handler so clicks failed after the lead-up. startTodoVariation now closes any open note panel and defensively clears mobileDrawMode, noteJumpedAway, the four contLineReview* flags, tacticLine/tacticMode/tacticCompleted, detectedTacticSolveMode and repContActive/repContBrowsing before building the lead-up.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -22460,6 +22460,26 @@ function startTodoVariation(variation, presetKey) {
     if (pIdx >= 0) filteredMistakes.splice(pIdx, 1);
     practiceContItem = null;
   }
+
+  // A *completed* drill ends with repTodoActive=false, so the endTodoDrill()
+  // guard above is skipped and residue from its continuation / review / note
+  // phase is never cleared. Each of these gates an input handler ahead of the
+  // lead-up bypass (mobileDrawMode/noteJumpedAway/tacticLine) or blocks the
+  // cont-phase handler (contLineReview*), so the *second* drill of a session
+  // couldn't accept drags or taps. Clear them defensively before starting.
+  if (notePanelOpen) closeNotePanel(); // also resets mobileDrawMode + hides panel
+  mobileDrawMode = false;
+  noteJumpedAway = false;
+  contLineReviewMode = false;
+  contLineReviewKeyMoves = [];
+  contLineReviewKeyIdx = -1;
+  contLineReviewRetryIdx = -1;
+  tacticLine = null;
+  tacticMode = false;
+  tacticCompleted = false;
+  detectedTacticSolveMode = false;
+  repContActive = false;
+  repContBrowsing = false;
 
   const color = variation.color ||
     (boardObj && boardObj.orientation()) || 'white';
