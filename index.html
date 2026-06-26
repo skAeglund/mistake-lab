@@ -1715,7 +1715,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire: read chapter name from [ChapterName] and scan all headers for skip tags. Lichess does not always put the chapter name in [Event] - renamed chapters, or names derived from White/Black tags, can leave it out - so [SKIP]/[OLD]/[ALT] markers placed in the chapter name were missed by the old [Event]-only check. The shared parser now prefers Lichess's dedicated [ChapterName] tag for the chapter title (falling back to [Event]) and scans every header line for the skip markers, so a tagged chapter is excluded wherever its name landed. Header-shaped lines only, so movetext/comments cannot false-trigger. Applies to both RepertoireCheck and the variation-checklist.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire checklist: adjustable shared Maia opponent strength. Per-difficulty Maia ELO (Easy/Medium/Hard) is now a single shared setting, edited via number inputs at the top of the checklist section, persisted in localStorage (mistakelab_todo_maia) and applied to every drill via applyTodoPreset. The preset maiaElo becomes the default; defaults raised to Easy 1750, Medium 2000, Hard 2150. Precision stays preset-fixed (0.65/0.75/0.85). Values clamp/snap to the 1600-2200 step-25 Maia range.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -22462,11 +22462,40 @@ async function generateTodoVariations(studyId, color, opts = {}) {
 // phase — never the ranking of the list. Rating buckets are clamped to the
 // explorer's available set (floor 1600); Easy uses 1600–1800.
 const REP_TODO_PRESETS = {
-  easy:   { label: 'Easy',   order: 0, ratings: [1600, 1800],             maiaElo: 1600, maiaPrecision: 0.65 },
-  medium: { label: 'Medium', order: 1, ratings: [1600, 1800, 2000, 2200], maiaElo: 1900, maiaPrecision: 0.75 },
-  hard:   { label: 'Hard',   order: 2, ratings: [2000, 2200, 2500],       maiaElo: 2100, maiaPrecision: 0.85 },
+  easy:   { label: 'Easy',   order: 0, ratings: [1600, 1800],             maiaElo: 1750, maiaPrecision: 0.65 },
+  medium: { label: 'Medium', order: 1, ratings: [1600, 1800, 2000, 2200], maiaElo: 2000, maiaPrecision: 0.75 },
+  hard:   { label: 'Hard',   order: 2, ratings: [2000, 2200, 2500],       maiaElo: 2150, maiaPrecision: 0.85 },
 };
 const REP_TODO_PRESET_ORDER = ['easy', 'medium', 'hard'];
+
+// Shared, user-adjustable opponent strength (Maia ELO) for ALL checklist drills.
+// One value per difficulty, persisted locally; the preset's maiaElo above is just
+// the default. Precision stays preset-fixed. Clamped to the Maia slider range.
+const REP_TODO_MAIA_KEY = 'mistakelab_todo_maia';
+const REP_TODO_MAIA_MIN = 1600, REP_TODO_MAIA_MAX = 2200, REP_TODO_MAIA_STEP = 25;
+let repTodoMaiaElo = (() => {
+  const d = {};
+  for (const k of REP_TODO_PRESET_ORDER) d[k] = REP_TODO_PRESETS[k].maiaElo;
+  try {
+    const saved = JSON.parse(localStorage.getItem(REP_TODO_MAIA_KEY) || '{}');
+    for (const k of REP_TODO_PRESET_ORDER) if (Number.isFinite(saved[k])) d[k] = saved[k];
+  } catch (e) {}
+  return d;
+})();
+function saveTodoMaiaElo() {
+  try { localStorage.setItem(REP_TODO_MAIA_KEY, JSON.stringify(repTodoMaiaElo)); } catch (e) {}
+}
+function updateTodoMaiaElo(presetKey, val) {
+  if (!REP_TODO_PRESETS[presetKey]) return;
+  const n = parseInt(val, 10);
+  if (!Number.isFinite(n)) return;
+  const clamped = Math.max(REP_TODO_MAIA_MIN, Math.min(REP_TODO_MAIA_MAX,
+    Math.round(n / REP_TODO_MAIA_STEP) * REP_TODO_MAIA_STEP));
+  repTodoMaiaElo[presetKey] = clamped;
+  saveTodoMaiaElo();
+  const el = document.getElementById('todoMaia_' + presetKey);
+  if (el && parseInt(el.value, 10) !== clamped) el.value = clamped;
+}
 
 let repTodoActive = false;       // a variation-checklist drill is in progress
 let repTodoState = null;         // { variation, preset, phase: 'leadup'|'cont' }
@@ -22504,7 +22533,7 @@ function applyTodoPreset(presetKey) {
   explorerEnabled = true;
   explorerRatings = p.ratings.slice();
   explorerSpeeds = TODO_RANK_SPEEDS.slice();
-  maiaElo = p.maiaElo;
+  maiaElo = repTodoMaiaElo[presetKey] != null ? repTodoMaiaElo[presetKey] : p.maiaElo;
   maiaPrecision = p.maiaPrecision;
 }
 
@@ -22960,6 +22989,15 @@ function renderTodoChecklistSection(studies) {
   if (!lichessToken) {
     html += `<div class="hint" style="font-size:11px;">Connect Lichess (above) to generate — ranking uses the opening explorer.</div>`;
   }
+  // Shared opponent-strength controls — one Maia ELO per difficulty, applied to
+  // every checklist drill (precision stays preset-fixed).
+  html += `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;font-size:10px;color:var(--text-muted);">
+    <span title="Opponent model strength during the play-out phase of every checklist drill">Opponent strength (Maia ELO):</span>
+    ${REP_TODO_PRESET_ORDER.map(pk => `<label style="display:inline-flex;align-items:center;gap:3px;">${REP_TODO_PRESETS[pk].label}
+      <input type="number" id="todoMaia_${pk}" value="${repTodoMaiaElo[pk]}" min="${REP_TODO_MAIA_MIN}" max="${REP_TODO_MAIA_MAX}" step="${REP_TODO_MAIA_STEP}"
+        onchange="updateTodoMaiaElo('${pk}', this.value)"
+        style="width:56px;padding:2px 4px;font-size:10px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);"></label>`).join('')}
+  </div>`;
   for (const s of studies) html += renderTodoStudyBlock(s);
   html += `</div>`;
   return html;
