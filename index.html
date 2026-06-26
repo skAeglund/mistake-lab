@@ -1715,7 +1715,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire variation-checklist: reset stale drill state between drills. A completed drill ends with repTodoActive=false, so startTodoVariation's endTodoDrill() guard was skipped and residue from the first drill's continuation/review/note phase leaked into the next drill. mobileDrawMode left on (note panel closed without resetting it) turned the board into a draw surface - arrows worked but drags/taps did not; contLineReviewMode / tacticLine / noteJumpedAway gated the cont-phase handler so clicks failed after the lead-up. startTodoVariation now closes any open note panel and defensively clears mobileDrawMode, noteJumpedAway, the four contLineReview* flags, tacticLine/tacticMode/tacticCompleted, detectedTacticSolveMode and repContActive/repContBrowsing before building the lead-up.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire checklist: rank the todo list by proportional apportionment instead of a scalar score. The X slots are handed out down the trie: at each opponent node the covered moves are renormalised among themselves (uncovered traffic ignored - surfaced as gaps) and the node's quota is split across covered children by those shares (d'Hondt), capped at each subtree's leaf-capacity so an exhausted subtree overflows its remainder to siblings and the list fills toward X. So a 60%/40% first split gives A ~60% of the slots; inside A, AA/AB renormalise (e.g. 40/30 -> 57/43) and split A's slots again. Two passes: enumerate the covered tree (explorer scores opponent nodes), then apportion top-down. Order is depth-first, high-share-first so each subtree's lines group together; the % and bar both show renormalised reach-probability. Note: enumerates the whole covered tree so more (memoized) explorer calls than the old stop-at-X.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -22229,10 +22229,11 @@ const TODO_RANK_SPEEDS = ['blitz', 'rapid', 'classical', 'correspondence']; // a
 
 async function generateTodoVariations(studyId, color, opts = {}) {
   const targetPly = opts.targetPly || 10;
-  const maxVariations = opts.maxVariations || 10;
+  const maxVariations = opts.maxVariations || 10; // N — total slots apportioned across the covered tree
   const maxGaps = opts.maxGaps || 10;
   const maxCalls = opts.maxExplorerCalls || 2500; // scoring-call safety cap
-  const MISSING_PROB = 0.0002; // covered move absent from the explorer DB → tiny importance, still enumerated
+  const maxNodes = opts.maxNodes || 20000;        // tree-size safety cap
+  const MISSING_PROB = 0.0002; // covered move absent from the explorer DB → tiny share, still enumerated
   const GAP_MIN_PROB = 0.08;   // an uncovered opponent move counts as a gap only if reasonably common
   const onProgress = opts.onProgress || null;
 
@@ -22244,13 +22245,13 @@ async function generateTodoVariations(studyId, color, opts = {}) {
   console.log(`[TODO] study ${studyId} color=${color} trie=${trie.size} targetPly=${targetPly} want=${maxVariations} token=${!!lichessToken}`);
 
   // The walk is TRIE-DRIVEN: at opponent nodes it branches over every move the
-  // study covers, no matter how rare in the database. The explorer is used ONLY
-  // to score (rank) those moves; a covered move that's absent from the DB still
-  // continues with a tiny floor probability. So every study line is enumerated
-  // and the list is "the X most important variations", not "lines the DB likes".
+  // study covers, no matter how rare in the database. The explorer scores those
+  // moves; the scores set how the X slots are APPORTIONED across the tree (see
+  // the apportionment block below), not which lines survive a ranking cut. A
+  // covered move absent from the DB still continues with a tiny floor share.
   const memo = new Map(); // posKey → Map<uci, probability>
   let calls = 0;
-  const diag = { expNull: 0, expOk: 0, expEmpty: 0, covered: 0, gapHits: 0, terminal: 0 };
+  const diag = { expNull: 0, expOk: 0, expEmpty: 0, covered: 0, gapHits: 0, leaves: 0, nodes: 0, truncated: false };
   async function moveProbs(fen) {
     const key = fenPositionKey(fen);
     if (memo.has(key)) return memo.get(key);
@@ -22274,99 +22275,159 @@ async function generateTodoVariations(studyId, color, opts = {}) {
   }
 
   const startFen = new Chess().fen();
-  const frontier = [{ fen: startFen, lineUci: [], lineSan: [], cumProb: 1, ply: 0 }];
-  const leaves = [];
   const gaps = [];
-  const visited = new Set(); // positionKey → expanded once (dedup transpositions / break cycles)
+  const buildVisited = new Set(); // posKey on the current build path → break cycles
 
-  // Best-first by cumulative probability. cumProb only decreases along a path, so
-  // leaves are reached in non-increasing importance order. Leaves stay in the
-  // priority queue and are collected WHEN POPPED — so the first maxVariations
-  // popped leaves are exactly the top X, and we can stop without enumerating the
-  // whole (possibly large) study tree.
-  while (frontier.length && leaves.length < maxVariations) {
-    if (calls >= maxCalls) break;
-    frontier.sort((a, b) => b.cumProb - a.cumProb);
-    const node = frontier.shift();
-    const posKey = fenPositionKey(node.fen);
-    if (visited.has(posKey)) continue;
-    visited.add(posKey);
-
-    if (node.ply >= targetPly) { if (node.lineUci.length) leaves.push(node); continue; }
-
-    const chess = new Chess(node.fen);
+  // ── Pass 1: enumerate the covered tree (trie-driven; explorer scores opponent
+  // nodes). pathProb = renormalised cumulative probability to reach a node
+  // (product of covered-only shares). Returns a node:
+  //   leaf:   { type:'leaf', leafKey, leafFen, lineUci, lineSan, pathProb, capacity:1 }
+  //   branch: { type:'branch', children:[{share,node}], capacity }  (opponent decision)
+  // Forced user plies are transparent — enumerate returns the child subtree.
+  function makeLeaf(fen, lineUci, lineSan, pathProb) {
+    diag.leaves++;
+    return { type: 'leaf', leafKey: fenPositionKey(fen), leafFen: fen, lineUci, lineSan, pathProb, capacity: 1 };
+  }
+  async function enumerate(fen, lineUci, lineSan, ply, pathProb) {
+    if (diag.nodes >= maxNodes) { diag.truncated = true; return makeLeaf(fen, lineUci, lineSan, pathProb); }
+    diag.nodes++;
+    const posKey = fenPositionKey(fen);
+    if (ply >= targetPly) return makeLeaf(fen, lineUci, lineSan, pathProb);
+    if (buildVisited.has(posKey)) return makeLeaf(fen, lineUci, lineSan, pathProb); // cycle → cap as leaf
+    const chess = new Chess(fen);
     const userTurn = (chess.turn() === 'w') === (color === 'white');
 
     if (userTurn) {
-      // Forced prep move. If the study has none here, the line ends → leaf.
-      const entry = trie.get(posKey);
-      if (!entry) { if (node.lineUci.length) { leaves.push(node); diag.terminal++; } continue; }
+      const entry = trie.get(posKey);          // forced prep move; study silent here → leaf
+      if (!entry) return makeLeaf(fen, lineUci, lineSan, pathProb);
       const mv = chess.move(entry.san, { sloppy: true });
-      if (!mv) { if (node.lineUci.length) { leaves.push(node); diag.terminal++; } continue; }
-      frontier.push({
-        fen: chess.fen(), ply: node.ply + 1, cumProb: node.cumProb,
-        lineUci: [...node.lineUci, entry.uci], lineSan: [...node.lineSan, mv.san],
-      });
-    } else {
-      // Opponent node: branch over every covered move; collect notable uncovered
-      // moves as gaps. Score by explorer frequency (floor for covered-but-absent).
-      const probs = await moveProbs(node.fen);
-      let coveredHere = 0;
-      for (const lm of chess.moves({ verbose: true })) {
-        chess.move(lm);
-        const childFen = chess.fen();
-        const childKey = fenPositionKey(childFen);
-        chess.undo();
-        const uci = lm.from + lm.to + (lm.promotion || '');
-        const p = probs.get(uci);
-        if (trie.has(childKey)) {
-          coveredHere++; diag.covered++;
-          frontier.push({
-            fen: childFen, ply: node.ply + 1, cumProb: node.cumProb * (p != null ? p : MISSING_PROB),
-            lineUci: [...node.lineUci, uci], lineSan: [...node.lineSan, lm.san],
-          });
-        } else if (p != null && p >= GAP_MIN_PROB) {
-          diag.gapHits++;
-          gaps.push({
-            afterFen: childFen, lineUci: [...node.lineUci, uci], lineSan: [...node.lineSan, lm.san],
-            cumProb: node.cumProb * p,
-          });
-        }
-      }
-      // Study coverage ends here (no covered opponent reply) → leaf.
-      if (coveredHere === 0 && node.lineUci.length) { leaves.push(node); diag.terminal++; }
+      if (!mv) return makeLeaf(fen, lineUci, lineSan, pathProb);
+      buildVisited.add(posKey);
+      const sub = await enumerate(chess.fen(), [...lineUci, entry.uci], [...lineSan, mv.san], ply + 1, pathProb);
+      buildVisited.delete(posKey);
+      return sub; // transparent
     }
+
+    // Opponent node: branch over covered moves; collect notable uncovered as gaps.
+    const probs = (calls < maxCalls) ? await moveProbs(fen) : new Map();
+    const covered = [];
+    for (const lm of chess.moves({ verbose: true })) {
+      chess.move(lm);
+      const childFen = chess.fen();
+      const childKey = fenPositionKey(childFen);
+      chess.undo();
+      const uci = lm.from + lm.to + (lm.promotion || '');
+      const p = probs.get(uci);
+      if (trie.has(childKey)) {
+        covered.push({ childFen, uci, san: lm.san, rawProb: (p != null ? p : MISSING_PROB) });
+      } else if (p != null && p >= GAP_MIN_PROB) {
+        diag.gapHits++;
+        gaps.push({ afterFen: childFen, lineUci: [...lineUci, uci], lineSan: [...lineSan, lm.san], reachProb: pathProb * p });
+      }
+    }
+    if (!covered.length) return makeLeaf(fen, lineUci, lineSan, pathProb); // coverage ends → leaf
+    diag.covered += covered.length;
+
+    // Renormalise the covered moves among themselves — uncovered traffic is
+    // ignored here (it's surfaced in the gaps list), so the shares the quota is
+    // split by always sum to 1 over what the study actually covers.
+    const totalCov = covered.reduce((s, c) => s + c.rawProb, 0) || 1;
+    for (const c of covered) c.share = c.rawProb / totalCov;
+    covered.sort((a, b) => b.share - a.share); // high-share first → DFS keeps each subtree's lines grouped & ordered
+
+    buildVisited.add(posKey);
+    const children = [];
+    let capacity = 0;
+    for (const c of covered) {
+      const node = await enumerate(c.childFen, [...lineUci, c.uci], [...lineSan, c.san], ply + 1, pathProb * c.share);
+      children.push({ share: c.share, node });
+      capacity += node.capacity;
+    }
+    buildVisited.delete(posKey);
+    return { type: 'branch', children, capacity };
   }
 
-  const ranked = leaves.sort((a, b) => b.cumProb - a.cumProb).slice(0, maxVariations);
-  console.log(`[TODO] done: variations=${ranked.length} (collected=${leaves.length}) gaps=${gaps.length} ` +
+  // ── Pass 2: apportion N slots top-down. At each branch, split the incoming
+  // quota across children ∝ share via d'Hondt (one slot at a time, divisor
+  // share/(alloc+1)), capping each child at its subtree's leaf-capacity so an
+  // exhausted subtree overflows its remainder to siblings → the list fills toward
+  // N. A subtree whose quota meets/exceeds its capacity contributes every line.
+  function apportionSlots(quota, items) { // items: [{share, cap}] → integer allocs
+    const alloc = items.map(() => 0);
+    let toGive = Math.min(quota, items.reduce((s, it) => s + it.cap, 0));
+    while (toGive > 0) {
+      let best = -1, bestKey = -Infinity;
+      for (let i = 0; i < items.length; i++) {
+        if (alloc[i] >= items[i].cap) continue;
+        const key = items[i].share / (alloc[i] + 1);
+        if (key > bestKey) { bestKey = key; best = i; }
+      }
+      if (best < 0) break;
+      alloc[best]++; toGive--;
+    }
+    return alloc;
+  }
+  function collectAllLeaves(node, out) {
+    if (node.type === 'leaf') { out.push(node); return out; }
+    for (const c of node.children) collectAllLeaves(c.node, out);
+    return out;
+  }
+  function selectLeaves(node, quota, out) {
+    if (quota < 1) return out;
+    if (node.type === 'leaf') { out.push(node); return out; }
+    if (quota >= node.capacity) return collectAllLeaves(node, out);
+    const alloc = apportionSlots(quota, node.children.map(c => ({ share: c.share, cap: c.node.capacity })));
+    for (let i = 0; i < node.children.length; i++) {
+      if (alloc[i] >= 1) selectLeaves(node.children[i].node, alloc[i], out);
+    }
+    return out;
+  }
+
+  const root = await enumerate(startFen, [], [], 0, 1);
+  const selectedRaw = (root.capacity <= maxVariations)
+    ? collectAllLeaves(root, [])
+    : selectLeaves(root, maxVariations, []);
+
+  // Dedup transposed leaves (different move orders → same final position drill the
+  // same thing; completion is keyed by leaf position) and drop the empty root line.
+  const selected = [];
+  const seenLeaf = new Set();
+  for (const l of selectedRaw) {
+    if (!l.lineUci.length || seenLeaf.has(l.leafKey)) continue;
+    seenLeaf.add(l.leafKey);
+    selected.push(l);
+  }
+
+  console.log(`[TODO] done: variations=${selected.length}/${maxVariations} (treeLeaves=${diag.leaves} capacity=${root.capacity}) ` +
     `explorerCalls=${calls} explorer{ok:${diag.expOk},empty:${diag.expEmpty},null:${diag.expNull}} ` +
-    `covered=${diag.covered} terminal=${diag.terminal} gapHits=${diag.gapHits}`);
-  if (!ranked.length) {
+    `covered=${diag.covered} gapHits=${diag.gapHits} nodes=${diag.nodes}` + (diag.truncated ? ' [TRUNCATED:maxNodes]' : ''));
+  if (!selected.length) {
     if (diag.covered === 0) console.warn('[TODO] no covered opponent moves — the study color likely does not match, or the trie is sparse (parser).');
     else console.warn('[TODO] covered moves found but no variation formed — unexpected; check targetPly.');
   }
 
-  const variations = ranked.map(l => ({
-    leafKey: fenPositionKey(l.fen),
-    leafFen: l.fen,
+  const variations = selected.map(l => ({
+    leafKey: l.leafKey,
+    leafFen: l.leafFen,
     lineUci: l.lineUci,
     lineSan: l.lineSan,
-    cumProb: l.cumProb,
-    openingName: lookupOpeningName(l.fen) || null,
+    cumProb: l.pathProb,    // renormalised reach-probability among covered traffic — the % label
+    importance: l.pathProb, // same axis → bar is consistent with the (DFS, high-share-first) order
+    openingName: lookupOpeningName(l.leafFen) || null,
   }));
 
-  // Collapse gaps that transpose to the same position; sort by importance, cap.
+  // Gaps: uncovered opponent moves worth a look. Collapse transpositions, rank by
+  // reach probability, cap.
   const gapByKey = new Map();
   for (const g of gaps) {
     const k = fenPositionKey(g.afterFen);
     const prev = gapByKey.get(k);
-    if (!prev || g.cumProb > prev.cumProb) gapByKey.set(k, g);
+    if (!prev || g.reachProb > prev.reachProb) gapByKey.set(k, g);
   }
   const gapList = [...gapByKey.values()]
-    .sort((a, b) => b.cumProb - a.cumProb)
+    .sort((a, b) => b.reachProb - a.reachProb)
     .slice(0, maxGaps)
-    .map(g => ({ ...g, openingName: lookupOpeningName(g.afterFen) || null }));
+    .map(g => ({ ...g, cumProb: g.reachProb, openingName: lookupOpeningName(g.afterFen) || null }));
 
   return { variations, gaps: gapList };
 }
@@ -22907,7 +22968,7 @@ function renderTodoStudyBlock(s) {
   html += `<div id="todoStatus_${s.id}" style="font-size:10px;color:var(--text-muted);min-height:12px;"></div>`;
 
   if (list && list.variations && list.variations.length) {
-    const maxCum = Math.max(...list.variations.map(v => v.cumProb || 0), 0.0001);
+    const maxImp = Math.max(...list.variations.map(v => v.importance || v.cumProb || 0), 0.0001);
     list.variations.forEach((v, vi) => {
       const done = todoCompletedPresets(v.leafKey);
       const chips = REP_TODO_PRESET_ORDER.map((pk, i) => {
@@ -22921,7 +22982,7 @@ function renderTodoStudyBlock(s) {
         return `<span ${onclick} style="font-size:10px;padding:2px 7px;border-radius:10px;background:${bg};color:${colr};opacity:${clickable ? 1 : 0.4};cursor:${clickable ? 'pointer' : 'default'};border:1px solid var(--border);">${isDone ? '✓ ' : ''}${p.label}</span>`;
       }).join(' ');
       const pct = (v.cumProb || 0) * 100;
-      const barW = Math.max(3, ((v.cumProb || 0) / maxCum) * 100);
+      const barW = Math.max(3, ((v.importance != null ? v.importance : v.cumProb || 0) / maxImp) * 100);
       html += `<div style="padding:5px 0;border-top:1px solid var(--border);">
         <div style="font-size:11px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escHtml(v.lineSan.join(' '))}">${escHtml(formatTodoLineSan(v.lineSan))}</div>
         <div style="display:flex;align-items:center;gap:6px;margin-top:3px;">
