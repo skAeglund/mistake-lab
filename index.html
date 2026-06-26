@@ -1715,7 +1715,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire checklist: fix castling moves (O-O) ranking last. The Lichess explorer reports castling as king-onto-rook UCI (e1h1/e1a1), but the checklist matched explorer move frequencies against chess.js's king-destination UCI (e1g1/e1c1), so O-O never found its real DB probability, fell to the MISSING_PROB floor, and sorted below rare covered sidelines - which then renormalised upward (a 4%-played move showing 34%). moveProbs now keys frequencies by SAN as well as UCI, and the opponent-move lookup falls back to SAN, so castling matches regardless of convention. With the real ~80% restored, O-O sorts to the top and the displayed percentages are correct.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire: read chapter name from [ChapterName] and scan all headers for skip tags. Lichess does not always put the chapter name in [Event] - renamed chapters, or names derived from White/Black tags, can leave it out - so [SKIP]/[OLD]/[ALT] markers placed in the chapter name were missed by the old [Event]-only check. The shared parser now prefers Lichess's dedicated [ChapterName] tag for the chapter title (falling back to [Event]) and scans every header line for the skip markers, so a tagged chapter is excluded wherever its name landed. Header-shaped lines only, so movetext/comments cannot false-trigger. Applies to both RepertoireCheck and the variation-checklist.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -20511,16 +20511,26 @@ function parseRepertoirePGN(pgnText, repertoireColor) {
     const siteMatch = gamePgn.match(/\[Site "([^"]+)"\]/);
     const chapterUrl = siteMatch ? siteMatch[1] : null;
 
-    // Extract chapter title from [Event] header
+    // Extract chapter title. Lichess derives a chapter's name from PGN tags, so
+    // the actual name can live in [ChapterName] (its dedicated tag for imported
+    // chapters) or [Event]. A renamed chapter, or one whose name came from
+    // White/Black tags, may leave the real name out of [Event] — so prefer
+    // [ChapterName] and fall back to [Event].
+    const chapterNameMatch = gamePgn.match(/\[ChapterName "([^"]+)"\]/);
     const eventMatch = gamePgn.match(/\[Event "([^"]+)"\]/);
-    const chapterTitle = eventMatch ? eventMatch[1] : null;
+    const chapterTitle = (chapterNameMatch && chapterNameMatch[1]) || (eventMatch && eventMatch[1]) || null;
 
     // Extract study name from [StudyName] header (falls back to Event if absent)
     const studyNameMatch = gamePgn.match(/\[StudyName "([^"]+)"\]/);
     const studyName = studyNameMatch ? studyNameMatch[1] : null;
 
-    // Skip chapters tagged [SKIP], [OLD], or [ALT] (case-insensitive)
-    if (chapterTitle && /\[(skip|old|alt)\]/i.test(chapterTitle)) {
+    // Skip chapters tagged [SKIP], [OLD], or [ALT] (case-insensitive). Scan all
+    // header lines, not just one tag, so the marker is caught wherever Lichess
+    // wrote the chapter name (ChapterName, Event, …). Matching only header-shaped
+    // lines keeps movetext/comments out, and these bracketed tokens can't occur
+    // in URL/date/ECO/opening header values, so this is safe.
+    const headerLines = (gamePgn.match(/^[ \t]*\[[A-Za-z0-9_]+\s+"[^"]*"\][ \t]*$/gm) || []).join('\n');
+    if (/\[(skip|old|alt)\]/i.test(headerLines)) {
       continue;
     }
 
