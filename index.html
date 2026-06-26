@@ -1715,7 +1715,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire checklist: rank the todo list by proportional apportionment instead of a scalar score. The X slots are handed out down the trie: at each opponent node the covered moves are renormalised among themselves (uncovered traffic ignored - surfaced as gaps) and the node's quota is split across covered children by those shares (d'Hondt), capped at each subtree's leaf-capacity so an exhausted subtree overflows its remainder to siblings and the list fills toward X. So a 60%/40% first split gives A ~60% of the slots; inside A, AA/AB renormalise (e.g. 40/30 -> 57/43) and split A's slots again. Two passes: enumerate the covered tree (explorer scores opponent nodes), then apportion top-down. Order is depth-first, high-share-first so each subtree's lines group together; the % and bar both show renormalised reach-probability. Note: enumerates the whole covered tree so more (memoized) explorer calls than the old stop-at-X.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire checklist: fix castling moves (O-O) ranking last. The Lichess explorer reports castling as king-onto-rook UCI (e1h1/e1a1), but the checklist matched explorer move frequencies against chess.js's king-destination UCI (e1g1/e1c1), so O-O never found its real DB probability, fell to the MISSING_PROB floor, and sorted below rare covered sidelines - which then renormalised upward (a 4%-played move showing 34%). moveProbs now keys frequencies by SAN as well as UCI, and the opponent-move lookup falls back to SAN, so castling matches regardless of convention. With the real ~80% restored, O-O sorts to the top and the displayed percentages are correct.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -22266,7 +22266,15 @@ async function generateTodoVariations(studyId, color, opts = {}) {
     else {
       diag.expOk++;
       const total = data.white + data.draws + data.black;
-      if (total) for (const mv of data.moves) probs.set(mv.uci, (mv.white + mv.draws + mv.black) / total);
+      // Key by BOTH uci and a check/mate-stripped SAN. chess.js emits castling as
+      // e1g1/e1c1, but the Lichess explorer reports it as e1h1/e1a1 (king-onto-rook),
+      // so a uci-only lookup misses O-O and drops it to MISSING_PROB — sinking the
+      // 80% main move below rare sidelines. SAN ("O-O") matches either way.
+      if (total) for (const mv of data.moves) {
+        const prob = (mv.white + mv.draws + mv.black) / total;
+        if (mv.uci) probs.set(mv.uci, prob);
+        if (mv.san) probs.set('s:' + mv.san.replace(/[+#]/g, ''), prob);
+      }
     }
     if (calls === 1) console.log('[TODO] first explorer call →', data ? `${(data.moves || []).length} moves` : 'null (API/token failure)');
     memo.set(key, probs);
@@ -22317,7 +22325,7 @@ async function generateTodoVariations(studyId, color, opts = {}) {
       const childKey = fenPositionKey(childFen);
       chess.undo();
       const uci = lm.from + lm.to + (lm.promotion || '');
-      const p = probs.get(uci);
+      const p = probs.get(uci) ?? probs.get('s:' + lm.san.replace(/[+#]/g, ''));
       if (trie.has(childKey)) {
         covered.push({ childFen, uci, san: lm.san, rawProb: (p != null ? p : MISSING_PROB) });
       } else if (p != null && p >= GAP_MIN_PROB) {
