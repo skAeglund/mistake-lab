@@ -1715,7 +1715,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire checklist: adjustable shared Maia opponent strength. Per-difficulty Maia ELO (Easy/Medium/Hard) is now a single shared setting, edited via number inputs at the top of the checklist section, persisted in localStorage (mistakelab_todo_maia) and applied to every drill via applyTodoPreset. The preset maiaElo becomes the default; defaults raised to Easy 1750, Medium 2000, Hard 2150. Precision stays preset-fixed (0.65/0.75/0.85). Values clamp/snap to the 1600-2200 step-25 Maia range.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire checklist: enable voice mode for the play-out. The voice pipeline already supported checklist drills - startTodoContinuation calls voiceStart, the opponent-move TTS is gated on voiceMode, and spoken-move input (voiceExecuteMove) is gated on continuationMode||advantageMode (both true during play-out) - but voice could only be switched on from the continuation-settings panel, which checklist users never open, so voiceSettings.enabled stayed false and the hook never fired. Added a Voice toggle to the shared checklist settings row that sets the same voiceSettings.enabled flag (and start/stops immediately if a play-out is already live). Voice covers the play-out, not the scripted lead-up, and resets off each session, matching continuation practice.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -22497,6 +22497,19 @@ function updateTodoMaiaElo(presetKey, val) {
   if (el && parseInt(el.value, 10) !== clamped) el.value = clamped;
 }
 
+// Voice toggle for checklist drills — sets the shared voiceSettings.enabled flag
+// (same flag continuation practice uses), so startTodoContinuation's voiceStart
+// hook fires for the play-out. If a play-out is already live, start/stop now.
+function toggleTodoVoice(checked) {
+  voiceSettings.enabled = !!checked;
+  saveVoiceSettings();
+  if (checked) {
+    if (continuationMode && !voiceMode) voiceStart();
+  } else if (voiceMode) {
+    voiceStop();
+  }
+}
+
 let repTodoActive = false;       // a variation-checklist drill is in progress
 let repTodoState = null;         // { variation, preset, phase: 'leadup'|'cont' }
 let repTodoLeadUp = null;        // [{ uci, san, fen, fenBefore, isUser, from, to, promotion }]
@@ -22997,6 +23010,8 @@ function renderTodoChecklistSection(studies) {
       <input type="number" id="todoMaia_${pk}" value="${repTodoMaiaElo[pk]}" min="${REP_TODO_MAIA_MIN}" max="${REP_TODO_MAIA_MAX}" step="${REP_TODO_MAIA_STEP}"
         onchange="updateTodoMaiaElo('${pk}', this.value)"
         style="width:56px;padding:2px 4px;font-size:10px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);"></label>`).join('')}
+    <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;margin-left:auto;" title="Hands-free play-out: speak your moves, opponent replies announced aloud (same as continuation practice). Resets off each session.">
+      <input type="checkbox" id="todoVoiceToggle" ${voiceSettings.enabled ? 'checked' : ''} onchange="toggleTodoVoice(this.checked)"> 🎙 Voice</label>
   </div>`;
   for (const s of studies) html += renderTodoStudyBlock(s);
   html += `</div>`;
