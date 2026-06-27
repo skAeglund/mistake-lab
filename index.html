@@ -1715,7 +1715,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire checklist: mini-board hover preview for variations and gaps. Reuses the deviation preview (showPositionPreview). Hovering a specific move shows the position after it; hovering elsewhere on the row falls back to the leaf (the final position the play-out starts from). Per-move FENs are recovered by replaying the line UCI from the initial position at render time - no storage bloat in saved lists - and the board flips for black repertoires. Bound via onmouseover (updates per move) + onmouseleave (hides once on exit) so moving between moves does not flicker. Applied to both variation rows and the uncovered-gaps list.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire checklist: smooth per-move hover preview. Two fixes. (1) Gap-free line: each move span now includes its move-number prefix and trailing space, and spans are concatenated with no text between them, so sliding the cursor across the line plays the moves out continuously instead of dropping to the leaf fallback in the cracks between moves. (2) No lag: replaced the full 64-square/32-image rebuild-per-hover with a persistent grid that diff-updates only the squares that change between consecutive positions (typically 2-4 per move). The board is anchored on first show and stays put while sliding, so the moves play out in place rather than the board chasing the cursor. Deviation preview (showPositionPreview) is unchanged.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -22918,9 +22918,11 @@ function formatTodoLineSan(sans) {
 
 // Like formatTodoLineSan but returns HTML with each move wrapped in a hoverable
 // .todo-move span carrying data-fen (the position AFTER that move) so hovering a
-// move pops a mini-board. Checklist lines always start from the initial position,
-// so we replay the UCI to recover each intermediate FEN. SAN text is escaped;
-// FENs contain no quotes so they're attribute-safe.
+// move pops a mini-board. Each span includes its move-number prefix and trailing
+// space, and spans are concatenated with NO text between them, so the whole line
+// is gap-free — sliding the cursor across it plays the moves out continuously
+// without dropping to the leaf fallback in the cracks. Checklist lines start from
+// the initial position, so we replay the UCI to recover each intermediate FEN.
 function formatTodoLineSanHoverable(lineSan, lineUci) {
   const ch = new Chess();
   let out = '', moveNum = 1, white = true;
@@ -22930,25 +22932,94 @@ function formatTodoLineSanHoverable(lineSan, lineUci) {
     if (u) {
       try { if (ch.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u.slice(4, 5) || undefined })) fen = ch.fen(); } catch (e) {}
     }
-    out += (white ? `${moveNum}.` : '') + `<span class="todo-move" data-fen="${fen}" style="cursor:help;">${escHtml(lineSan[i])}</span> `;
+    const label = (white ? `${moveNum}.` : '') + escHtml(lineSan[i]);
+    out += `<span class="todo-move" data-fen="${fen}" style="cursor:help;">${label}&nbsp;</span>`;
     if (!white) moveNum++;
     white = !white;
   }
-  return out.trim();
+  return out;
+}
+
+// ── Smooth mini-board preview for checklist lines ──
+// Unlike showPositionPreview (rebuilds 64 squares + 32 imgs every call — fine for
+// a single deviation hover, laggy when sliding move-to-move), this keeps a
+// persistent 8×8 grid and only rewrites the squares that changed between the
+// previous position and the new one (typically 2–4 per move). The board is
+// anchored on first show and stays put while sliding, so the moves play out in
+// place instead of the board chasing the cursor.
+const TODO_PREVIEW_PIECE = { K: 'wK', Q: 'wQ', R: 'wR', B: 'wB', N: 'wN', P: 'wP',
+                             k: 'bK', q: 'bQ', r: 'bR', b: 'bB', n: 'bN', p: 'bP' };
+let _todoPrevEl = null, _todoPrevState = null;
+function todoPreviewCells(fen, flip) {
+  const ranks = fen.split(' ')[0].split('/');
+  const grid = ranks.map(row => {
+    const r = [];
+    for (const ch of row) {
+      if (/\d/.test(ch)) for (let k = 0; k < parseInt(ch); k++) r.push('');
+      else r.push(ch);
+    }
+    return r;
+  });
+  const cells = [];
+  if (flip) for (let rk = 7; rk >= 0; rk--) for (let f = 7; f >= 0; f--) cells.push(grid[rk][f]);
+  else for (let rk = 0; rk < 8; rk++) for (let f = 0; f < 8; f++) cells.push(grid[rk][f]);
+  return cells;
+}
+function todoShowPreview(fen, event, color) {
+  const flip = color === 'black';
+  if (!_todoPrevEl) {
+    _todoPrevEl = document.createElement('div');
+    _todoPrevEl.className = 'pos-preview';
+    document.body.appendChild(_todoPrevEl);
+  }
+  if (!_todoPrevState || _todoPrevState.flip !== flip) {
+    _todoPrevEl.innerHTML = '';
+    const sq = [];
+    for (let i = 0; i < 64; i++) {
+      const r = Math.floor(i / 8), c = i % 8;
+      const light = flip ? (r + c) % 2 !== 0 : (r + c) % 2 === 0;
+      const d = document.createElement('div');
+      d.className = 'pos-preview-sq ' + (light ? 'light' : 'dark');
+      _todoPrevEl.appendChild(d);
+      sq.push(d);
+    }
+    _todoPrevState = { sq, board: new Array(64).fill(null), flip };
+  }
+  const wasHidden = _todoPrevEl.style.display !== 'grid';
+  const cells = todoPreviewCells(fen, flip);
+  const { sq, board } = _todoPrevState;
+  for (let i = 0; i < 64; i++) {
+    if (cells[i] !== board[i]) {
+      sq[i].innerHTML = cells[i]
+        ? `<img src="https://lichess1.org/assets/piece/cburnett/${TODO_PREVIEW_PIECE[cells[i]]}.svg">`
+        : '';
+      board[i] = cells[i];
+    }
+  }
+  // Anchor on first show; don't chase the cursor while sliding across moves.
+  if (wasHidden) {
+    const x = event.clientX + 12, y = event.clientY - 80;
+    _todoPrevEl.style.left = Math.min(x, window.innerWidth - 172) + 'px';
+    _todoPrevEl.style.top = Math.max(4, Math.min(y, window.innerHeight - 172)) + 'px';
+    _todoPrevEl.style.display = 'grid';
+  }
+}
+function todoHidePreview() {
+  if (_todoPrevEl) _todoPrevEl.style.display = 'none';
 }
 
 // Delegated hover handler for checklist variation/gap rows. Hovering a specific
 // move shows the position after it; hovering elsewhere on the row falls back to
 // the row's data-leaf (the final position the play-out starts from). Bound via
-// onmouseover (fires per move as the cursor moves) + onmouseleave (hides once on
-// true exit, so moving between moves doesn't flicker).
+// onmouseover (fires per move as the cursor crosses) + onmouseleave (hides once
+// on true exit).
 function todoLinePreview(event) {
   const row = event.currentTarget;
   if (!row) return;
   const color = row.getAttribute('data-color') || 'white';
   const tm = event.target && event.target.closest ? event.target.closest('.todo-move') : null;
   const fen = (tm && tm.getAttribute('data-fen')) || row.getAttribute('data-leaf');
-  if (fen) showPositionPreview(fen, event, color);
+  if (fen) todoShowPreview(fen, event, color);
 }
 
 async function generateTodoListForStudy(studyId) {
@@ -23089,7 +23160,7 @@ function renderTodoStudyBlock(s) {
       }).join(' ');
       const pct = (v.cumProb || 0) * 100;
       const barW = Math.max(3, ((v.importance != null ? v.importance : v.cumProb || 0) / maxImp) * 100);
-      html += `<div style="padding:5px 0;border-top:1px solid var(--border);" onmouseover="todoLinePreview(event)" onmouseleave="hidePositionPreview()" data-leaf="${v.leafFen}" data-color="${s.color}">
+      html += `<div style="padding:5px 0;border-top:1px solid var(--border);" onmouseover="todoLinePreview(event)" onmouseleave="todoHidePreview()" data-leaf="${v.leafFen}" data-color="${s.color}">
         <div style="font-size:11px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escHtml(v.lineSan.join(' '))}">${formatTodoLineSanHoverable(v.lineSan, v.lineUci)}</div>
         <div style="display:flex;align-items:center;gap:6px;margin-top:3px;">
           <div style="flex:1;height:4px;background:var(--bg-secondary);border-radius:2px;overflow:hidden;"><div style="height:100%;width:${barW}%;background:var(--blue);"></div></div>
@@ -23107,7 +23178,7 @@ function renderTodoStudyBlock(s) {
         html += `<div style="margin-top:4px;">`;
         list.gaps.forEach((g, gi) => {
           const gpct = (g.cumProb || 0) * 100;
-          html += `<div class="game-card" style="padding:5px 8px;margin:2px 0;font-size:11px;cursor:pointer;" onclick="exploreTodoGap('${s.id}',${gi})" onmouseover="todoLinePreview(event)" onmouseleave="hidePositionPreview()" data-leaf="${g.afterFen}" data-color="${s.color}" title="${escHtml(g.lineSan.join(' '))}">
+          html += `<div class="game-card" style="padding:5px 8px;margin:2px 0;font-size:11px;cursor:pointer;" onclick="exploreTodoGap('${s.id}',${gi})" onmouseover="todoLinePreview(event)" onmouseleave="todoHidePreview()" data-leaf="${g.afterFen}" data-color="${s.color}" title="${escHtml(g.lineSan.join(' '))}">
             <span style="font-family:monospace;">${formatTodoLineSanHoverable(g.lineSan, g.lineUci)}</span>
             <span style="float:right;color:var(--text-muted);font-size:9px;">${gpct.toFixed(gpct < 10 ? 1 : 0)}% · explore →</span>
           </div>`;
