@@ -1715,7 +1715,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire checklist: enable voice mode for the play-out. The voice pipeline already supported checklist drills - startTodoContinuation calls voiceStart, the opponent-move TTS is gated on voiceMode, and spoken-move input (voiceExecuteMove) is gated on continuationMode||advantageMode (both true during play-out) - but voice could only be switched on from the continuation-settings panel, which checklist users never open, so voiceSettings.enabled stayed false and the hook never fired. Added a Voice toggle to the shared checklist settings row that sets the same voiceSettings.enabled flag (and start/stops immediately if a play-out is already live). Voice covers the play-out, not the scripted lead-up, and resets off each session, matching continuation practice.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire checklist: mini-board hover preview for variations and gaps. Reuses the deviation preview (showPositionPreview). Hovering a specific move shows the position after it; hovering elsewhere on the row falls back to the leaf (the final position the play-out starts from). Per-move FENs are recovered by replaying the line UCI from the initial position at render time - no storage bloat in saved lists - and the board flips for black repertoires. Bound via onmouseover (updates per move) + onmouseleave (hides once on exit) so moving between moves does not flicker. Applied to both variation rows and the uncovered-gaps list.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -22916,6 +22916,41 @@ function formatTodoLineSan(sans) {
   return out.trim();
 }
 
+// Like formatTodoLineSan but returns HTML with each move wrapped in a hoverable
+// .todo-move span carrying data-fen (the position AFTER that move) so hovering a
+// move pops a mini-board. Checklist lines always start from the initial position,
+// so we replay the UCI to recover each intermediate FEN. SAN text is escaped;
+// FENs contain no quotes so they're attribute-safe.
+function formatTodoLineSanHoverable(lineSan, lineUci) {
+  const ch = new Chess();
+  let out = '', moveNum = 1, white = true;
+  for (let i = 0; i < lineSan.length; i++) {
+    let fen = '';
+    const u = lineUci && lineUci[i];
+    if (u) {
+      try { if (ch.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u.slice(4, 5) || undefined })) fen = ch.fen(); } catch (e) {}
+    }
+    out += (white ? `${moveNum}.` : '') + `<span class="todo-move" data-fen="${fen}" style="cursor:help;">${escHtml(lineSan[i])}</span> `;
+    if (!white) moveNum++;
+    white = !white;
+  }
+  return out.trim();
+}
+
+// Delegated hover handler for checklist variation/gap rows. Hovering a specific
+// move shows the position after it; hovering elsewhere on the row falls back to
+// the row's data-leaf (the final position the play-out starts from). Bound via
+// onmouseover (fires per move as the cursor moves) + onmouseleave (hides once on
+// true exit, so moving between moves doesn't flicker).
+function todoLinePreview(event) {
+  const row = event.currentTarget;
+  if (!row) return;
+  const color = row.getAttribute('data-color') || 'white';
+  const tm = event.target && event.target.closest ? event.target.closest('.todo-move') : null;
+  const fen = (tm && tm.getAttribute('data-fen')) || row.getAttribute('data-leaf');
+  if (fen) showPositionPreview(fen, event, color);
+}
+
 async function generateTodoListForStudy(studyId) {
   const s = getRepertoireConfig().find(x => x.id === studyId);
   if (!s || !lichessToken || window._todoGenerating) return;
@@ -23054,8 +23089,8 @@ function renderTodoStudyBlock(s) {
       }).join(' ');
       const pct = (v.cumProb || 0) * 100;
       const barW = Math.max(3, ((v.importance != null ? v.importance : v.cumProb || 0) / maxImp) * 100);
-      html += `<div style="padding:5px 0;border-top:1px solid var(--border);">
-        <div style="font-size:11px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escHtml(v.lineSan.join(' '))}">${escHtml(formatTodoLineSan(v.lineSan))}</div>
+      html += `<div style="padding:5px 0;border-top:1px solid var(--border);" onmouseover="todoLinePreview(event)" onmouseleave="hidePositionPreview()" data-leaf="${v.leafFen}" data-color="${s.color}">
+        <div style="font-size:11px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escHtml(v.lineSan.join(' '))}">${formatTodoLineSanHoverable(v.lineSan, v.lineUci)}</div>
         <div style="display:flex;align-items:center;gap:6px;margin-top:3px;">
           <div style="flex:1;height:4px;background:var(--bg-secondary);border-radius:2px;overflow:hidden;"><div style="height:100%;width:${barW}%;background:var(--blue);"></div></div>
           <span style="font-size:9px;color:var(--text-muted);min-width:34px;text-align:right;">${pct.toFixed(pct < 10 ? 1 : 0)}%</span>
@@ -23072,8 +23107,8 @@ function renderTodoStudyBlock(s) {
         html += `<div style="margin-top:4px;">`;
         list.gaps.forEach((g, gi) => {
           const gpct = (g.cumProb || 0) * 100;
-          html += `<div class="game-card" style="padding:5px 8px;margin:2px 0;font-size:11px;cursor:pointer;" onclick="exploreTodoGap('${s.id}',${gi})" title="${escHtml(g.lineSan.join(' '))}">
-            <span style="font-family:monospace;">${escHtml(formatTodoLineSan(g.lineSan))}</span>
+          html += `<div class="game-card" style="padding:5px 8px;margin:2px 0;font-size:11px;cursor:pointer;" onclick="exploreTodoGap('${s.id}',${gi})" onmouseover="todoLinePreview(event)" onmouseleave="hidePositionPreview()" data-leaf="${g.afterFen}" data-color="${s.color}" title="${escHtml(g.lineSan.join(' '))}">
+            <span style="font-family:monospace;">${formatTodoLineSanHoverable(g.lineSan, g.lineUci)}</span>
             <span style="float:right;color:var(--text-muted);font-size:9px;">${gpct.toFixed(gpct < 10 ? 1 : 0)}% · explore →</span>
           </div>`;
         });
