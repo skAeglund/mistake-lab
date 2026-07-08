@@ -1715,7 +1715,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire checklist: smooth per-move hover preview. Two fixes. (1) Gap-free line: each move span now includes its move-number prefix and trailing space, and spans are concatenated with no text between them, so sliding the cursor across the line plays the moves out continuously instead of dropping to the leaf fallback in the cracks between moves. (2) No lag: replaced the full 64-square/32-image rebuild-per-hover with a persistent grid that diff-updates only the squares that change between consecutive positions (typically 2-4 per move). The board is anchored on first show and stays put while sliding, so the moves play out in place rather than the board chasing the cursor. Deviation preview (showPositionPreview) is unchanged.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">TODO variation win-rate, closes #21. Each difficulty chip (Easy/Medium/Hard) on a repertoire checklist variation now shows its own win-rate as wins/attempts over the latest 5 attempts of that difficulty, with a hover tooltip giving the percentage. Data was already recorded per attempt (win/draw/loss) in practiceScoreboard[leafKey] tagged with meta.preset; this adds a todoPresetStats(leafKey) helper that buckets those entries by preset, takes the most-recent TODO_WINRATE_WINDOW (5) of each, and computes wins/n. Completion/unlock logic (todoCompletedPresets, ever-won-based) is unchanged; storage is not pruned, so the "ever completed" checkmark survives even when the recent window has no win.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -22897,6 +22897,29 @@ function todoCompletedPresets(leafKey) {
   return done;
 }
 
+// #21: per-difficulty win-rate for a variation, over the latest N attempts of each
+// difficulty. Entries live in practiceScoreboard[leafKey] tagged with meta.preset;
+// they're stored chronologically (push-order in-session, ts-sorted by mergeGistData),
+// so slice(-N) is the most-recent window. Returns { easy:{n,wins,rate}, medium:…, hard:… }.
+const TODO_WINRATE_WINDOW = 5;
+function todoPresetStats(leafKey) {
+  const stats = {};
+  for (const pk of REP_TODO_PRESET_ORDER) stats[pk] = { n: 0, wins: 0, rate: 0 };
+  const entries = gistData?.practiceScoreboard?.[leafKey];
+  if (!entries) return stats;
+  const byPreset = {};
+  for (const pk of REP_TODO_PRESET_ORDER) byPreset[pk] = [];
+  for (const e of entries) {
+    if (e.preset && byPreset[e.preset]) byPreset[e.preset].push(e);
+  }
+  for (const pk of REP_TODO_PRESET_ORDER) {
+    const recent = byPreset[pk].slice(-TODO_WINRATE_WINDOW);
+    const wins = recent.filter(e => e.result === 'win').length;
+    stats[pk] = { n: recent.length, wins, rate: recent.length ? wins / recent.length : 0 };
+  }
+  return stats;
+}
+
 // ─── Variation-checklist UI (Repertoire tab) ───
 
 function getTodoList(studyId) {
@@ -23148,6 +23171,7 @@ function renderTodoStudyBlock(s) {
     const maxImp = Math.max(...list.variations.map(v => v.importance || v.cumProb || 0), 0.0001);
     list.variations.forEach((v, vi) => {
       const done = todoCompletedPresets(v.leafKey);
+      const wr = todoPresetStats(v.leafKey);
       const chips = REP_TODO_PRESET_ORDER.map((pk, i) => {
         const p = REP_TODO_PRESETS[pk];
         const isDone = done.has(pk);
@@ -23156,7 +23180,11 @@ function renderTodoStudyBlock(s) {
         const bg = isDone ? '#4caf50' : (unlocked ? 'var(--bg-secondary)' : 'transparent');
         const colr = isDone ? '#fff' : (unlocked ? 'var(--text-primary)' : 'var(--text-muted)');
         const onclick = clickable ? `onclick="startTodoFromList('${s.id}',${vi},'${pk}')"` : '';
-        return `<span ${onclick} style="font-size:10px;padding:2px 7px;border-radius:10px;background:${bg};color:${colr};opacity:${clickable ? 1 : 0.4};cursor:${clickable ? 'pointer' : 'default'};border:1px solid var(--border);">${isDone ? '✓ ' : ''}${p.label}</span>`;
+        // #21: win-rate over last TODO_WINRATE_WINDOW attempts, shown as wins/n.
+        const st = wr[pk];
+        const stat = st.n ? ` <span style="opacity:0.7;font-variant-numeric:tabular-nums;">${st.wins}/${st.n}</span>` : '';
+        const wrTitle = st.n ? ` title="${p.label} win-rate: ${st.wins}/${st.n} (${Math.round(st.rate * 100)}%) — last ${st.n} attempt${st.n !== 1 ? 's' : ''}"` : '';
+        return `<span ${onclick}${wrTitle} style="font-size:10px;padding:2px 7px;border-radius:10px;background:${bg};color:${colr};opacity:${clickable ? 1 : 0.4};cursor:${clickable ? 'pointer' : 'default'};border:1px solid var(--border);">${isDone ? '✓ ' : ''}${p.label}${stat}</span>`;
       }).join(' ');
       const pct = (v.cumProb || 0) * 100;
       const barW = Math.max(3, ((v.importance != null ? v.importance : v.cumProb || 0) / maxImp) * 100);
