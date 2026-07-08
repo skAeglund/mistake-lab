@@ -1715,7 +1715,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">TODO variation win-rate, closes #21. Each difficulty chip (Easy/Medium/Hard) on a repertoire checklist variation now shows its own win-rate as wins/attempts over the latest 5 attempts of that difficulty, with a hover tooltip giving the percentage. Data was already recorded per attempt (win/draw/loss) in practiceScoreboard[leafKey] tagged with meta.preset; this adds a todoPresetStats(leafKey) helper that buckets those entries by preset, takes the most-recent TODO_WINRATE_WINDOW (5) of each, and computes wins/n. Completion/unlock logic (todoCompletedPresets, ever-won-based) is unchanged; storage is not pruned, so the "ever completed" checkmark survives even when the recent window has no win.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">TODO variation win-rate colors. Each difficulty chip on a repertoire checklist variation is now background-colored by its win-rate over the latest 5 attempts, via winRateColor(rate): a piecewise-linear HSL hue lerp from red at 0% through orange at 50% and yellow-green at 75% to green at 100% (fixed S/L so the white wins/n text stays legible). Never-attempted chips keep the neutral locked/unlocked look. Builds on #21 (todoPresetStats); completion checkmark and unlock logic unchanged.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -22920,6 +22920,25 @@ function todoPresetStats(leafKey) {
   return stats;
 }
 
+// #21: map a win-rate (0..1) to a background color. Piecewise-linear hue lerp:
+//   0% → red (hue 0), 50% → orange (~30), 75% → yellow-green (~78), 100% → green (~122).
+// Fixed S/L so white chip text stays legible across the whole arc.
+function winRateColor(rate) {
+  const stops = [[0, 0], [0.5, 30], [0.75, 78], [1, 122]];
+  const r = Math.max(0, Math.min(1, rate));
+  let hue = stops[stops.length - 1][1];
+  for (let i = 0; i < stops.length - 1; i++) {
+    const [r0, h0] = stops[i];
+    const [r1, h1] = stops[i + 1];
+    if (r <= r1) {
+      const t = r1 === r0 ? 0 : (r - r0) / (r1 - r0);
+      hue = h0 + (h1 - h0) * t;
+      break;
+    }
+  }
+  return `hsl(${Math.round(hue)}, 55%, 45%)`;
+}
+
 // ─── Variation-checklist UI (Repertoire tab) ───
 
 function getTodoList(studyId) {
@@ -23177,13 +23196,16 @@ function renderTodoStudyBlock(s) {
         const isDone = done.has(pk);
         const unlocked = i === 0 || done.has(REP_TODO_PRESET_ORDER[i - 1]);
         const clickable = isDone || unlocked;
-        const bg = isDone ? '#4caf50' : (unlocked ? 'var(--bg-secondary)' : 'transparent');
-        const colr = isDone ? '#fff' : (unlocked ? 'var(--text-primary)' : 'var(--text-muted)');
-        const onclick = clickable ? `onclick="startTodoFromList('${s.id}',${vi},'${pk}')"` : '';
         // #21: win-rate over last TODO_WINRATE_WINDOW attempts, shown as wins/n.
         const st = wr[pk];
-        const stat = st.n ? ` <span style="opacity:0.7;font-variant-numeric:tabular-nums;">${st.wins}/${st.n}</span>` : '';
-        const wrTitle = st.n ? ` title="${p.label} win-rate: ${st.wins}/${st.n} (${Math.round(st.rate * 100)}%) — last ${st.n} attempt${st.n !== 1 ? 's' : ''}"` : '';
+        const hasStats = st.n > 0;
+        // Chips with recorded attempts are colored by win-rate (red→orange→green);
+        // never-attempted chips keep the neutral locked/unlocked look.
+        const bg = hasStats ? winRateColor(st.rate) : (unlocked ? 'var(--bg-secondary)' : 'transparent');
+        const colr = hasStats ? '#fff' : (unlocked ? 'var(--text-primary)' : 'var(--text-muted)');
+        const onclick = clickable ? `onclick="startTodoFromList('${s.id}',${vi},'${pk}')"` : '';
+        const stat = hasStats ? ` <span style="opacity:0.75;font-variant-numeric:tabular-nums;">${st.wins}/${st.n}</span>` : '';
+        const wrTitle = hasStats ? ` title="${p.label} win-rate: ${st.wins}/${st.n} (${Math.round(st.rate * 100)}%) — last ${st.n} attempt${st.n !== 1 ? 's' : ''}"` : '';
         return `<span ${onclick}${wrTitle} style="font-size:10px;padding:2px 7px;border-radius:10px;background:${bg};color:${colr};opacity:${clickable ? 1 : 0.4};cursor:${clickable ? 'pointer' : 'default'};border:1px solid var(--border);">${isDone ? '✓ ' : ''}${p.label}${stat}</span>`;
       }).join(' ');
       const pct = (v.cumProb || 0) * 100;
