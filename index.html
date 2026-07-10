@@ -1715,7 +1715,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Game Review: repertoire deviations as key moves. buildContLineReviewData now stamps mv._repDeviation (recomputed every build from the live trie — works for restored historical reviews too; never persisted in snapshots) on any user move at a trie-covered position that matches no trie entry, and includes those indices in keyMoves regardless of eval — off-book prep is worth re-drilling even when Stockfish approves. Trie keys only exist at the study color's turn so side-to-move self-aligns color; dismissed positions are respected. Visibly distinct from mistakes: pure deviations get a purple 📖 card (no eval-loss line, no refutation button), deviations that are ALSO mistakes keep mistake framing plus a purple note; purple sparkline dots; summary card shows a 📖 deviation count. Retry drills the REPERTOIRE move: a trie-match fast path in evaluateMove precedes the engine-best fast path (📖 Repertoire move! with book badge, no analysis), non-matching moves get normal engine grading plus a "Not your repertoire move" note with a Show-repertoire-move purple arrow (bestMoveArrow gains a per-arrow color override). Retry prompt reads "Play your repertoire move" instead of "find a stronger move"; the hint during a deviation retry points at the trie move (dedicated branch ahead of the Finding #15 gate), hintUsed unset per SRS-6 (retries are ungraded).</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Game Review: corrected repertoire deviations count as key moves. The mid-practice deviation check undoes the tried move, so it never enters contLine and the corrected (spoiled) study move classified as book — the position silently escaped review. Now the undo site records pendingRepDevTried (FIRST attempt at a position wins; the instinctive choice is the review target), addContLineMove consumes it on the next user move — stamping move.repTried when the corrected move differs from the tried one; a same-move replay means Ignore-Repertoire was clicked and the standard in-line detection already flags it, and a posKey mismatch means the marker went stale (cleared either way, plus in cleanupPracticeCont so it can't leak across practice sessions at the same position). buildContLineReviewData flags trie-matching moves carrying repTried as corrected deviations (skipped if the tried move now matches the trie — any move ever in repertoire stays non-flagged). Card reads "Repertoire deviation (corrected)" with "You first tried X before correcting"; no Show-repertoire-move button (the answer is the move on the board); retry prompt references the tried move instead of spoiling with the played one. repTried is real game history (not derivable from the trie) so it joins the snapshot whitelist and survives into historical reviews; retry grading/hints unchanged (trie-match drill).</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2392,6 +2392,12 @@ let explorerMinFreq = 0.05;
 let explorerNotifyMaia = true;
 let practiceContItem = null; // synthetic item for filter continuation practice
 let practiceRepIgnored = false; // true after user clicks "Ignore Repertoire"
+let pendingRepDevTried = null;  // { posKey, san, uci } — the move the user first
+                                // tried before the mid-practice deviation check
+                                // undid it. Consumed by addContLineMove when the
+                                // corrected move lands (stamped as move.repTried
+                                // so the Game Review can surface the position as
+                                // a corrected-deviation key move).
 
 // ─── Voice mode state ───
 let voiceMode = false;          // master toggle — active during continuation/advantage
@@ -3924,6 +3930,11 @@ function buildReviewSnapshot(id, source, outcome) {
     san: mv.san, uci: mv.uci, isUser: !!mv.isUser,
     classification: mv.classification, wpDrop: mv.wpDrop, cpLoss: mv.cpLoss,
     bestCp: mv.bestCp, afterCp: mv.afterCp, bestMoveUci: mv.bestMoveUci,
+    // Corrected-deviation marker (what the user tried before the mid-practice
+    // undo). Unlike _repDeviation this is real game history — not derivable
+    // from the trie — so it must survive into snapshots. undefined vanishes
+    // in JSON.stringify for moves without it.
+    repTried: mv.repTried,
   }));
   let openingName = '';
   try { openingName = lookupOpeningName(contLine.baseFen) || ''; } catch (_) {}
@@ -14790,6 +14801,14 @@ async function evaluateMove(from, to, move) {
       const playedUci = from + to + (move.promotion || '');
       if (repertoireTrie.has(posKey) && !trieMatchesMove(posKey, move.san, playedUci)) {
         // Deviation from repertoire — undo and let user think / use hint
+        // Remember what they tried (FIRST attempt at this position wins —
+        // that's the instinctive choice worth reviewing). Consumed by
+        // addContLineMove when the corrected move is played, so the Game
+        // Review can flag this position as a corrected deviation even though
+        // the tried move never enters contLine.
+        if (!pendingRepDevTried || pendingRepDevTried.posKey !== posKey) {
+          pendingRepDevTried = { posKey, san: move.san, uci: playedUci };
+        }
         gameEngine.undo();
         boardObj.position(gameEngine.fen(), false);
         showCheckHighlight(gameEngine);
@@ -16899,6 +16918,22 @@ function addContLineMove(san, uci, fen, isUser, evalData) {
   if (!contLine) return;
   const move = { san, uci, fen, isUser };
   if (evalData) Object.assign(move, evalData);
+  // Corrected repertoire deviation: the mid-practice check undid a move the
+  // user tried at this position, so it never entered contLine. Stamp the
+  // corrected move with what was tried so the Game Review can surface it as
+  // a key move. Consumed on the first user move regardless of position —
+  // a posKey mismatch means the game diverged past it (stale marker), and a
+  // same-move replay means the user clicked Ignore Repertoire (the move is
+  // then a real in-line deviation the standard detection already flags).
+  if (isUser && pendingRepDevTried) {
+    const preFen = contLine.moves.length > 0
+      ? contLine.moves[contLine.moves.length - 1].fen : contLine.baseFen;
+    if (fenPositionKey(preFen) === pendingRepDevTried.posKey &&
+        uci !== pendingRepDevTried.uci) {
+      move.repTried = { san: pendingRepDevTried.san, uci: pendingRepDevTried.uci };
+    }
+    pendingRepDevTried = null;
+  }
   contLine.moves.push(move);
   contLine.currentIdx = contLine.moves.length - 1;
   contLineBrowsing = false;
@@ -17629,6 +17664,8 @@ function cleanupPracticeCont() {
   if (idx >= 0) filteredMistakes.splice(idx, 1);
   practiceContItem = null;
   practiceRepIgnored = false;
+  pendingRepDevTried = null; // stale tried-deviation marker must not leak into
+                             // the next practice session at the same position
   explorerApiNotified = false;
   currentMistakeIdx = -1;
   // Finding 12: re-hide btnNote here (symmetric to the unhide in
@@ -18215,14 +18252,31 @@ function buildContLineReviewData() {
     if (repertoireTrie && repertoireTrie.size && mv.uci && preFen) {
       const posKey = fenPositionKey(preFen);
       const entries = repertoireTrie.get(posKey);
-      if (entries && entries.length &&
-          !dismissedPositions.includes(posKey) &&
-          !entries.some(e => e.uci === mv.uci || e.san === mv.san)) {
-        mv._repDeviation = {
-          san: entries[0].san,
-          uci: entries[0].uci,
-          sans: entries.map(e => e.san),
-        };
+      if (entries && entries.length && !dismissedPositions.includes(posKey)) {
+        const playedMatches = entries.some(e => e.uci === mv.uci || e.san === mv.san);
+        if (!playedMatches) {
+          // In-line deviation: the move on the board is off-book.
+          mv._repDeviation = {
+            san: entries[0].san,
+            uci: entries[0].uci,
+            sans: entries.map(e => e.san),
+          };
+        } else if (mv.repTried &&
+                   !entries.some(e => e.uci === mv.repTried.uci || e.san === mv.repTried.san)) {
+          // Corrected deviation: the played move IS the repertoire move, but
+          // only after the mid-practice check undid what the user first tried
+          // (move.repTried, stamped in addContLineMove). The position needed a
+          // crutch during the game — exactly a recall target. Skipped when the
+          // tried move now matches the trie (repertoire changed to include it:
+          // any move ever in repertoire stays non-flagged).
+          mv._repDeviation = {
+            san: entries[0].san,
+            uci: entries[0].uci,
+            sans: entries.map(e => e.san),
+            corrected: true,
+            tried: mv.repTried,
+          };
+        }
       }
     }
     const isMistakeKey = mv.classification && mv.wpDrop > 5 &&
@@ -18670,7 +18724,7 @@ function showReviewKeyMoveInfo(moveIdx) {
   // mistake framing and gain a purple deviation note. The expected move is
   // never printed — Retry / Show repertoire move keep it a recall drill.
   const title = isDeviation && !isAlsoMistake
-    ? `📖 Repertoire deviation · <code>${escHtml(mv.san)}</code>`
+    ? `📖 Repertoire deviation${mv._repDeviation.corrected ? ' (corrected)' : ''} · <code>${escHtml(mv.san)}</code>`
     : `${sym} ${cls.label || 'Move'} · <code>${escHtml(mv.san)}</code>`;
   const titleColor = isDeviation && !isAlsoMistake ? REP_PURPLE : (cls.color || 'var(--text-primary)');
   const borderColor = isDeviation && !isAlsoMistake ? REP_PURPLE : (cls.color || 'var(--border)');
@@ -18678,9 +18732,13 @@ function showReviewKeyMoveInfo(moveIdx) {
   const evalLine = (!isDeviation || isAlsoMistake) && mv.wpDrop != null
     ? `<div>Lost ${mv.wpDrop}% winning chances (−${mv.cpLoss || 0}cp)</div>` : '';
   const devLine = isDeviation
-    ? `<div style="color:${REP_PURPLE};${isAlsoMistake ? 'margin-top:4px;' : ''}font-size:12px;">📖 Your repertoire plays a different move here${mv._repDeviation.sans.length > 1 ? ` (${mv._repDeviation.sans.length} options)` : ''}.</div>`
+    ? (mv._repDeviation.corrected
+      ? `<div style="color:${REP_PURPLE};${isAlsoMistake ? 'margin-top:4px;' : ''}font-size:12px;">📖 You first tried <code>${escHtml(mv._repDeviation.tried.san)}</code> here before correcting to the repertoire move.</div>`
+      : `<div style="color:${REP_PURPLE};${isAlsoMistake ? 'margin-top:4px;' : ''}font-size:12px;">📖 Your repertoire plays a different move here${mv._repDeviation.sans.length > 1 ? ` (${mv._repDeviation.sans.length} options)` : ''}.</div>`)
     : '';
-  const repMoveBtn = isDeviation
+  // "Show repertoire move" is spoiler-relief for in-line deviations; a
+  // corrected deviation's answer is the move already on the board.
+  const repMoveBtn = isDeviation && !mv._repDeviation.corrected
     ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;color:${REP_PURPLE};border-color:${REP_PURPLE};" onclick="showReviewRepMoveArrow(${moveIdx})">📖 Show repertoire move</button>`
     : '';
   // Refutation only makes sense when the move actually lost eval
@@ -19330,12 +19388,17 @@ function startReviewRetry(moveIdx) {
   hintBtn.style.color = '';
 
   const retryDev = contLine.moves[moveIdx]._repDeviation;
+  const retryDevLine = retryDev
+    ? (retryDev.corrected && retryDev.tried
+      ? `You first tried <code>${escHtml(retryDev.tried.san)}</code> — play your repertoire move.`
+      : `You played <code>${escHtml(contLine.moves[moveIdx].san)}</code> — what does your repertoire play here?`)
+    : '';
   const container = document.getElementById('feedbackContainer');
   container.innerHTML = retryDev ? `
     <div class="feedback-box" style="background:rgba(139,125,216,0.10);border-left:3px solid #8b7dd8;">
       <div class="feedback-title" style="color:#8b7dd8">📖 Play your repertoire move</div>
       <div class="feedback-text">
-        <div style="font-size:12px;">You played <code>${escHtml(contLine.moves[moveIdx].san)}</code> — what does your repertoire play here?</div>
+        <div style="font-size:12px;">${retryDevLine}</div>
         <div style="margin-top:8px;">
           <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="cancelReviewRetry(${moveIdx})">Skip</button>
         </div>
