@@ -1715,7 +1715,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Review history part 2/2: restore + Review-tab UI. New "📋 Game Reviews" section renders under the SRS queue in renderReviewList — in BOTH branches, since an empty queue is exactly when browsing history is most useful (the early return previously would have hidden it). Rows show source icon, outcome (colored), accuracy, date, opening, key-move and move counts; 15 visible with Show-all toggle (window._reviewHistShowAll). openHistoricalReview(id) rebuilds per-move FENs by replaying stored UCIs from baseFen (truncating at the first illegal move rather than failing), tears down any live context (analysis / detected-tactic / TODO drill / continuation flags / voice / preAnalysis / practice item), injects a synthetic type:'practice' item with gameId '_practice_hist' (excluded from SRS queue by type; the _practice prefix keeps startContLineReview's realGame check from unhiding btnViewGame) assigned to practiceContItem so the existing loadPosition/tab-switch lifecycle splices it, sets board orientation before check-highlight (DOM rebuild), then enters the unmodified contLineReviewMode machinery — review already runs with continuationMode=false, so every Escape branch, arrow-key route, read-only move guard, retry drill, Show line/refutation (fresh sfAnalyze, usually eval-cache hits) and Save-mistake path works unchanged. contLine._historical gates startTacticScan (snapshots carry no _tacticCandidates; a "played clean" banner would mislead) including on "Start over" re-entry. Drawer closes on item tap; mobile switches to training layout.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Game Review: repertoire deviations as key moves. buildContLineReviewData now stamps mv._repDeviation (recomputed every build from the live trie — works for restored historical reviews too; never persisted in snapshots) on any user move at a trie-covered position that matches no trie entry, and includes those indices in keyMoves regardless of eval — off-book prep is worth re-drilling even when Stockfish approves. Trie keys only exist at the study color's turn so side-to-move self-aligns color; dismissed positions are respected. Visibly distinct from mistakes: pure deviations get a purple 📖 card (no eval-loss line, no refutation button), deviations that are ALSO mistakes keep mistake framing plus a purple note; purple sparkline dots; summary card shows a 📖 deviation count. Retry drills the REPERTOIRE move: a trie-match fast path in evaluateMove precedes the engine-best fast path (📖 Repertoire move! with book badge, no analysis), non-matching moves get normal engine grading plus a "Not your repertoire move" note with a Show-repertoire-move purple arrow (bestMoveArrow gains a per-arrow color override). Retry prompt reads "Play your repertoire move" instead of "find a stronger move"; the hint during a deviation retry points at the trie move (dedicated branch ahead of the Finding #15 gate), hintUsed unset per SRS-6 (retries are ungraded).</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -7753,12 +7753,43 @@ async function showHint() {
     }
   }
 
+  // ── Repertoire-deviation retry hint: use the trie move ──
+  // The Finding #15 gate below keeps the trie OUT of standard Game Review
+  // retries (those drill the engine's best move). A deviation key move is the
+  // opposite case: the drill target IS the repertoire move, so the hint must
+  // point at it — Stockfish's choice may be a different (even "better") move
+  // that would still fail the trie-match grading. hintUsed stays unset for
+  // the same reason as SRS-6 below: review retries are ungraded.
+  if (contLineReviewRetryIdx >= 0 && contLine) {
+    const devMv = contLine.moves[contLineReviewRetryIdx];
+    const dev = devMv && devMv._repDeviation;
+    if (dev && dev.uci && dev.uci.length >= 4) {
+      const fromSq = dev.uci.substring(0, 2);
+      const toSq = dev.uci.substring(2, 4);
+      if (hintLevel === 0) {
+        clearHintHighlights();
+        const fromEl = document.querySelector(`.square-${fromSq}`);
+        if (fromEl) fromEl.classList.add('square-hint');
+        hintLevel = 1;
+        if (btn) { btn.disabled = false; btn.textContent = '💡 Hint (2/2)'; btn.style.borderColor = 'var(--blue)'; btn.style.color = 'var(--blue)'; }
+      } else if (hintLevel === 1) {
+        hintArrow = { from: fromSq, to: toSq };
+        renderArrows();
+        hintLevel = 2;
+        if (btn) { btn.disabled = true; btn.textContent = '💡 Hint'; }
+      }
+      return;
+    }
+  }
+
   // ── Filter practice repertoire hint: use trie move ──
   // Finding #15: skip this branch during a Game Review retry. The retry
   // drills the user on playing the engine's best move for a position where
   // they previously made a mistake; the repertoire trie's move may be a
   // different (deliberate-prep) choice that doesn't match what the eval
   // says was best. Fall through to the Stockfish-based hint below.
+  // (Deviation key moves are the exception — handled by the dedicated
+  // branch above, which fires BEFORE this gate.)
   if (practiceContItem && !practiceRepIgnored && repertoireTrie && currentSolveFen &&
       contLineReviewRetryIdx < 0) {
     const posKey = fenPositionKey(currentSolveFen);
@@ -14880,6 +14911,18 @@ async function evaluateMove(from, to, move) {
     if (contLineReviewRetryIdx >= 0 && contLine) {
       const originalMv = contLine.moves[contLineReviewRetryIdx];
       const userUci = from + to + (move.promotion || '');
+      // Repertoire-deviation retry: the drill target is the REPERTOIRE move,
+      // checked against the trie (all entries, uci or san) — no engine needed.
+      // Takes precedence over the engine-best fast path: even when the rep
+      // move happens to also be engine-best, the 📖 feedback is the right one.
+      if (originalMv?._repDeviation && currentSolveFen &&
+          trieMatchesMove(fenPositionKey(currentSolveFen), move.san, userUci)) {
+        sfLog('evaluateMove', `REVIEW RETRY REP MATCH: ${userUci} matches repertoire — skipping analysis`);
+        const loadEl = document.getElementById(loadingId);
+        if (loadEl) loadEl.remove();
+        handleReviewRetryResult(0, move, null, true, true);
+        return;
+      }
       if (originalMv?.bestMoveUci && userUci === originalMv.bestMoveUci) {
         sfLog('evaluateMove', `REVIEW RETRY FAST: user played stored best move ${userUci} — skipping analysis`);
         const loadEl = document.getElementById(loadingId);
@@ -18151,15 +18194,40 @@ function buildContLineReviewData() {
   const goodOrBetter = (tally.great || 0) + (tally.best || 0) + (tally.excellent || 0) + (tally.good || 0) + (tally.book || 0);
   const accuracy = userMoves.length > 0 ? Math.round((goodOrBetter / userMoves.length) * 100) : 100;
   // Key moves = user mistakes/blunders (wpDrop > 5), excluding repertoire moves
-  // (user deliberately played those per their study — not surprises to revisit).
+  // (user deliberately played those per their study — not surprises to revisit),
+  // PLUS repertoire deviations: user moves at a trie-covered position that don't
+  // match any trie entry — even when the engine likes them (off-book prep is
+  // worth re-drilling regardless of eval). Deviations are stamped on the move
+  // (mv._repDeviation, recomputed every build since the trie can change between
+  // sessions — including for restored historical reviews) and rendered
+  // distinctly (purple/book styling) in the walkthrough. Trie keys only exist
+  // at the study color's turn, so side-to-move self-aligns color: a black-to-
+  // move key can only come from a black study. Dismissed positions are
+  // respected, matching the Repertoire tab's deviation list.
   // Classification tally / accuracy / eval graph still reflect the raw evaluation.
   const keyMoves = [];
+  const dismissedPositions = gistData?.repertoire?.dismissed || [];
   for (let i = 0; i < moves.length; i++) {
-    if (moves[i].isUser && moves[i].classification && moves[i].wpDrop > 5) {
-      const preFen = i === 0 ? contLine.baseFen : moves[i - 1].fen;
-      if (isRepertoireMove(preFen, moves[i].san, moves[i].uci)) continue;
-      keyMoves.push(i);
+    const mv = moves[i];
+    mv._repDeviation = null; // recomputed every build
+    if (!mv.isUser) continue;
+    const preFen = i === 0 ? contLine.baseFen : moves[i - 1].fen;
+    if (repertoireTrie && repertoireTrie.size && mv.uci && preFen) {
+      const posKey = fenPositionKey(preFen);
+      const entries = repertoireTrie.get(posKey);
+      if (entries && entries.length &&
+          !dismissedPositions.includes(posKey) &&
+          !entries.some(e => e.uci === mv.uci || e.san === mv.san)) {
+        mv._repDeviation = {
+          san: entries[0].san,
+          uci: entries[0].uci,
+          sans: entries.map(e => e.san),
+        };
+      }
     }
+    const isMistakeKey = mv.classification && mv.wpDrop > 5 &&
+      !isRepertoireMove(preFen, mv.san, mv.uci);
+    if (isMistakeKey || mv._repDeviation) keyMoves.push(i);
   }
 
   // Build eval graph data points (one per move)
@@ -18170,9 +18238,9 @@ function buildContLineReviewData() {
   for (let i = 0; i < moves.length; i++) {
     const mv = moves[i];
     if (mv.isUser && mv.afterCp != null) {
-      evalPoints.push({ cp: mv.afterCp, idx: i, classification: mv.classification });
+      evalPoints.push({ cp: mv.afterCp, idx: i, classification: mv.classification, repDev: !!mv._repDeviation });
     } else if (mv.isUser && mv.bestCp != null && mv.cpLoss != null) {
-      evalPoints.push({ cp: mv.bestCp - mv.cpLoss, idx: i, classification: mv.classification });
+      evalPoints.push({ cp: mv.bestCp - mv.cpLoss, idx: i, classification: mv.classification, repDev: !!mv._repDeviation });
     } else if (!mv.isUser && i > 0) {
       // Opponent move: use next user move's bestCp if available, else interpolate
       const nextUser = moves.slice(i + 1).find(m => m.isUser && m.bestCp != null);
@@ -18271,7 +18339,10 @@ function buildEvalSparkline(evalPoints) {
   let dots = '';
   for (let i = 0; i < evalPoints.length; i++) {
     const p = evalPoints[i];
-    if (p.classification && (p.classification === 'mistake' || p.classification === 'blunder' || p.classification === 'inaccuracy')) {
+    if (p.repDev) {
+      // Repertoire deviation — purple (book color), regardless of eval quality
+      dots += `<circle cx="${toX(i).toFixed(1)}" cy="${toY(p.cp).toFixed(1)}" r="3.5" fill="#8b7dd8" stroke="var(--bg-card)" stroke-width="1" />`;
+    } else if (p.classification && (p.classification === 'mistake' || p.classification === 'blunder' || p.classification === 'inaccuracy')) {
       const cls = MOVE_CLASSIFICATION[p.classification];
       dots += `<circle cx="${toX(i).toFixed(1)}" cy="${toY(p.cp).toFixed(1)}" r="3.5" fill="${cls.color}" stroke="var(--bg-card)" stroke-width="1" />`;
     }
@@ -18471,6 +18542,9 @@ function renderContLineReviewSummary(data) {
   }
 
   const keyMoveCount = data.keyMoves.length;
+  const repDevCount = contLine
+    ? data.keyMoves.filter(i => contLine.moves[i] && contLine.moves[i]._repDeviation).length
+    : 0;
   // Issue #10: "Analyze on Lichess" available in the Game Review card so
   // users can open the same line they're reviewing in Lichess analysis.
   // Hardcoded button here (not continuationEndActionsHtml) because the
@@ -18489,7 +18563,7 @@ function renderContLineReviewSummary(data) {
         <div style="font-size:12px;line-height:1.8;">${tallyHtml}</div>
         <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
           ${keyMoveCount > 0
-            ? `<button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="reviewNextKeyMove()">▶ Review ${keyMoveCount} key move${keyMoveCount > 1 ? 's' : ''}</button>`
+            ? `<button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="reviewNextKeyMove()">▶ Review ${keyMoveCount} key move${keyMoveCount > 1 ? 's' : ''}</button>${repDevCount > 0 ? `<span style="font-size:11px;color:#8b7dd8;">📖 ${repDevCount} repertoire deviation${repDevCount > 1 ? 's' : ''}</span>` : ''}`
             : `<span style="font-size:12px;color:var(--text-muted);">No mistakes to review — clean play!</span>`
           }
           ${lichessBtn}
@@ -18566,6 +18640,9 @@ function showReviewKeyMoveInfo(moveIdx) {
   if (!mv) return;
   const cls = MOVE_CLASSIFICATION[mv.classification] || {};
   const sym = mv.classification === 'good' ? '✓' : (mv.classification === 'best' ? '' : cls.symbol || '');
+  const REP_PURPLE = '#8b7dd8';
+  const isDeviation = !!mv._repDeviation;
+  const isAlsoMistake = mv.wpDrop != null && mv.wpDrop > 5;
 
   // Check if this mistake was already saved
   const saveFenBefore = moveIdx > 0 ? contLine.moves[moveIdx - 1].fen : contLine.baseFen;
@@ -18587,18 +18664,44 @@ function showReviewKeyMoveInfo(moveIdx) {
     </div>
   `;
 
+  // Repertoire deviation styling: purple/book identity, visibly distinct from
+  // mistakes. Pure deviations (engine-fine but off-book) get the full purple
+  // card with no eval loss line; deviations that are ALSO mistakes keep the
+  // mistake framing and gain a purple deviation note. The expected move is
+  // never printed — Retry / Show repertoire move keep it a recall drill.
+  const title = isDeviation && !isAlsoMistake
+    ? `📖 Repertoire deviation · <code>${escHtml(mv.san)}</code>`
+    : `${sym} ${cls.label || 'Move'} · <code>${escHtml(mv.san)}</code>`;
+  const titleColor = isDeviation && !isAlsoMistake ? REP_PURPLE : (cls.color || 'var(--text-primary)');
+  const borderColor = isDeviation && !isAlsoMistake ? REP_PURPLE : (cls.color || 'var(--border)');
+  const bgColor = isDeviation && !isAlsoMistake ? 'rgba(139,125,216,0.10)' : wpDropToColorDim(mv.wpDrop || 0);
+  const evalLine = (!isDeviation || isAlsoMistake) && mv.wpDrop != null
+    ? `<div>Lost ${mv.wpDrop}% winning chances (−${mv.cpLoss || 0}cp)</div>` : '';
+  const devLine = isDeviation
+    ? `<div style="color:${REP_PURPLE};${isAlsoMistake ? 'margin-top:4px;' : ''}font-size:12px;">📖 Your repertoire plays a different move here${mv._repDeviation.sans.length > 1 ? ` (${mv._repDeviation.sans.length} options)` : ''}.</div>`
+    : '';
+  const repMoveBtn = isDeviation
+    ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;color:${REP_PURPLE};border-color:${REP_PURPLE};" onclick="showReviewRepMoveArrow(${moveIdx})">📖 Show repertoire move</button>`
+    : '';
+  // Refutation only makes sense when the move actually lost eval
+  const refutationBtn = (!isDeviation || isAlsoMistake)
+    ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewRefutation(${moveIdx})">Show refutation</button>`
+    : '';
+
   container.innerHTML = `
-    <div class="feedback-box" style="background:${wpDropToColorDim(mv.wpDrop || 0)};border-left:3px solid ${cls.color || 'var(--border)'};">
-      <div class="feedback-title" style="color:${cls.color || 'var(--text-primary)'}">
-        ${sym} ${cls.label || 'Move'} · <code>${escHtml(mv.san)}</code>
+    <div class="feedback-box" style="background:${bgColor};border-left:3px solid ${borderColor};">
+      <div class="feedback-title" style="color:${titleColor}">
+        ${title}
       </div>
       <div class="feedback-text">
-        <div>${mv.wpDrop != null ? `Lost ${mv.wpDrop}% winning chances (−${mv.cpLoss || 0}cp)` : ''}</div>
+        ${evalLine}
+        ${devLine}
         <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;">
           <button class="btn btn-primary btn-sm" style="font-size:11px;" onclick="startReviewRetry(${moveIdx})">↺ Retry</button>
+          ${repMoveBtn}
           ${mv.bestMoveUci ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewBestArrow(${moveIdx})">Show best</button>` : ''}
           ${mv.bestMoveUci ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewBestLine(${moveIdx})">Show line</button>` : ''}
-          <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewRefutation(${moveIdx})">Show refutation</button>
+          ${refutationBtn}
           ${saveBtn}
         </div>
         ${navHtml}
@@ -18609,6 +18712,17 @@ function showReviewKeyMoveInfo(moveIdx) {
   // Clear any stale arrows
   bestMoveArrow = null;
   analysisArrow = null;
+  renderArrows();
+}
+
+// Draws the repertoire's expected move as a purple arrow (deviation key moves).
+// Reuses the bestMoveArrow slot with a color override so the standard
+// clear/z-order lifecycle applies unchanged.
+function showReviewRepMoveArrow(moveIdx) {
+  if (!contLine || !contLine.moves[moveIdx]) return;
+  const dev = contLine.moves[moveIdx]._repDeviation;
+  if (!dev || !dev.uci || dev.uci.length < 4) return;
+  bestMoveArrow = { from: dev.uci.substring(0, 2), to: dev.uci.substring(2, 4), color: 'rgba(139, 125, 216, 0.8)' };
   renderArrows();
 }
 
@@ -19215,8 +19329,19 @@ function startReviewRetry(moveIdx) {
   hintBtn.style.borderColor = '';
   hintBtn.style.color = '';
 
+  const retryDev = contLine.moves[moveIdx]._repDeviation;
   const container = document.getElementById('feedbackContainer');
-  container.innerHTML = `
+  container.innerHTML = retryDev ? `
+    <div class="feedback-box" style="background:rgba(139,125,216,0.10);border-left:3px solid #8b7dd8;">
+      <div class="feedback-title" style="color:#8b7dd8">📖 Play your repertoire move</div>
+      <div class="feedback-text">
+        <div style="font-size:12px;">You played <code>${escHtml(contLine.moves[moveIdx].san)}</code> — what does your repertoire play here?</div>
+        <div style="margin-top:8px;">
+          <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="cancelReviewRetry(${moveIdx})">Skip</button>
+        </div>
+      </div>
+    </div>
+  ` : `
     <div class="feedback-box" style="background:var(--bg-card);border-left:3px solid var(--accent);">
       <div class="feedback-title" style="color:var(--accent)">Find the better move</div>
       <div class="feedback-text">
@@ -19239,7 +19364,7 @@ function cancelReviewRetry(moveIdx) {
   showReviewKeyMoveInfo(moveIdx);
 }
 
-function handleReviewRetryResult(wpDrop, move, bestMoveSan, isExactBest) {
+function handleReviewRetryResult(wpDrop, move, bestMoveSan, isExactBest, repMatch = false) {
   const moveIdx = contLineReviewRetryIdx;
   // Capture board state BEFORE clearing the retry flag — this FEN is the position
   // after the user's retry move, needed so Show Refutation analyses the retry move
@@ -19255,13 +19380,15 @@ function handleReviewRetryResult(wpDrop, move, bestMoveSan, isExactBest) {
 
   if (!contLine || !contLine.moves[moveIdx]) return;
   const originalMv = contLine.moves[moveIdx];
+  const REP_PURPLE = '#8b7dd8';
+  const isDeviationRetry = !!originalMv._repDeviation;
 
-  const classification = classifyWpDrop(wpDrop, isExactBest);
+  const classification = repMatch ? 'book' : classifyWpDrop(wpDrop, isExactBest);
   const cls = MOVE_CLASSIFICATION[classification] || {};
   const improved = wpDrop < (originalMv.wpDrop || 100);
 
   // Keep the move on the board — show highlight and badge on destination
-  highlightSquaresWithColor(move.from, move.to, wpDropToColor(wpDrop));
+  highlightSquaresWithColor(move.from, move.to, repMatch ? REP_PURPLE : wpDropToColor(wpDrop));
   moveClassBadge = { square: move.to, classification };
   renderArrows();
 
@@ -19269,12 +19396,15 @@ function handleReviewRetryResult(wpDrop, move, bestMoveSan, isExactBest) {
   // user's retry move (not the original mistake). Overwritten on each new retry.
   window._lastRetryResult = { moveIdx, postFen: retryPostFen, wpDrop, move, bestMoveSan, isExactBest };
 
-  const color = wpDropToColor(wpDrop);
+  const color = repMatch ? REP_PURPLE : wpDropToColor(wpDrop);
   const wpStr = Math.round(wpDrop * 10) / 10;
   const sym = classification === 'good' ? '✓' : (classification === 'best' ? '★' : cls.symbol || '');
 
   let title, body;
-  if (isExactBest) {
+  if (repMatch) {
+    title = `📖 Repertoire move!`;
+    body = `<code>${escHtml(move.san)}</code> matches your repertoire.`;
+  } else if (isExactBest) {
     title = `${sym} Best move!`;
     body = `<code>${escHtml(move.san)}</code> is the engine's top choice.`;
   } else if (wpDrop <= 2) {
@@ -19288,7 +19418,14 @@ function handleReviewRetryResult(wpDrop, move, bestMoveSan, isExactBest) {
     body = `<code>${escHtml(move.san)}</code> loses ${wpStr}% winning chances.`;
   }
 
-  if (improved && bestMoveSan) {
+  // Deviation retry that didn't hit the repertoire move: even an engine-approved
+  // move misses the drill's point — say so (without revealing the move) and
+  // offer the purple arrow.
+  if (isDeviationRetry && !repMatch) {
+    body += `<div style="margin-top:4px;font-size:12px;color:${REP_PURPLE};">📖 Not your repertoire move — <button class="btn btn-ghost btn-sm" style="font-size:11px;color:${REP_PURPLE};border-color:${REP_PURPLE};padding:1px 6px;" onclick="showReviewRepMoveArrow(${moveIdx})">Show repertoire move</button></div>`;
+  }
+
+  if (!repMatch && improved && bestMoveSan) {
     body += `<div style="margin-top:4px;font-size:12px;color:var(--text-muted);">Better than your original <code>${escHtml(originalMv.san)}</code> (−${originalMv.wpDrop}%)</div>`;
   }
 
@@ -19324,7 +19461,7 @@ function handleReviewRetryResult(wpDrop, move, bestMoveSan, isExactBest) {
 
   const container = document.getElementById('feedbackContainer');
   container.innerHTML = `
-    <div class="feedback-box" style="background:${wpDropToColorDim(wpDrop)};border-left:3px solid ${color};">
+    <div class="feedback-box" style="background:${repMatch ? 'rgba(139,125,216,0.10)' : wpDropToColorDim(wpDrop)};border-left:3px solid ${color};">
       <div class="feedback-title" style="color:${color}">${title}</div>
       <div class="feedback-text">${body}${exploreBtns}${saveBtn ? `<div style="margin-top:6px;">${saveBtn}</div>` : ''}${navHtml}</div>
     </div>
@@ -20840,7 +20977,7 @@ function renderArrows() {
         drawOne(a.from, a.to, a.color, a.opacity, a.scale);
       }
     } else if (bestMoveArrow && !suppressEngineArrows) {
-      drawOne(bestMoveArrow.from, bestMoveArrow.to, 'rgba(62, 207, 142, 0.7)', 1);
+      drawOne(bestMoveArrow.from, bestMoveArrow.to, bestMoveArrow.color || 'rgba(62, 207, 142, 0.7)', 1);
     }
     // Note arrows (semi-transparent, behind hint/user arrows)
     // Finding 11: defensive gate on notePanelOpen. Today the noteArrows /
