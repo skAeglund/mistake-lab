@@ -1715,7 +1715,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Game Review: corrected repertoire deviations count as key moves. The mid-practice deviation check undoes the tried move, so it never enters contLine and the corrected (spoiled) study move classified as book — the position silently escaped review. Now the undo site records pendingRepDevTried (FIRST attempt at a position wins; the instinctive choice is the review target), addContLineMove consumes it on the next user move — stamping move.repTried when the corrected move differs from the tried one; a same-move replay means Ignore-Repertoire was clicked and the standard in-line detection already flags it, and a posKey mismatch means the marker went stale (cleared either way, plus in cleanupPracticeCont so it can't leak across practice sessions at the same position). buildContLineReviewData flags trie-matching moves carrying repTried as corrected deviations (skipped if the tried move now matches the trie — any move ever in repertoire stays non-flagged). Card reads "Repertoire deviation (corrected)" with "You first tried X before correcting"; no Show-repertoire-move button (the answer is the move on the board); retry prompt references the tried move instead of spoiling with the played one. repTried is real game history (not derivable from the trie) so it joins the snapshot whitelist and survives into historical reviews; retry grading/hints unchanged (trie-match drill).</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Corrected deviations: land pre-move, hide the answer until solved. The walkthrough previously navigated to the position AFTER a corrected deviation — the move on the board IS the recall answer (the study move the mid-practice banner showed), so retry was pointless. reviewNext/PrevKeyMove now land at moveIdx-1 for corrected deviations; the key-move card gains a revealed param and a hideAnswer state that suppresses the san in the title, replaces the tried-move context with "can you recall it now?", forces the purple treatment even when the move is also an eval mistake (which would otherwise leak the san via the mistake title), and gates Show best / Show line behind the reveal (engine best usually equals the rep move in prep). The tried move is also held back from the retry prompt ("You needed help finding this move during the game") and only surfaces in the repMatch success card ("During the game you first tried X before correcting to it"). Reveal paths pass revealed=true: Skip (cancelReviewRetry), retry-canceled-on-entry restore, Back from Show line, and the refutation fallbacks; the Show-repertoire-move button on a hidden card flips it to revealed before drawing the purple arrow (the render clears bestMoveArrow, so order matters).</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -8403,8 +8403,10 @@ function restoreReviewStateAfterAnalysis(rs) {
     // Retry was canceled on entry — land cleanly on the key-move card for that move.
     // goToContLineMove + showReviewKeyMoveInfo paint everything from scratch; no
     // overpaint from the snapshot (which captured the mid-retry pre-move state).
+    // revealed=true: canceling a corrected-deviation recall mid-retry is the
+    // same give-up as Skip, and the board lands post-move.
     goToContLineMove(rs.retryMoveIdx);
-    showReviewKeyMoveInfo(rs.retryMoveIdx);
+    showReviewKeyMoveInfo(rs.retryMoveIdx, true);
   } else {
     // Summary / key-move / retry-result / best-line / refutation / complete
     // Phase 1: restore contLine position (eval bar, graph cursor, note indicator,
@@ -18663,8 +18665,13 @@ function reviewNextKeyMove() {
     return;
   }
   const moveIdx = contLineReviewKeyMoves[contLineReviewKeyIdx];
+  // Corrected deviations: land on the position BEFORE the move — the move on
+  // the board IS the recall drill's answer (the study move the banner showed
+  // during the game). Everything else lands post-move as before.
+  const kmv = contLine ? contLine.moves[moveIdx] : null;
+  const landIdx = (kmv && kmv._repDeviation && kmv._repDeviation.corrected) ? moveIdx - 1 : moveIdx;
   // Navigate to position AFTER this move — badge shows on destination square via goToContLineMove
-  goToContLineMove(moveIdx);
+  goToContLineMove(landIdx);
   showReviewKeyMoveInfo(moveIdx);
 }
 
@@ -18684,11 +18691,13 @@ function reviewPrevKeyMove() {
     contLineReviewKeyIdx = 0;
   }
   const moveIdx = contLineReviewKeyMoves[contLineReviewKeyIdx];
-  goToContLineMove(moveIdx);
+  // Corrected deviations land pre-move — see reviewNextKeyMove.
+  const kmv = contLine ? contLine.moves[moveIdx] : null;
+  goToContLineMove((kmv && kmv._repDeviation && kmv._repDeviation.corrected) ? moveIdx - 1 : moveIdx);
   showReviewKeyMoveInfo(moveIdx);
 }
 
-function showReviewKeyMoveInfo(moveIdx) {
+function showReviewKeyMoveInfo(moveIdx, revealed = false) {
   if (!contLine) return;
   const mv = contLine.moves[moveIdx];
   if (!mv) return;
@@ -18697,6 +18706,12 @@ function showReviewKeyMoveInfo(moveIdx) {
   const REP_PURPLE = '#8b7dd8';
   const isDeviation = !!mv._repDeviation;
   const isAlsoMistake = mv.wpDrop != null && mv.wpDrop > 5;
+  // Corrected deviations arrive with the board at the PRE-move position and
+  // the played move (= the answer) hidden until the user retries successfully,
+  // reveals via the arrow button, or skips (cancelReviewRetry passes
+  // revealed=true, as do the line-view restore paths, which are only reachable
+  // post-reveal anyway).
+  const hideAnswer = isDeviation && mv._repDeviation.corrected && !revealed;
 
   // Check if this mistake was already saved
   const saveFenBefore = moveIdx > 0 ? contLine.moves[moveIdx - 1].fen : contLine.baseFen;
@@ -18723,23 +18738,33 @@ function showReviewKeyMoveInfo(moveIdx) {
   // card with no eval loss line; deviations that are ALSO mistakes keep the
   // mistake framing and gain a purple deviation note. The expected move is
   // never printed — Retry / Show repertoire move keep it a recall drill.
-  const title = isDeviation && !isAlsoMistake
-    ? `📖 Repertoire deviation${mv._repDeviation.corrected ? ' (corrected)' : ''} · <code>${escHtml(mv.san)}</code>`
-    : `${sym} ${cls.label || 'Move'} · <code>${escHtml(mv.san)}</code>`;
-  const titleColor = isDeviation && !isAlsoMistake ? REP_PURPLE : (cls.color || 'var(--text-primary)');
-  const borderColor = isDeviation && !isAlsoMistake ? REP_PURPLE : (cls.color || 'var(--border)');
-  const bgColor = isDeviation && !isAlsoMistake ? 'rgba(139,125,216,0.10)' : wpDropToColorDim(mv.wpDrop || 0);
+  const title = hideAnswer
+    ? `📖 Repertoire deviation (corrected)`
+    : (isDeviation && !isAlsoMistake
+      ? `📖 Repertoire deviation${mv._repDeviation.corrected ? ' (corrected)' : ''} · <code>${escHtml(mv.san)}</code>`
+      : `${sym} ${cls.label || 'Move'} · <code>${escHtml(mv.san)}</code>`);
+  const purpleCard = (isDeviation && !isAlsoMistake) || hideAnswer;
+  const titleColor = purpleCard ? REP_PURPLE : (cls.color || 'var(--text-primary)');
+  const borderColor = purpleCard ? REP_PURPLE : (cls.color || 'var(--border)');
+  const bgColor = purpleCard ? 'rgba(139,125,216,0.10)' : wpDropToColorDim(mv.wpDrop || 0);
   const evalLine = (!isDeviation || isAlsoMistake) && mv.wpDrop != null
     ? `<div>Lost ${mv.wpDrop}% winning chances (−${mv.cpLoss || 0}cp)</div>` : '';
   const devLine = isDeviation
     ? (mv._repDeviation.corrected
-      ? `<div style="color:${REP_PURPLE};${isAlsoMistake ? 'margin-top:4px;' : ''}font-size:12px;">📖 You first tried <code>${escHtml(mv._repDeviation.tried.san)}</code> here before correcting to the repertoire move.</div>`
+      ? (hideAnswer
+        ? `<div style="color:${REP_PURPLE};font-size:12px;">📖 You needed help finding your repertoire move here — can you recall it now?</div>`
+        : `<div style="color:${REP_PURPLE};${isAlsoMistake ? 'margin-top:4px;' : ''}font-size:12px;">📖 You first tried <code>${escHtml(mv._repDeviation.tried.san)}</code> here before correcting to the repertoire move.</div>`)
       : `<div style="color:${REP_PURPLE};${isAlsoMistake ? 'margin-top:4px;' : ''}font-size:12px;">📖 Your repertoire plays a different move here${mv._repDeviation.sans.length > 1 ? ` (${mv._repDeviation.sans.length} options)` : ''}.</div>`)
     : '';
-  // "Show repertoire move" is spoiler-relief for in-line deviations; a
-  // corrected deviation's answer is the move already on the board.
-  const repMoveBtn = isDeviation && !mv._repDeviation.corrected
-    ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;color:${REP_PURPLE};border-color:${REP_PURPLE};" onclick="showReviewRepMoveArrow(${moveIdx})">📖 Show repertoire move</button>`
+  // "Show repertoire move" is spoiler-relief: shown for in-line deviations
+  // (answer never on the board) and for unrevealed corrected ones (board is
+  // pre-move). Once revealed, the answer is the move itself — button dropped.
+  const repMoveBtn = isDeviation && (!mv._repDeviation.corrected || hideAnswer)
+    ? (hideAnswer
+      // Opt-in reveal for corrected: flip the card to revealed FIRST (it clears
+      // bestMoveArrow at render end), then draw the purple arrow.
+      ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;color:${REP_PURPLE};border-color:${REP_PURPLE};" onclick="showReviewKeyMoveInfo(${moveIdx}, true);showReviewRepMoveArrow(${moveIdx})">📖 Show repertoire move</button>`
+      : `<button class="btn btn-ghost btn-sm" style="font-size:11px;color:${REP_PURPLE};border-color:${REP_PURPLE};" onclick="showReviewRepMoveArrow(${moveIdx})">📖 Show repertoire move</button>`)
     : '';
   // Refutation only makes sense when the move actually lost eval
   const refutationBtn = (!isDeviation || isAlsoMistake)
@@ -18757,8 +18782,8 @@ function showReviewKeyMoveInfo(moveIdx) {
         <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;">
           <button class="btn btn-primary btn-sm" style="font-size:11px;" onclick="startReviewRetry(${moveIdx})">↺ Retry</button>
           ${repMoveBtn}
-          ${mv.bestMoveUci ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewBestArrow(${moveIdx})">Show best</button>` : ''}
-          ${mv.bestMoveUci ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewBestLine(${moveIdx})">Show line</button>` : ''}
+          ${mv.bestMoveUci && !hideAnswer ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewBestArrow(${moveIdx})">Show best</button>` : ''}
+          ${mv.bestMoveUci && !hideAnswer ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewBestLine(${moveIdx})">Show line</button>` : ''}
           ${refutationBtn}
           ${saveBtn}
         </div>
@@ -18808,7 +18833,7 @@ async function showReviewBestLine(moveIdx) {
   const bestPromo = mv.bestMoveUci.length > 4 ? mv.bestMoveUci[4] : undefined;
   const bestMoveResult = chess.move({ from: bestFrom, to: bestTo, promotion: bestPromo });
   if (!bestMoveResult) {
-    showReviewKeyMoveInfo(moveIdx);
+    showReviewKeyMoveInfo(moveIdx, true); // Show line is post-reveal only
     return;
   }
   const postBestFen = chess.fen();
@@ -19169,7 +19194,9 @@ function exitReviewBestLine(moveIdx) {
   // (keeps the user's retry move highlighted and the feedback buttons intact).
   if (wasRetryContext && restoreRetryResultView()) return;
   goToContLineMove(moveIdx);
-  showReviewKeyMoveInfo(moveIdx);
+  // revealed=true: Show line / Show refutation are gated behind the reveal for
+  // corrected deviations, so returning from them is always post-reveal.
+  showReviewKeyMoveInfo(moveIdx, true);
 }
 
 async function showReviewRefutation(moveIdx, fromRetry = false) {
@@ -19222,14 +19249,14 @@ async function showReviewRefutation(moveIdx, fromRetry = false) {
   // Bail if the user navigated away during analysis.
   if (contLine !== contLineSnap || contLine?.moves[moveIdx] !== mvSnap) return;
   if (!result || !result.pvs || !result.pvs[0]) {
-    if (retryValid) restoreRetryResultView(); else showReviewKeyMoveInfo(moveIdx);
+    if (retryValid) restoreRetryResultView(); else showReviewKeyMoveInfo(moveIdx, true); // refutation is post-reveal only
     return;
   }
 
   const pv = result.pvs[0];
   const pvMoves = (pv.moves || '').trim().split(/\s+/).filter(Boolean);
   if (pvMoves.length === 0) {
-    if (retryValid) restoreRetryResultView(); else showReviewKeyMoveInfo(moveIdx);
+    if (retryValid) restoreRetryResultView(); else showReviewKeyMoveInfo(moveIdx, true); // refutation is post-reveal only
     return;
   }
 
@@ -19250,7 +19277,7 @@ async function showReviewRefutation(moveIdx, fromRetry = false) {
   }
 
   if (lineMoves.length === 0) {
-    if (retryValid) restoreRetryResultView(); else showReviewKeyMoveInfo(moveIdx);
+    if (retryValid) restoreRetryResultView(); else showReviewKeyMoveInfo(moveIdx, true); // refutation is post-reveal only
     return;
   }
 
@@ -19388,9 +19415,11 @@ function startReviewRetry(moveIdx) {
   hintBtn.style.color = '';
 
   const retryDev = contLine.moves[moveIdx]._repDeviation;
+  // Corrected deviations hold back BOTH the answer and the tried move until a
+  // successful retry (the repMatch card reveals the game context).
   const retryDevLine = retryDev
-    ? (retryDev.corrected && retryDev.tried
-      ? `You first tried <code>${escHtml(retryDev.tried.san)}</code> — play your repertoire move.`
+    ? (retryDev.corrected
+      ? `You needed help finding this move during the game — play your repertoire move.`
       : `You played <code>${escHtml(contLine.moves[moveIdx].san)}</code> — what does your repertoire play here?`)
     : '';
   const container = document.getElementById('feedbackContainer');
@@ -19424,7 +19453,9 @@ function cancelReviewRetry(moveIdx) {
   document.getElementById('btnHint').classList.add('hidden');
   clearHintHighlights();
   goToContLineMove(moveIdx);
-  showReviewKeyMoveInfo(moveIdx);
+  // revealed=true: skipping a corrected-deviation recall is giving up — the
+  // board lands post-move (answer visible), so the card shows it too.
+  showReviewKeyMoveInfo(moveIdx, true);
 }
 
 function handleReviewRetryResult(wpDrop, move, bestMoveSan, isExactBest, repMatch = false) {
@@ -19467,6 +19498,11 @@ function handleReviewRetryResult(wpDrop, move, bestMoveSan, isExactBest, repMatc
   if (repMatch) {
     title = `📖 Repertoire move!`;
     body = `<code>${escHtml(move.san)}</code> matches your repertoire.`;
+    // Corrected deviation solved: NOW reveal the game context (held back from
+    // the key-move card so the recall attempt stays unspoiled).
+    if (originalMv._repDeviation?.corrected && originalMv._repDeviation.tried) {
+      body += `<div style="margin-top:4px;font-size:12px;color:var(--text-muted);">During the game you first tried <code>${escHtml(originalMv._repDeviation.tried.san)}</code> before correcting to it.</div>`;
+    }
   } else if (isExactBest) {
     title = `${sym} Best move!`;
     body = `<code>${escHtml(move.san)}</code> is the engine's top choice.`;
