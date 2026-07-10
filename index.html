@@ -1715,7 +1715,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Start engine line by making a move, closes #22. In the good-move state (Play Continuation / Show engine line options showing, opponent to move) the user can now pick up an OPPONENT piece — drag or tap — and play a reply: the deferred engine line opens pinned at the user's move and the chosen reply is routed into handleEngineLineBranch, so the engine's top reply stays as the main line and the user's reply becomes an SF-analyzed variation (identical to manual branching). Guarded by deferredLineBranchReady(): full mode-flag excludes, settings-panel-open exclude, and gameEngine.fen()===postFen drift check (auto-disables after Show engine's best). Illegal drops snap back leaving the options row and payload intact; gameEngine is never touched. buildEngineLine gains an opts param (startIdx/animate) with the 250ms deferred re-highlight now guarded on currentIdx.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Review history part 1/2: capture + storage + sync. Every finished continuation (checkmate/draw either direction, Stop &amp; Review, turn-mismatch, advantage and TODO-list drill ends — 6 sites) is snapshotted as a slim per-move record (san/uci/classification/wpDrop/cpLoss/bestCp/afterCp/bestMoveUci; FENs rebuilt from baseFen on restore, _pvs dropped) with accuracy/keyMoveCount/opening/outcome/source header, gated on &gt;=5 user moves. Provisional capture at the end site is overwritten by a finalization re-capture at both silent-eval-queue drain points (ts and finalCp preserved), idempotent via contLine._reviewSnapId; the marker detaches on truncate-and-branch so a post-end diverged line can't corrupt the frozen snapshot. Local mirror in a SEPARATE IndexedDB database mistakelab_reviews v1 (no FEN_DB_VERSION bump — avoids onblocked with a second tab holding the v1 mistakelab connection); cross-device via new Gist file mistakelab_reviews.json with read-merge-write (union by id, newer updatedAt wins, ts-desc, cap 150, prune syncs to IDB), write-on-read-failure like the eval cache. flushPendingSyncs pushes dirty history on pagehide; loadReviewHistory (IDB then Gist merge) runs non-blocking from showMainApp. Restore UI lands in part 2.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2689,6 +2689,8 @@ let appShown = false; // guard to prevent double showMainApp()
 const GIST_FILENAME = 'mistakelab_progress.json';
 const GIST_GAMES_FILENAME = 'mistakelab_games.json';
 const GIST_EVALS_FILENAME = 'mistakelab_evals.json';
+const GIST_REVIEWS_FILENAME = 'mistakelab_reviews.json';
+const REVIEW_HISTORY_CAP = 150;      // max snapshots kept (oldest pruned on merge/insert)
 
 // ─── Evaluation cache (cross-device via Gist) ───
 const EVAL_CACHE_MIN_DEPTH = 20;        // only cache results at this depth or higher
@@ -3789,6 +3791,279 @@ async function loadEvalCacheFromGist() {
   if (evalCache.size > 0) {
     console.log(`[EvalCache] Loaded ${evalCache.size} cached evaluations`);
   }
+}
+
+// ─── Review History (Game Review snapshots — IDB local + Gist cross-device) ───
+// Every finished continuation (natural ending, Stop & Review, advantage /
+// TODO-list drill end) is snapshotted so the Game Review can be reopened later
+// from the Review tab. Snapshots are slim: per-move summary fields only —
+// per-move FENs are rebuilt from baseFen + UCIs on restore, and refutation /
+// best-line views re-analyze on demand (usually eval-cache hits, since
+// SILENT_EVAL_DEPTH=22 >= EVAL_CACHE_MIN_DEPTH=20).
+//
+// Storage: source of truth is Gist file 'mistakelab_reviews.json' (separate
+// from progress — append-heavy + bulky, would weigh down every 3s progress
+// read-merge-write). Local mirror lives in a SEPARATE IndexedDB database
+// ('mistakelab_reviews' v1) rather than a new store in the 'mistakelab' DB:
+// adding a store there would force FEN_DB_VERSION 1→2, and a version-bump
+// open blocks (onblocked → openFenDb rejects) whenever a second tab holds a
+// v1 connection — which would break the opening explorer's unconditional
+// preload wait. A separate DB has zero interaction with fendata.
+//
+// Merge semantics (both directions, IDB↔memory↔Gist): union by id, prefer
+// higher updatedAt (finalization re-captures bump it), sort ts desc, cap
+// REVIEW_HISTORY_CAP. Like the eval cache — and unlike progress —
+// syncReviewHistoryToGist still writes on read-failure: losing a review to a
+// remote overwrite race is annoying but recoverable (the other device's next
+// read-merge-write re-unions it), so preserving this device's snapshots wins.
+const REVIEWS_DB_NAME = 'mistakelab_reviews';
+const REVIEWS_DB_VERSION = 1;
+const REVIEWS_STORE = 'reviews';
+let reviewsDb = null;
+let reviewsDbOpenPromise = null;
+let reviewHistory = [];              // in-memory, sorted ts desc
+let reviewHistoryLoaded = false;
+let reviewHistoryDirty = 0;          // snapshots written since last Gist sync
+let reviewHistorySyncTimer = null;
+
+function openReviewsDb() {
+  if (reviewsDb) return Promise.resolve(reviewsDb);
+  if (reviewsDbOpenPromise) return reviewsDbOpenPromise;
+  reviewsDbOpenPromise = new Promise((resolve, reject) => {
+    if (!self.indexedDB) { reject(new Error('IndexedDB not available')); return; }
+    const req = indexedDB.open(REVIEWS_DB_NAME, REVIEWS_DB_VERSION);
+    req.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(REVIEWS_STORE)) db.createObjectStore(REVIEWS_STORE);
+    };
+    req.onsuccess = () => { reviewsDb = req.result; resolve(reviewsDb); };
+    req.onerror = () => reject(req.error);
+    req.onblocked = () => reject(new Error('IndexedDB open blocked'));
+  });
+  return reviewsDbOpenPromise;
+}
+
+function idbPutReviews(snaps) {
+  if (!snaps || snaps.length === 0) return Promise.resolve();
+  return openReviewsDb().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(REVIEWS_STORE, 'readwrite');
+    const store = tx.objectStore(REVIEWS_STORE);
+    for (const s of snaps) store.put(s, s.id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  })).catch(e => console.warn('[Reviews] IDB write failed:', e && e.message));
+}
+
+function idbDeleteReviews(ids) {
+  if (!ids || ids.length === 0) return Promise.resolve();
+  return openReviewsDb().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(REVIEWS_STORE, 'readwrite');
+    const store = tx.objectStore(REVIEWS_STORE);
+    for (const id of ids) store.delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  })).catch(e => console.warn('[Reviews] IDB delete failed:', e && e.message));
+}
+
+function idbLoadAllReviews() {
+  return openReviewsDb().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(REVIEWS_STORE, 'readonly');
+    const store = tx.objectStore(REVIEWS_STORE);
+    const req = store.getAll(); // batch read — same rationale as loadAllFenDataFromIDB
+    tx.oncomplete = () => resolve(req.result || []);
+    tx.onerror = () => reject(tx.error);
+  })).catch(e => { console.warn('[Reviews] IDB read failed:', e && e.message); return []; });
+}
+
+function reviewSnapshotValid(s) {
+  return s && typeof s.id === 'string' && typeof s.ts === 'number'
+    && typeof s.baseFen === 'string' && Array.isArray(s.moves);
+}
+
+// Union by id (newer updatedAt wins), sort ts desc, cap. Returns
+// { merged, prunedIds } so callers can clean pruned entries out of IDB.
+function mergeReviewHistories(a, b) {
+  const byId = new Map();
+  for (const s of (a || [])) if (reviewSnapshotValid(s)) byId.set(s.id, s);
+  for (const s of (b || [])) {
+    if (!reviewSnapshotValid(s)) continue;
+    const existing = byId.get(s.id);
+    if (!existing || (s.updatedAt || s.ts) > (existing.updatedAt || existing.ts)) byId.set(s.id, s);
+  }
+  const merged = [...byId.values()].sort((x, y) => y.ts - x.ts);
+  const pruned = merged.splice(REVIEW_HISTORY_CAP);
+  return { merged, prunedIds: pruned.map(s => s.id) };
+}
+
+// Source label for sites that capture while the mode flags are still live.
+// finishAdvantage / finishTodoDrill pass explicit strings instead — their
+// flags are already (or about to be) cleared at the hook point.
+function reviewSnapshotSource() {
+  if (repTodoActive) return 'todo';
+  if (advantageMode) return 'advantage';
+  if (practiceContItem) return 'practice';
+  const m = currentMistakeIdx >= 0 ? filteredMistakes[currentMistakeIdx] : null;
+  if (m && m.type === 'tactic') return 'tactic-cont';
+  return 'cont';
+}
+
+function buildReviewSnapshot(id, source, outcome) {
+  if (!contLine || !Array.isArray(contLine.moves)) return null;
+  const userMoveCount = contLine.moves.filter(mv => mv.isUser).length;
+  if (userMoveCount < SILENT_REVIEW_MIN_MOVES) return null;
+  const m = currentMistakeIdx >= 0 ? filteredMistakes[currentMistakeIdx] : null;
+  // buildContLineReviewData is a pure function of contLine — returns null only
+  // when contLine has no moves (guarded above). Accuracy/keyMoves reflect
+  // whatever classifications exist right now; the queue-drain finalization
+  // re-captures once deep evals complete.
+  const data = buildContLineReviewData();
+  // Slim per-move copy: drop fen (rebuilt from baseFen+uci on restore), _pvs
+  // (large, only needed for live tactic detection), and any other private
+  // fields. undefined values vanish in JSON.stringify.
+  const moves = contLine.moves.map(mv => ({
+    san: mv.san, uci: mv.uci, isUser: !!mv.isUser,
+    classification: mv.classification, wpDrop: mv.wpDrop, cpLoss: mv.cpLoss,
+    bestCp: mv.bestCp, afterCp: mv.afterCp, bestMoveUci: mv.bestMoveUci,
+  }));
+  let openingName = '';
+  try { openingName = lookupOpeningName(contLine.baseFen) || ''; } catch (_) {}
+  return {
+    id,
+    ts: Date.now(),
+    updatedAt: Date.now(),
+    baseFen: contLine.baseFen,
+    playerColor: m ? m.playerColor : (boardObj ? boardObj.orientation() : 'white'),
+    orientation: boardObj ? boardObj.orientation() : 'white',
+    source,
+    outcome, // 'win' | 'draw' | 'loss' | 'stopped' | 'ended'
+    finalCp: (typeof afterMoveCpWhite !== 'undefined' && afterMoveCpWhite != null)
+      ? Math.round(afterMoveCpWhite) : null,
+    openingName,
+    accuracy: data ? data.accuracy : null,
+    keyMoveCount: data ? data.keyMoves.length : 0,
+    userMoveCount,
+    moves,
+  };
+}
+
+// Capture (or re-capture) the current contLine as a review snapshot.
+// Idempotent per game: the id is stashed on contLine, so a finalization
+// re-capture after the silent eval queue drains overwrites the same entry
+// instead of duplicating it. ts is preserved across re-captures (entry keeps
+// its original game-end time); updatedAt bumps so the merge prefers it.
+function captureReviewSnapshot(source, outcome) {
+  try {
+    if (!contLine) return;
+    const isRecapture = !!contLine._reviewSnapId;
+    const id = contLine._reviewSnapId ||
+      `rev_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const snap = buildReviewSnapshot(id, source, outcome);
+    if (!snap) return; // below min-moves threshold — not worth keeping
+    contLine._reviewSnapId = id;
+    contLine._reviewSnapMeta = { source, outcome };
+    const existingIdx = reviewHistory.findIndex(s => s.id === id);
+    if (existingIdx >= 0) {
+      snap.ts = reviewHistory[existingIdx].ts; // keep original game-end time
+      // Keep the eval standing captured AT game end — by finalization time the
+      // user may have browsed engine lines, mutating afterMoveCpWhite.
+      if (reviewHistory[existingIdx].finalCp != null) snap.finalCp = reviewHistory[existingIdx].finalCp;
+      reviewHistory[existingIdx] = snap;
+    } else {
+      reviewHistory.unshift(snap);
+      reviewHistory.sort((x, y) => y.ts - x.ts);
+      const pruned = reviewHistory.splice(REVIEW_HISTORY_CAP);
+      if (pruned.length > 0) idbDeleteReviews(pruned.map(s => s.id));
+    }
+    idbPutReviews([snap]);
+    reviewHistoryDirty++;
+    debounceReviewHistorySync();
+    if (!isRecapture) console.log(`[Reviews] Captured snapshot ${id} (${source}/${outcome}, ${snap.userMoveCount} user moves)`);
+  } catch (e) {
+    console.warn('[Reviews] Snapshot capture failed:', e && e.message);
+  }
+}
+
+// Called from both silent-eval-queue drain points (mirrors the
+// maybeRefreshReviewSummary pattern): once deep evals finish classifying
+// trailing moves, overwrite the provisional end-of-game snapshot with final
+// numbers. No-op mid-game — _reviewSnapId is only set at an end site.
+function finalizeReviewSnapshotIfPending() {
+  if (!contLine || !contLine._reviewSnapId || !contLine._reviewSnapMeta) return;
+  captureReviewSnapshot(contLine._reviewSnapMeta.source, contLine._reviewSnapMeta.outcome);
+}
+
+async function gistReadReviews() {
+  if (airplaneMode || !gistToken || !gistId) return null;
+  try {
+    const gist = await gistFetchAll();
+    if (!gist) return null;
+    const file = gist.files?.[GIST_REVIEWS_FILENAME];
+    if (!file) return null;
+    const content = await gistReadFileContent(file);
+    if (!content) return null;
+    const parsed = JSON.parse(content);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch { return null; }
+}
+
+function debounceReviewHistorySync() {
+  if (airplaneMode || !isGistConfigured()) return; // IDB already holds it locally
+  clearTimeout(reviewHistorySyncTimer);
+  // Captures are rare (once per finished game) so a short debounce just
+  // coalesces the provisional capture with its finalization re-capture.
+  reviewHistorySyncTimer = setTimeout(() => syncReviewHistoryToGist(), 5000);
+}
+
+async function syncReviewHistoryToGist() {
+  if (airplaneMode || !isGistConfigured()) return;
+  if (reviewHistoryDirty === 0) return;
+  try {
+    // Read-merge-write; on read failure fall through with local-only (see
+    // header comment — snapshots are non-critical, preserving local wins).
+    const remote = await gistReadReviews();
+    const { merged, prunedIds } = mergeReviewHistories(reviewHistory, remote || []);
+    reviewHistory = merged;
+    if (prunedIds.length > 0) idbDeleteReviews(prunedIds);
+    idbPutReviews(merged); // persist any remote entries merged in
+    const body = JSON.stringify({
+      files: { [GIST_REVIEWS_FILENAME]: { content: JSON.stringify(merged) } }
+    });
+    await fetch(`https://api.github.com/gists/${gistId}`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `token ${gistToken}`,
+        'Content-Type': 'application/json'
+      },
+      body,
+      keepalive: body.length < 65536 // flushPendingSyncs path — see syncEvalCacheToGist L7
+    });
+    reviewHistoryDirty = 0;
+    gistInvalidateCache();
+    console.log(`[Reviews] Synced ${merged.length} review snapshots to Gist`);
+  } catch (e) {
+    console.warn('[Reviews] Gist sync failed:', e.message);
+  }
+}
+
+// Startup load: IDB first (fast, offline), then merge Gist (other devices).
+// Non-blocking — called once from showMainApp.
+async function loadReviewHistory() {
+  if (reviewHistoryLoaded) return;
+  reviewHistoryLoaded = true;
+  const local = await idbLoadAllReviews();
+  reviewHistory = mergeReviewHistories(reviewHistory, local).merged;
+  if (!airplaneMode && isGistConfigured()) {
+    const remote = await gistReadReviews();
+    if (remote) {
+      const before = reviewHistory.length;
+      const { merged, prunedIds } = mergeReviewHistories(reviewHistory, remote);
+      reviewHistory = merged;
+      if (prunedIds.length > 0) idbDeleteReviews(prunedIds);
+      idbPutReviews(merged);
+      if (merged.length !== before) console.log(`[Reviews] Merged Gist history (${merged.length} total)`);
+    }
+  }
+  if (reviewHistory.length > 0) console.log(`[Reviews] Loaded ${reviewHistory.length} review snapshots`);
 }
 
 // ─── Game Cache (localStorage L1 + Gist L2) ───
@@ -5284,6 +5559,10 @@ async function processSilentEvalQueue() {
   // the final deep-eval numbers. No-op unless the user is still on the
   // summary card (see maybeRefreshReviewSummary).
   maybeRefreshReviewSummary();
+  // Review history: the provisional end-of-game snapshot (if any) was captured
+  // before these deep evals classified the trailing moves — overwrite it with
+  // final numbers. No-op mid-game (_reviewSnapId only set at end sites).
+  finalizeReviewSnapshotIfPending();
 }
 
 /** Shared: apply deep eval classification to a contLine move. */
@@ -6456,6 +6735,8 @@ async function processQueueOnMainWorker() {
   // main-worker helper drains its side of the queue, also refresh the review
   // summary card if the user is still sitting on it.
   maybeRefreshReviewSummary();
+  // Review history: mirror of the finalization hook in processSilentEvalQueue.
+  finalizeReviewSnapshotIfPending();
 }
 
 function sfAnalyze(fen, depth = 16, multiPv = 1) {
@@ -11769,6 +12050,10 @@ function showMainApp() {
   // buildOpeningIndex will wait for this to complete rather than racing it.
   startFenDataPreload();
 
+  // Review history: IDB load + Gist merge, non-blocking (guarded internally
+  // by reviewHistoryLoaded). Only data — the Review-tab UI reads it lazily.
+  loadReviewHistory();
+
   // Load repertoire studies in background
   loadRepertoireTrie().then(() => {
     detectRepertoireDeviations();
@@ -12578,6 +12863,12 @@ function onBoardClick(e) {
 
         const keepCount = contLine.currentIdx + 1;
         contLine.moves = contLine.moves.slice(0, keepCount);
+        // Review history: this line diverged from the game that (possibly)
+        // ended — detach the snapshot marker so queue-drain finalization can't
+        // overwrite the finished snapshot with post-divergence moves. The
+        // frozen snapshot keeps the game as it actually ended.
+        contLine._reviewSnapId = null;
+        contLine._reviewSnapMeta = null;
 
         const mm = filteredMistakes[currentMistakeIdx];
         const movedUserColor = (mm.playerColor === 'white' && move.color === 'w') ||
@@ -13369,6 +13660,10 @@ function onDrop(source, target) {
     // Truncate line after the current browsed position
     const keepCount = contLine.currentIdx + 1;
     contLine.moves = contLine.moves.slice(0, keepCount);
+    // Review history: detach the snapshot marker on divergence — see the
+    // click-to-move truncate site for full rationale.
+    contLine._reviewSnapId = null;
+    contLine._reviewSnapMeta = null;
 
     const m = filteredMistakes[currentMistakeIdx];
     const movedUserColor = (m.playerColor === 'white' && move.color === 'w') ||
@@ -16360,6 +16655,16 @@ function flushPendingSyncs() {
       syncEvalCacheToGist(); // best-effort
     }
   }
+  if (reviewHistoryDirty > 0) {
+    clearTimeout(reviewHistorySyncTimer);
+    reviewHistorySyncTimer = null;
+    // IDB already holds every snapshot (written at capture time), so unlike
+    // the eval cache there's no LS fallback needed — only the best-effort
+    // Gist push (keepalive-gated inside syncReviewHistoryToGist).
+    if (isGistConfigured() && !airplaneMode) {
+      syncReviewHistoryToGist();
+    }
+  }
 }
 
 // ─── Continuation Line ───
@@ -17616,6 +17921,15 @@ function finishAdvantage(outcome) {
   // classifications existed in this path.
   const actionsHtml = continuationEndActionsHtml(true);
 
+  // Review history: explicit source string — advantageMode was cleared above,
+  // so reviewSnapshotSource() can no longer detect it. Silent-eval queue may
+  // still be draining; the finalization hook re-captures when it finishes.
+  captureReviewSnapshot('advantage',
+    outcome === 'victory' ? 'win'
+      : outcome === 'draw' ? 'draw'
+      : outcome === 'collapse' ? 'loss'
+      : 'ended');
+
   showColorFeedback(
     outcome === 'victory' ? '#4caf50'
       : outcome === 'interrupted' ? 'var(--accent)'
@@ -17690,6 +18004,10 @@ function buildContLineReviewData() {
 function stopAndReviewContinuation() {
   if (!continuationMode && !silentContinuation) return;
   recordPracticeResult(evalToResult(afterMoveCpWhite), afterMoveCpWhite);
+  // Review history: capture BEFORE the mode flags clear so
+  // reviewSnapshotSource() sees the live context. The game didn't finish —
+  // outcome 'stopped' (finalCp records the standing at stop time).
+  captureReviewSnapshot(reviewSnapshotSource(), 'stopped');
   continuationMode = false;
   silentContinuation = false;
   if (voiceMode) voiceStop(); // V7: end-of-continuation teardown
@@ -19077,6 +19395,9 @@ async function advanceContinuation(contUci) {
       return;
     }
     const wasSilent = silentContinuation;
+    // Review history: capture before the flags clear (source detection).
+    captureReviewSnapshot(reviewSnapshotSource(),
+      gameEngine.in_checkmate() ? 'win' : 'draw');
     continuationMode = false;
     silentContinuation = false;
     if (voiceMode) voiceStop(); // V7: end-of-continuation teardown
@@ -19275,6 +19596,9 @@ async function advanceContinuation(contUci) {
       return;
     }
     const wasSilent2 = silentContinuation;
+    // Review history: capture before the flags clear (source detection).
+    captureReviewSnapshot(reviewSnapshotSource(),
+      gameEngine.in_checkmate() ? 'loss' : 'draw');
     continuationMode = false;
     silentContinuation = false;
     if (voiceMode) voiceStop(); // V7: end-of-continuation teardown
@@ -19308,6 +19632,8 @@ async function advanceContinuation(contUci) {
     // finishAdvantage or the SRS card never updates.
     if (advantageMode) { finishAdvantage('interrupted'); return; }
     recordPracticeResult(evalToResult(afterMoveCpWhite), afterMoveCpWhite);
+    // Review history: capture before the flags clear (source detection).
+    captureReviewSnapshot(reviewSnapshotSource(), 'ended');
     const wasSilent3 = silentContinuation;
     continuationMode = false;
     silentContinuation = false;
@@ -22935,6 +23261,14 @@ function finishTodoDrill(outcome) {
   // practiceContItem is still set → recordPracticeResult keys on the leaf and
   // tags the preset, the single source of truth for checklist completion.
   if (result) recordPracticeResult(result, cpWhite, { preset });
+
+  // Review history: explicit 'todo' source (repTodoActive is cleared below).
+  // Snapshot includes the scripted lead-up + free continuation as one line.
+  captureReviewSnapshot('todo',
+    outcome === 'victory' ? 'win'
+      : outcome === 'collapse' ? 'loss'
+      : outcome === 'draw' ? 'draw'
+      : 'ended');
 
   const claimBtn = document.getElementById('advantageClaimBtn');
   if (claimBtn) claimBtn.remove();
