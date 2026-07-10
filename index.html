@@ -1715,7 +1715,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Review history part 1/2: capture + storage + sync. Every finished continuation (checkmate/draw either direction, Stop &amp; Review, turn-mismatch, advantage and TODO-list drill ends — 6 sites) is snapshotted as a slim per-move record (san/uci/classification/wpDrop/cpLoss/bestCp/afterCp/bestMoveUci; FENs rebuilt from baseFen on restore, _pvs dropped) with accuracy/keyMoveCount/opening/outcome/source header, gated on &gt;=5 user moves. Provisional capture at the end site is overwritten by a finalization re-capture at both silent-eval-queue drain points (ts and finalCp preserved), idempotent via contLine._reviewSnapId; the marker detaches on truncate-and-branch so a post-end diverged line can't corrupt the frozen snapshot. Local mirror in a SEPARATE IndexedDB database mistakelab_reviews v1 (no FEN_DB_VERSION bump — avoids onblocked with a second tab holding the v1 mistakelab connection); cross-device via new Gist file mistakelab_reviews.json with read-merge-write (union by id, newer updatedAt wins, ts-desc, cap 150, prune syncs to IDB), write-on-read-failure like the eval cache. flushPendingSyncs pushes dirty history on pagehide; loadReviewHistory (IDB then Gist merge) runs non-blocking from showMainApp. Restore UI lands in part 2.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Review history part 2/2: restore + Review-tab UI. New "📋 Game Reviews" section renders under the SRS queue in renderReviewList — in BOTH branches, since an empty queue is exactly when browsing history is most useful (the early return previously would have hidden it). Rows show source icon, outcome (colored), accuracy, date, opening, key-move and move counts; 15 visible with Show-all toggle (window._reviewHistShowAll). openHistoricalReview(id) rebuilds per-move FENs by replaying stored UCIs from baseFen (truncating at the first illegal move rather than failing), tears down any live context (analysis / detected-tactic / TODO drill / continuation flags / voice / preAnalysis / practice item), injects a synthetic type:'practice' item with gameId '_practice_hist' (excluded from SRS queue by type; the _practice prefix keeps startContLineReview's realGame check from unhiding btnViewGame) assigned to practiceContItem so the existing loadPosition/tab-switch lifecycle splices it, sets board orientation before check-highlight (DOM rebuild), then enters the unmodified contLineReviewMode machinery — review already runs with continuationMode=false, so every Escape branch, arrow-key route, read-only move guard, retry drill, Show line/refutation (fresh sfAnalyze, usually eval-cache hits) and Save-mistake path works unchanged. contLine._historical gates startTacticScan (snapshots carry no _tacticCandidates; a "played clean" banner would mislead) including on "Start over" re-entry. Drawer closes on item tap; mobile switches to training layout.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -4064,6 +4064,186 @@ async function loadReviewHistory() {
     }
   }
   if (reviewHistory.length > 0) console.log(`[Reviews] Loaded ${reviewHistory.length} review snapshots`);
+  // If the user is already sitting on the Review tab, surface the freshly
+  // loaded history without requiring a tab re-entry.
+  if (typeof reviewMode !== 'undefined' && reviewMode) {
+    try { renderReviewList(); } catch (_) {}
+  }
+}
+
+// ─── Review History: restore + Review-tab UI ───
+
+const REVIEW_HIST_SOURCE_META = {
+  practice:      { icon: '▶',  label: 'Practice' },
+  advantage:     { icon: '♛',  label: 'Convert' },
+  todo:          { icon: '📘', label: 'Checklist' },
+  'tactic-cont': { icon: '⚡', label: 'Post-tactic' },
+  cont:          { icon: '↪',  label: 'Continuation' },
+};
+const REVIEW_HIST_OUTCOME_META = {
+  win:     { label: 'Win',     color: '#4caf50' },
+  loss:    { label: 'Loss',    color: '#ef5f5f' },
+  draw:    { label: 'Draw',    color: 'var(--text-muted)' },
+  stopped: { label: 'Stopped', color: 'var(--text-muted)' },
+  ended:   { label: 'Ended',   color: 'var(--text-muted)' },
+};
+
+function formatReviewHistDate(ts) {
+  const d = new Date(ts);
+  const now = new Date();
+  const opts = { month: 'short', day: 'numeric' };
+  if (d.getFullYear() !== now.getFullYear()) opts.year = 'numeric';
+  return d.toLocaleDateString(undefined, opts) + ' ' +
+    d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
+// Renders the "Game Reviews" section under the SRS queue on the Review tab.
+// Called from renderReviewList (both the queue-populated and all-caught-up
+// branches — history is most useful precisely when the queue is empty).
+function appendReviewHistorySection(list) {
+  if (!reviewHistory || reviewHistory.length === 0) return;
+  const header = document.createElement('div');
+  header.style.cssText = 'padding:10px 12px 4px;font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;';
+  header.textContent = `📋 Game Reviews (${reviewHistory.length})`;
+  list.appendChild(header);
+
+  const limit = window._reviewHistShowAll ? reviewHistory.length : 15;
+  const visible = reviewHistory.slice(0, limit);
+  for (const s of visible) {
+    const src = REVIEW_HIST_SOURCE_META[s.source] || REVIEW_HIST_SOURCE_META.cont;
+    const oc = REVIEW_HIST_OUTCOME_META[s.outcome] || REVIEW_HIST_OUTCOME_META.ended;
+    const item = document.createElement('div');
+    item.className = 'review-item';
+    item.onclick = () => openHistoricalReview(s.id);
+    const accHtml = (s.accuracy != null)
+      ? `<span style="font-weight:600;">${s.accuracy}%</span>` : '';
+    const keyHtml = s.keyMoveCount > 0
+      ? `<span style="color:var(--text-muted);">${s.keyMoveCount} key move${s.keyMoveCount > 1 ? 's' : ''}</span>`
+      : `<span style="color:var(--text-muted);">clean</span>`;
+    item.innerHTML = `
+      <div class="review-item-top">
+        <span>${src.icon} <span style="color:${oc.color};font-weight:600;">${oc.label}</span> · ${accHtml}</span>
+        <span style="font-size:11px;color:var(--text-muted);">${formatReviewHistDate(s.ts)}</span>
+      </div>
+      <div class="review-item-opening">${escHtml(s.openingName || src.label)}</div>
+      <div class="review-srs-info" style="display:flex;gap:8px;font-size:11px;">
+        ${keyHtml}
+        <span style="color:var(--text-muted);">${s.userMoveCount} moves</span>
+      </div>
+    `;
+    list.appendChild(item);
+  }
+  if (reviewHistory.length > limit) {
+    const btn = document.createElement('div');
+    btn.className = 'show-more-btn';
+    btn.textContent = `Show all ${reviewHistory.length} reviews`;
+    btn.onclick = () => { window._reviewHistShowAll = true; renderReviewList(); };
+    list.appendChild(btn);
+  } else if (window._reviewHistShowAll && reviewHistory.length > 15) {
+    const btn = document.createElement('div');
+    btn.className = 'show-more-btn';
+    btn.textContent = 'Show fewer';
+    btn.onclick = () => { window._reviewHistShowAll = false; renderReviewList(); };
+    list.appendChild(btn);
+  }
+}
+
+// Reopens a stored Game Review: rebuilds contLine (per-move FENs replayed
+// from baseFen), injects a synthetic practice item (resumeContSession
+// pattern) so goToContLineMove's eval-bar reader / the retry drill /
+// savePracticeMistake all have a valid current item, then enters the
+// existing contLineReviewMode machinery. Review mode already runs with
+// continuationMode=false (stopAndReviewContinuation clears it before
+// startContLineReview), so no new mode flag is needed — every Escape
+// branch, arrow-key route, and read-only move guard applies unchanged.
+async function openHistoricalReview(snapId) {
+  const snap = reviewHistory.find(s => s.id === snapId);
+  if (!snap) return;
+
+  // Rebuild per-move FENs. Truncate at the first move chess.js rejects
+  // (corrupted snapshot) rather than failing the whole restore.
+  let moves = [];
+  try {
+    const chess = new Chess(snap.baseFen);
+    for (const mv of snap.moves) {
+      if (!mv.uci || mv.uci.length < 4) break;
+      const promo = mv.uci.length > 4 ? mv.uci[4] : undefined;
+      const played = chess.move({
+        from: mv.uci.substring(0, 2), to: mv.uci.substring(2, 4), promotion: promo,
+      });
+      if (!played) { console.warn(`[Reviews] Replay stopped at illegal ${mv.uci} in ${snapId}`); break; }
+      moves.push({ ...mv, san: played.san, fen: chess.fen() });
+    }
+  } catch (e) {
+    console.warn('[Reviews] Restore failed:', e && e.message);
+    return;
+  }
+  if (moves.length === 0) return;
+
+  // ── Teardown whatever context is live (loadPosition-style safety) ──
+  if (analysisMode) exitAnalysisMode();
+  if (detectedTacticSolveMode) abandonDetectedTacticSolve();
+  if (repTodoActive) abandonTodoDrill();
+  if (voiceMode) voiceStop();
+  continuationMode = false;
+  silentContinuation = false;
+  advantageMode = false;
+  tacticMode = false;
+  tacticLine = null;          // arrow-key nav priority reads this
+  contWrongMovePending = false;
+  clearContSession();
+  hideMaiaControls();
+  hideContStopReview();
+  stopPreAnalysis();
+  cleanupPracticeCont();      // splice any live practice item first
+  exitContLineReview();       // wipe prior review state + board overlays
+
+  // ── Synthetic current item ──
+  // type 'practice' keeps it out of buildReviewQueue / SRS; gameId prefixed
+  // '_practice' keeps startContLineReview's realGame check from unhiding
+  // btnViewGame (no real game backs this item). practiceContItem assignment
+  // hands the splice to the existing lifecycle (loadPosition / tab switch).
+  const histItem = {
+    type: 'practice',
+    playerColor: snap.playerColor || 'white',
+    fenBefore: snap.baseFen,
+    gameId: '_practice_hist',
+    movePly: 0, moveNumber: 1, wpDrop: 0, cpLoss: 0,
+    bestMove: null, bestMoveSan: null, bestCp: 0,
+    game: { id: '_practice_hist', opening: { name: snap.openingName || 'Game Review' }, speed: 'practice', _source: 'history', rated: false, players: {} },
+  };
+  filteredMistakes.push(histItem);
+  currentMistakeIdx = filteredMistakes.length - 1;
+  practiceContItem = histItem;
+
+  // ── Board ──
+  const endFen = moves[moves.length - 1].fen;
+  if (!boardObj) { document.getElementById('board').offsetHeight; initBoard(); }
+  boardObj.orientation(snap.orientation || snap.playerColor || 'white');
+  boardObj.position(endFen, false);
+  gameEngine = new Chess(endFen);
+  clearBoardOverlays();
+  clearLastMoveHighlight();
+  showCheckHighlight(gameEngine); // after orientation() — it rebuilds square DOM
+
+  // ── Review state ──
+  // _historical gates startTacticScan (snapshots carry no _tacticCandidates —
+  // a "scanned clean!" banner on an old review would be misleading) and marks
+  // the contLine for any future context checks.
+  contLine = { baseFen: snap.baseFen, moves, currentIdx: moves.length - 1, _historical: true };
+  contLineBrowsing = false;
+  srsRecorded = true; // defensive: nothing in a historical review may grade
+  document.getElementById('contLineContainer').innerHTML = '';
+
+  // Mobile: board-first layout while reviewing; close the drawer the tap
+  // came from (matches selectGame / loadPosition item-tap behavior).
+  if (document.body.classList.contains('mobile-browsing')) {
+    document.body.classList.remove('mobile-browsing');
+    document.body.classList.add('mobile-training');
+  }
+  closeDrawer();
+
+  await startContLineReview();
 }
 
 // ─── Game Cache (localStorage L1 + Gist L2) ───
@@ -12341,6 +12521,9 @@ function renderReviewList() {
       <div style="font-size:24px;margin-bottom:8px;">✓</div>
       All caught up! No positions due for review.
     </div>`;
+    // Game Reviews history still renders below the empty state — an empty
+    // queue is exactly when browsing past reviews is most useful.
+    appendReviewHistorySection(list);
     return;
   }
 
@@ -12452,6 +12635,7 @@ function renderReviewList() {
     btn.onclick = () => { reviewListDisplayLimit += 50; renderReviewList(); };
     list.appendChild(btn);
   }
+  appendReviewHistorySection(list);
 }
 
 // ─── Board init ───
@@ -18257,7 +18441,11 @@ async function startContLineReview() {
   // Kick off background tactic scan (non-blocking). The banner renders
   // progress above the feedback area and survives navigation within review.
   // A second call while a scan is active is a no-op (idempotent guard).
-  startTacticScan();
+  // Skipped for historical restores: snapshots don't carry _tacticCandidates
+  // (they're populated by Phase-1 detection during live silent eval), so the
+  // scan would only show a misleading "played clean" banner for a game whose
+  // candidates were already offered — and possibly saved — at the time.
+  if (!contLine || !contLine._historical) startTacticScan();
 }
 
 // Finding #7: renders the Game Review summary card (sparkline, accuracy,
