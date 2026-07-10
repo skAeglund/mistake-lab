@@ -1715,7 +1715,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">TODO variation win-rate colors. Each difficulty chip on a repertoire checklist variation is now background-colored by its win-rate over the latest 5 attempts, via winRateColor(rate): a piecewise-linear HSL hue lerp from red at 0% through orange at 50% and yellow-green at 75% to green at 100% (fixed S/L so the white wins/n text stays legible). Never-attempted chips keep the neutral locked/unlocked look. Builds on #21 (todoPresetStats); completion checkmark and unlock logic unchanged.</div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Start engine line by making a move, closes #22. In the good-move state (Play Continuation / Show engine line options showing, opponent to move) the user can now pick up an OPPONENT piece — drag or tap — and play a reply: the deferred engine line opens pinned at the user's move and the chosen reply is routed into handleEngineLineBranch, so the engine's top reply stays as the main line and the user's reply becomes an SF-analyzed variation (identical to manual branching). Guarded by deferredLineBranchReady(): full mode-flag excludes, settings-panel-open exclude, and gameEngine.fen()===postFen drift check (auto-disables after Show engine's best). Illegal drops snap back leaving the options row and payload intact; gameEngine is never touched. buildEngineLine gains an opts param (startIdx/animate) with the 250ms deferred re-highlight now guarded on currentIdx.</div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -12488,6 +12488,25 @@ function onBoardClick(e) {
     return;
   }
 
+  // Issue #22: deferred engine line pending — tap-to-move for the OPPONENT's
+  // pieces starts the engine line branched at the tapped reply (mirrors the
+  // onDragStart / onDrop hook; `turn` here IS the opponent's color, so the
+  // piece.color === turn checks select only opponent pieces).
+  if (deferredLineBranchReady()) {
+    if (selectedSquare) {
+      if (sq === selectedSquare) { deselectionPending = true; return; }
+      if (piece && piece.color === turn) { clearSelection(); selectSquare(sq); return; }
+      e.stopPropagation(); e.preventDefault();
+      const fromSq = selectedSquare;
+      clearSelection();
+      clearArrows();
+      startEngineLineWithOpponentMove(fromSq, sq);
+      return;
+    }
+    if (piece && piece.color === turn) selectSquare(sq);
+    return;
+  }
+
   if (selectedSquare) {
     if (sq === selectedSquare) {
       deselectionPending = true; // mouseup will deselect; drag keeps highlights
@@ -13195,6 +13214,17 @@ function onDragStart(source, piece) {
   if (!m) return false;
   if (gameEngine.game_over()) return false;
 
+  // Issue #22: continuation options showing (deferred engine line pending) —
+  // allow picking up the OPPONENT's pieces. Dropping one starts the engine
+  // line branched at that opponent reply (see onDrop /
+  // startEngineLineWithOpponentMove). The user's own pieces fall through to
+  // the normal gating below and stay blocked (it isn't their turn).
+  if (deferredLineBranchReady() && piece.charAt(0) === gameEngine.turn()) {
+    if (selectedSquare !== source) clearSelection();
+    selectSquare(source);
+    return true;
+  }
+
   // Premove: allow dragging user's pieces when it's the opponent's turn during continuation
   const userPrefix = m.playerColor === 'white' ? 'w' : 'b';
   if (continuationMode && isOpponentTurn() && piece.charAt(0) === userPrefix) {
@@ -13261,6 +13291,18 @@ function onDrop(source, target) {
     clearSelection();
     setPremove(source, target, 'q'); // always assume queen promotion for premoves
     return 'snapback';
+  }
+
+  // Issue #22: opponent-piece drop while the continuation options are showing —
+  // start the deferred engine line and branch it at this opponent reply. MUST
+  // intercept BEFORE gameEngine.move: the drill engine has to stay untouched
+  // at the post-move puzzle position (exitEngineLine restores the board from
+  // it), and letting the move fall through would route the opponent's move
+  // into evaluateMove as if the user had played it.
+  if (deferredLineBranchReady()) {
+    clearSelection();
+    if (!startEngineLineWithOpponentMove(source, target)) return 'snapback';
+    return undefined; // legal — piece already on target; the branch handler syncs the board
   }
 
   const move = gameEngine.move({
@@ -15254,7 +15296,7 @@ function continuationEndActionsHtml(wasSilent) {
 }
 
 // ─── Engine Line Browser ───
-function buildEngineLine(baseFen, userMove, contUci, cpWhite) {
+function buildEngineLine(baseFen, userMove, contUci, cpWhite, opts = {}) {
   // Build a sequence: user's move + engine continuation
   const chess = new Chess(baseFen);
   const moves = [];
@@ -15290,14 +15332,20 @@ function buildEngineLine(baseFen, userMove, contUci, cpWhite) {
 
   if (moves.length <= 1) return; // no continuation to show
 
-  // Auto-advance to opponent's first reply so user sees the refutation immediately
-  const startIdx = moves.length >= 2 ? 1 : 0;
+  // Auto-advance to opponent's first reply so user sees the refutation
+  // immediately — unless the caller pins a start index (issue #22:
+  // startEngineLineWithOpponentMove opens the line at idx 0, where the board
+  // already sits, so no animation and no deferred re-highlight are wanted).
+  const startIdx = opts.startIdx != null ? opts.startIdx : (moves.length >= 2 ? 1 : 0);
   engineLine = { baseFen, moves, currentIdx: -1, alternatives: [], activeAlt: -1, extension: null, cpWhite: cpWhite ?? null };
-  goToLineMove(startIdx);
-  // Re-apply highlight after board animation settles (goToLineMove applies it immediately but animation can wipe it)
-  if (moves[startIdx]?.uci) {
+  goToLineMove(startIdx, opts.animate !== false);
+  // Re-apply highlight after board animation settles (goToLineMove applies it
+  // immediately but animation can wipe it). Guarded on currentIdx so that
+  // navigation — or an issue-#22 branch — within the 250ms window doesn't
+  // stamp a stale highlight onto a different position.
+  if (opts.animate !== false && moves[startIdx]?.uci) {
     const u = moves[startIdx].uci;
-    setTimeout(() => showLastMoveHighlight(u.substring(0, 2), u.substring(2, 4)), 250);
+    setTimeout(() => { if (engineLine && engineLine.currentIdx === startIdx) showLastMoveHighlight(u.substring(0, 2), u.substring(2, 4)); }, 250);
   }
   prepareEngineLineExtension();
   updateLineNavBar();
@@ -17301,8 +17349,12 @@ function detectPracticeSourceLabel() {
 // ─── Continuation Practice ───
 function showContinuationOptions(m, move, contUci) {
   continuationContUci = contUci;
-  // Store data for deferred engine line display
-  window._deferredEngineLine = { baseFen: currentSolveFen, move, contUci, cpWhite: afterMoveCpWhite };
+  // Store data for deferred engine line display.
+  // Issue #22: postFen (the position now on the board, opponent to move) lets
+  // deferredLineBranchReady verify gameEngine hasn't drifted — e.g.
+  // onRevealBestMove resets gameEngine to the pre-move FEN — before enabling
+  // the "move a piece for the opponent" affordance.
+  window._deferredEngineLine = { baseFen: currentSolveFen, move, contUci, cpWhite: afterMoveCpWhite, postFen: gameEngine.fen() };
 
   const container = document.getElementById('feedbackContainer');
   // #5: remove any existing continuation-options row before inserting a new one.
@@ -17315,11 +17367,12 @@ function showContinuationOptions(m, move, contUci) {
   container.querySelectorAll('#continuationOptions').forEach(el => el.remove());
   const div = document.createElement('div');
   div.id = 'continuationOptions';
-  div.style.cssText = 'display:flex;gap:8px;animation:fadeSlideIn 0.3s ease;';
+  div.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;animation:fadeSlideIn 0.3s ease;';
   div.innerHTML = `
     <button class="btn btn-primary btn-sm" onclick="showContinuationSettings()" style="font-size:12px;">▶ Play Continuation</button>
     <button class="btn btn-ghost btn-sm" onclick="showContinuationSettings(true)" style="font-size:10px;padding:4px 6px;" title="Continuation settings">⚙</button>
     <button class="btn btn-ghost btn-sm" onclick="showDeferredEngineLine()" style="font-size:12px;">Show engine line</button>
+    <span style="flex-basis:100%;font-size:10px;color:var(--text-muted);">…or move a piece for the opponent to explore a different reply</span>
   `;
   // Insert after the first feedback box
   const firstFeedback = container.querySelector('.feedback-box');
@@ -17344,6 +17397,77 @@ function showDeferredEngineLine() {
     // re-setting first).
     window._deferredEngineLine = null;
   }
+}
+
+/** Issue #22: true when the "continuation options" state is live — a deferred
+ *  engine line is stashed, no other mode owns the board, and gameEngine still
+ *  sits exactly at the post-good-move position (opponent to move). In this
+ *  state the user may pick up an OPPONENT piece; dropping it starts the
+ *  deferred engine line branched at that reply. onRevealBestMove resets
+ *  gameEngine to the pre-move FEN, so the postFen equality check disables the
+ *  affordance there automatically (the user is looking at the pre-move board
+ *  with the best-move arrow — it's THEIR side to move again). */
+function deferredLineBranchReady() {
+  const d = window._deferredEngineLine;
+  return !!(d && d.postFen && gameEngine && boardObj &&
+    !continuationMode && !tacticMode && !repertoireMode && !analysisMode &&
+    !advantageMode && !openingFilterMode && !detectedTacticSolveMode && !repTodoActive &&
+    !browsingLine && !engineLine && !contLineBrowsing && !contLineReviewMode &&
+    !repertoireDrillMode && !repContActive && !repLeadUpActive && !noteJumpedAway &&
+    // Settings panel open (⚙ / Play Continuation with no saved settings): the
+    // payload must stay intact for applyContSettingsAndStart /
+    // cancelContSettings — consuming it via a branch here would leave
+    // startContinuationMode with data=null (no contLine seed, no gameEngine
+    // replay) while browsingLine is true.
+    !document.getElementById('contSettingsPanel') &&
+    !gameEngine.game_over() && gameEngine.fen() === d.postFen);
+}
+
+/** Issue #22: start the deferred engine line by playing a move FOR THE
+ *  OPPONENT. Builds the stashed line pinned at idx 0 (the post-user-move
+ *  position already on the board) and routes the opponent move into
+ *  handleEngineLineBranch — the engine's own reply stays as the main line and
+ *  the user's chosen reply becomes the analyzed alternative, exactly as if
+ *  they had pressed "Show engine line", stepped back to their move, and
+ *  branched manually. Returns false (leaving the options row and the deferred
+ *  payload untouched) when the move is illegal. gameEngine is never touched:
+ *  engine-line browsing runs on its own Chess instances and exitEngineLine
+ *  restores the board FROM gameEngine, which must stay at the post-move
+ *  puzzle position. */
+function startEngineLineWithOpponentMove(source, target) {
+  const data = window._deferredEngineLine;
+  if (!data || !data.postFen) return false;
+  // Validate against the post-user-move position FIRST — an illegal drop/tap
+  // must not consume the payload or tear down the options row.
+  const probe = new Chess(data.postFen);
+  if (!probe.move({ from: source, to: target, promotion: 'q' })) return false;
+
+  const optsRow = document.getElementById('continuationOptions');
+  if (optsRow) optsRow.remove();
+
+  buildEngineLine(data.baseFen, data.move, data.contUci, data.cpWhite, { startIdx: 0, animate: false });
+  if (!engineLine) {
+    // No engine continuation was stashed (empty / unparseable contUci —
+    // buildEngineLine bails at moves.length <= 1). Build the minimal one-move
+    // line so branching still works.
+    engineLine = {
+      baseFen: data.baseFen,
+      moves: [{
+        san: data.move.san,
+        uci: data.move.from + data.move.to + (data.move.promotion || ''),
+        fen: data.postFen,
+        isUser: true,
+      }],
+      currentIdx: -1, alternatives: [], activeAlt: -1, extension: null,
+      cpWhite: data.cpWhite ?? null,
+    };
+    goToLineMove(0, false);
+    updateLineNavBar();
+  }
+  // EL15: consume the payload — same discipline as showDeferredEngineLine.
+  window._deferredEngineLine = null;
+  handleEngineLineBranch(source, target); // async; fire-and-forget like the other call sites
+  return true;
 }
 
 function startAdvantageContinuation(m) {
