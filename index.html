@@ -1778,7 +1778,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Lichess Database in Analysis Mode. New 📊 toggle next to 🧠 looks the current position up in the Lichess opening explorer (fetchExplorerMoves with independent rating/speed settings, force:true) and annotates the PV list in blue, parallel to the violet Maia set: frequency badges on matching PV rows, plus a clickable blue extra row (and hover arrow) when the database's most-played move isn't among the 3 engine PVs. Sample-size thresholds: ≥25 games shows database numbers only (Maia annotations suppressed at render time — real humans beat a model of humans), 5–24 shows both, below 5 a muted 'only N games' status. Rating + time-control checkboxes live in an expandable ⚙ settings row, persisted with the toggle in localStorage 'mistakelab_analysis_db' (independent of continuation practice settings). Lookups are debounced 300ms (network API vs rapid arrow-key navigation), memoized by fenPositionKey|ratings|speeds (300 entries), and stale-async guarded by a session token. Explorer UCIs are normalized to chess.js convention via SAN (castling e1h1→e1g1) so O-O badges match PV rows and the extra row is playable.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Analysis DB: top-3 extra rows, game count, Maia/DB layout order. The database extra-row logic now shows up to the top 3 most-played moves (each at ≥15% share, ANALYSIS_DB_EXTRA_MIN, and not already among the 3 engine PVs) instead of only the single most-played move; the overall #1 keeps the stronger badge tint. A footer row always reports the total sample size when the database is active ('N games in database', locale-formatted), sharing the slot with the sub-threshold 'Only N games' message. Layout convention when both sources are shown: on PV rows the 📊 badge sits to the RIGHT of the 🧠 badge, and extra database move rows render ABOVE Maia's extra row.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -8090,6 +8090,7 @@ const ANALYSIS_DB_LS_KEY = 'mistakelab_analysis_db';
 const ANALYSIS_DB_MIN_GAMES = 5;      // below this: no DB visualization
 const ANALYSIS_DB_HIDE_MAIA_MIN = 25; // at/above this: DB numbers only, Maia hidden
 const ANALYSIS_DB_CACHE_MAX = 300;    // memoized lookups (fenPositionKey|ratings|speeds)
+const ANALYSIS_DB_EXTRA_MIN = 15;     // % — extra rows for top-3 DB moves at/above this share
 const ANALYSIS_DB_DEBOUNCE_MS = 300;  // network API — don't hammer during rapid nav
 let analysisDbOn = false;
 let analysisDbRatings = [1600, 1800, 2000];
@@ -9331,8 +9332,25 @@ function renderAnalysisPvs() {
 
     html += `<div class="analysis-pv-row${bestClass}" onmouseenter="analysisPvHover(${i})" onmouseleave="analysisPvLeave()">
       <span class="analysis-pv-eval ${evalClass}">${evalStr}</span>
-      <span class="analysis-pv-moves">${sansHtml}</span>${dbBadge}${maiaBadge}
+      <span class="analysis-pv-moves">${sansHtml}</span>${maiaBadge}${dbBadge}
     </div>`;
+  }
+
+  // Database's most-played moves as extra rows: the top 3 by game count,
+  // each at ≥ ANALYSIS_DB_EXTRA_MIN% share and not already among the engine's
+  // top-3 first moves. Rendered ABOVE Maia's row (layout convention: database
+  // lines above Maia lines).
+  if (dbActive) {
+    const dbExtras = analysisDbResult.moves.slice(0, 3)
+      .filter(dm => dm.uci && dm.prob >= ANALYSIS_DB_EXTRA_MIN && !analysisPvs.some(pv => pv.move === dm.uci));
+    for (const dm of dbExtras) {
+      const isTop = dbTop && dbTop.uci === dm.uci;
+      html += `<div class="analysis-pv-row db-row" onclick="analysisPlayMaiaMove('${dm.uci}')" onmouseenter="analysisDbHover('${dm.uci}')" onmouseleave="analysisPvLeave()" title="Played in ${Math.round(dm.prob)}% of ${analysisDbResult.totalGames} database games — click to play it">
+      <span class="analysis-pv-eval db">📊</span>
+      <span class="analysis-pv-moves"><span class="pv-move">${escHtml(dm.san)}</span></span>
+      <span class="db-prob${isTop ? ' top' : ''}">${Math.round(dm.prob)}%</span>
+    </div>`;
+    }
   }
 
   // Maia's top prediction as an extra row when it isn't among the engine's
@@ -9347,18 +9365,15 @@ function renderAnalysisPvs() {
     html += `<div class="analysis-pv-row" style="color:var(--text-muted);font-size:11px;cursor:default;">🧠 ${analysisMaiaFailed ? 'Maia unavailable' : (maiaReady ? 'Maia thinking…' : 'Preparing Maia model…')}</div>`;
   }
 
-  // Database's most-played move as an extra row when it isn't among the
-  // engine's top-3 first moves; status rows for the small-sample / pending /
-  // no-token / failed states.
-  if (dbTop && dbTop.uci && !analysisPvs.some(pv => pv.move === dbTop.uci)) {
-    html += `<div class="analysis-pv-row db-row" onclick="analysisPlayMaiaMove('${dbTop.uci}')" onmouseenter="analysisDbHover('${dbTop.uci}')" onmouseleave="analysisPvLeave()" title="Most played move in ${analysisDbResult.totalGames} database games — click to play it">
-      <span class="analysis-pv-eval db">📊</span>
-      <span class="analysis-pv-moves"><span class="pv-move">${escHtml(dbTop.san)}</span></span>
-      <span class="db-prob top">${dbTop.prob < 1 ? dbTop.prob.toFixed(1) : Math.round(dbTop.prob)}%</span>
-    </div>`;
-  } else if (analysisDbOn && dbHasResult && !dbActive) {
+  // Database footer: total sample size when active, "only N games" for
+  // sub-threshold samples, and the no-token / empty-settings / failed /
+  // pending states.
+  if (analysisDbOn && dbHasResult) {
     const n = analysisDbResult.totalGames;
-    html += `<div class="analysis-pv-row" style="color:var(--text-muted);font-size:11px;cursor:default;">📊 Only ${n} game${n === 1 ? '' : 's'} in database</div>`;
+    const label = dbActive
+      ? `${n.toLocaleString()} games in database`
+      : `Only ${n} game${n === 1 ? '' : 's'} in database`;
+    html += `<div class="analysis-pv-row" style="color:var(--text-muted);font-size:11px;cursor:default;">📊 ${label}</div>`;
   } else if (analysisDbOn && !dbHasResult) {
     const dbStatus = !lichessToken ? 'Database requires Lichess login (Repertoire tab)'
       : (analysisDbRatings.length === 0 || analysisDbSpeeds.length === 0) ? 'Select rating & speed in ⚙'
