@@ -1727,7 +1727,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Game Reviews list moved from the Review tab to the Games tab, rendered at the bottom of renderGameList below the fetched game cards. New .review-hist-card styling makes the internal practice reviews visually distinct from Lichess / chess.com games: purple book identity — 3px purple left bar, faint purple tint and border, purple section header with a top divider — versus the neutral .game-card look. Show-all toggles and the loadReviewHistory completion hook now re-render the Games list (when the Games tab is active, i.e. neither reviewMode nor repertoireMode); renderReviewList is restored to its pre-history form with the plain empty-queue early return. Since both tabs share the #gameList container, tab switches naturally swap the section in and out.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Merged games timeline + Correspondence speed chip. Game reviews now interleave with fetched Lichess / chess.com games in ONE date-sorted list (renderGameList merges gameMap entries with reviewHistory; game.createdAt coerced via new Date().getTime() to handle ISO strings, snapshot.ts already epoch; missing dates sink). Review rows reuse the game-card layout classes inside the purple .review-hist-card container. Reviews occupy a NEW 'correspondence' speed bucket: ✉️ chip added after Classical, normalizeSpeed no longer folds daily/correspondence into classical (real correspondence games share the chip — semantically what it means), speed "all selected" size check bumped 4→5, default filter set gains the value, and loadSavedFilters migrates pre-chip persisted state (all 4 legacy speeds selected → add correspondence, so "show everything" stays everything; a deliberate subset stays a subset). reviewPassesGameFilters: correspondence speed + color apply; platform/rated never hide reviews; with an opening filter active a review matches when launched FROM the filtered position (baseFen key equality). Old bottom section, header, show-all toggle and formatReviewHistDate removed; show-more paginates the merged list.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1784,6 +1784,7 @@
         <button class="filter-chip active" data-filter="speed" data-value="blitz" onclick="toggleFilter(this)" title="Blitz"><img src="https://www.chess.com/bundles/web/images/color-icons/time-blitz.svg" width="16" height="16" alt="Blitz" style="opacity:0.85"></button>
         <button class="filter-chip active" data-filter="speed" data-value="rapid" onclick="toggleFilter(this)" title="Rapid"><img src="https://www.chess.com/bundles/web/images/color-icons/time-rapid.svg" width="16" height="16" alt="Rapid" style="opacity:0.85"></button>
         <button class="filter-chip active" data-filter="speed" data-value="classical" onclick="toggleFilter(this)" title="Classical"><img src="https://www.chess.com/bundles/web/images/color-icons/time-daily.svg" width="16" height="16" alt="Classical" style="opacity:0.85"></button>
+        <button class="filter-chip active" data-filter="speed" data-value="correspondence" onclick="toggleFilter(this)" title="Correspondence (incl. MistakeLab game reviews)"><span style="font-size:14px;opacity:0.85">✉️</span></button>
         </span>
         <button class="filter-chip" id="btnAdvancedFilters" onclick="toggleAdvancedFilters()" title="More filters" style="padding:4px 6px;">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="8" cy="6" r="2" fill="currentColor"/><circle cx="16" cy="12" r="2" fill="currentColor"/><circle cx="10" cy="18" r="2" fill="currentColor"/></svg>
@@ -2299,7 +2300,7 @@ const ICON_MISTAKE = '<svg width="14" height="14" viewBox="0 0 40 40" style="ver
 const ICON_TACTIC = '<svg width="14" height="14" viewBox="0 0 40 40" style="vertical-align:-2px"><circle cx="20" cy="20" r="18" fill="#5b9bd5"/><text x="20" y="28" text-anchor="middle" fill="#fff" font-size="26" font-weight="700" font-family="sans-serif">!</text></svg>';
 const ICON_ADVANTAGE = '<svg width="14" height="14" viewBox="0 0 40 40" style="vertical-align:-2px"><circle cx="20" cy="20" r="18" fill="#4caf50"/><text x="20" y="28" text-anchor="middle" fill="#fff" font-size="22" font-weight="700" font-family="sans-serif">♛</text></svg>';
 
-const filters = { color: new Set(['white','black']), severity: new Set(['mistake','blunder']), platform: new Set(['lichess','chesscom']), type: new Set(['mistake','tactic','advantage']), speed: new Set(['bullet','blitz','rapid','classical']), rated: new Set(['rated','casual']) };
+const filters = { color: new Set(['white','black']), severity: new Set(['mistake','blunder']), platform: new Set(['lichess','chesscom']), type: new Set(['mistake','tactic','advantage']), speed: new Set(['bullet','blitz','rapid','classical','correspondence']), rated: new Set(['rated','casual']) };
 let hideTimeTrouble = false;
 
 function saveFilters() {
@@ -2320,6 +2321,13 @@ function loadSavedFilters() {
       }
     }
     if (typeof obj.hideTimeTrouble === 'boolean') hideTimeTrouble = obj.hideTimeTrouble;
+    // Migration: filters saved before the Correspondence chip existed have at
+    // most the 4 legacy speeds. If all 4 were selected the user meant "show
+    // everything" — extend that to the new bucket. A deliberate subset stays
+    // a subset (correspondence off until toggled).
+    if (['bullet','blitz','rapid','classical'].every(s => filters.speed.has(s))) {
+      filters.speed.add('correspondence');
+    }
   } catch(e) {}
 }
 loadSavedFilters();
@@ -4109,66 +4117,45 @@ const REVIEW_HIST_OUTCOME_META = {
   ended:   { label: 'Ended',   color: 'var(--text-muted)' },
 };
 
-function formatReviewHistDate(ts) {
-  const d = new Date(ts);
-  const now = new Date();
-  const opts = { month: 'short', day: 'numeric' };
-  if (d.getFullYear() !== now.getFullYear()) opts.year = 'numeric';
-  return d.toLocaleDateString(undefined, opts) + ' ' +
-    d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+// Game reviews live in the merged Games-tab list (sorted by date with the
+// fetched Lichess / chess.com games). Filter policy: they occupy the
+// 'correspondence' speed bucket (untimed practice) and have a color; the
+// platform / rated chips only partition fetched games and never hide reviews.
+// With an opening filter active, a review matches when it was launched FROM
+// the filtered position (baseFen); pass-through positions aren't indexed (v1).
+function reviewPassesGameFilters(s) {
+  if (filters.speed.size < 5 && !filters.speed.has('correspondence')) return false;
+  if (filters.color.size < 2 && !filters.color.has(s.playerColor)) return false;
+  if (openingFilterFen && fenPositionKey(s.baseFen) !== openingFilterFen) return false;
+  return true;
 }
 
-// Renders the "Game Reviews" section at the bottom of the GAMES tab (below
-// the Lichess / chess.com game cards). Called from renderGameList. The
-// .review-hist-card styling (purple left bar + tint) keeps these visually
-// distinct from real game cards — they're internal MistakeLab practice
-// reviews, not fetched games.
-function appendReviewHistorySection(list) {
-  if (!reviewHistory || reviewHistory.length === 0) return;
-  const header = document.createElement('div');
-  header.style.cssText = 'padding:10px 12px 4px;font-size:11px;font-weight:600;color:#8b7dd8;text-transform:uppercase;letter-spacing:0.5px;border-top:1px solid var(--border);margin-top:8px;';
-  header.textContent = `📋 Game Reviews (${reviewHistory.length})`;
-  list.appendChild(header);
-
-  const limit = window._reviewHistShowAll ? reviewHistory.length : 15;
-  const visible = reviewHistory.slice(0, limit);
-  for (const s of visible) {
-    const src = REVIEW_HIST_SOURCE_META[s.source] || REVIEW_HIST_SOURCE_META.cont;
-    const oc = REVIEW_HIST_OUTCOME_META[s.outcome] || REVIEW_HIST_OUTCOME_META.ended;
-    const item = document.createElement('div');
-    item.className = 'review-hist-card';
-    item.onclick = () => openHistoricalReview(s.id);
-    const accHtml = (s.accuracy != null)
-      ? `<span style="font-weight:600;">${s.accuracy}%</span>` : '';
-    const keyHtml = s.keyMoveCount > 0
-      ? `<span style="color:var(--text-muted);">${s.keyMoveCount} key move${s.keyMoveCount > 1 ? 's' : ''}</span>`
-      : `<span style="color:var(--text-muted);">clean</span>`;
-    item.innerHTML = `
-      <div class="review-item-top">
-        <span>${src.icon} <span style="color:${oc.color};font-weight:600;">${oc.label}</span> · ${accHtml}</span>
-        <span style="font-size:11px;color:var(--text-muted);">${formatReviewHistDate(s.ts)}</span>
-      </div>
-      <div class="review-item-opening">${escHtml(s.openingName || src.label)}</div>
-      <div class="review-srs-info" style="display:flex;gap:8px;font-size:11px;">
-        ${keyHtml}
-        <span style="color:var(--text-muted);">${s.userMoveCount} moves</span>
-      </div>
-    `;
-    list.appendChild(item);
-  }
-  if (reviewHistory.length > limit) {
-    const btn = document.createElement('div');
-    btn.className = 'show-more-btn';
-    btn.textContent = `Show all ${reviewHistory.length} reviews`;
-    btn.onclick = () => { window._reviewHistShowAll = true; renderGameList(); };
-    list.appendChild(btn);
-  } else if (window._reviewHistShowAll && reviewHistory.length > 15) {
-    const btn = document.createElement('div');
-    btn.className = 'show-more-btn';
-    btn.textContent = 'Show fewer';
-    btn.onclick = () => { window._reviewHistShowAll = false; renderGameList(); };
-    list.appendChild(btn);
-  }
+// Builds one review-history card for the merged Games list. Reuses the
+// game-card layout classes (top row / opening / meta) so rows align with real
+// game cards; the .review-hist-card container (purple left bar + tint) keeps
+// them visually distinct from fetched games.
+function buildReviewHistCard(s) {
+  const src = REVIEW_HIST_SOURCE_META[s.source] || REVIEW_HIST_SOURCE_META.cont;
+  const oc = REVIEW_HIST_OUTCOME_META[s.outcome] || REVIEW_HIST_OUTCOME_META.ended;
+  const item = document.createElement('div');
+  item.className = 'review-hist-card';
+  item.onclick = () => openHistoricalReview(s.id);
+  const accHtml = (s.accuracy != null) ? ` · <span style="font-weight:600;">${s.accuracy}%</span>` : '';
+  const keyHtml = s.keyMoveCount > 0 ? `${s.keyMoveCount} key move${s.keyMoveCount > 1 ? 's' : ''}` : 'clean';
+  const date = new Date(s.ts).toLocaleDateString();
+  item.innerHTML = `
+    <div class="game-card-top">
+      <div class="game-opening">📋 ${escHtml(s.openingName || src.label)}</div>
+      <span style="font-size:11px;color:${oc.color};font-weight:600;white-space:nowrap;">${src.icon} ${oc.label}${accHtml}</span>
+    </div>
+    <div class="game-meta">
+      <span class="game-color-dot ${s.playerColor || 'white'}"></span>
+      <span>${date}</span>
+      <span>·</span>
+      <span>${speedIcon('correspondence')}${keyHtml} · ${s.userMoveCount} moves</span>
+    </div>
+  `;
+  return item;
 }
 
 // Reopens a stored Game Review: rebuilds contLine (per-move FENs replayed
@@ -12144,7 +12131,10 @@ function escapeHtml(str) {
 // icon, confirming daily+classical were intended as one bucket.
 function normalizeSpeed(speed) {
   if (!speed) return speed;
-  if (speed === 'daily' || speed === 'correspondence') return 'classical';
+  // 'daily' is chess.com's name for correspondence. Previously both folded
+  // into 'classical'; with a dedicated Correspondence chip they keep their
+  // own bucket — shared with MistakeLab game reviews (untimed practice).
+  if (speed === 'daily') return 'correspondence';
   if (speed === 'ultraBullet') return 'bullet';
   return speed;
 }
@@ -12165,7 +12155,7 @@ function gamePassesGameFilters(game) {
     const color = detectPlayerColor(game);
     if (!filters.color.has(color)) return false;
   }
-  if (filters.speed.size < 4) {
+  if (filters.speed.size < 5) {
     const speed = normalizeSpeed(game.speed || '');
     if (!filters.speed.has(speed)) return false;
   }
@@ -12379,6 +12369,7 @@ const SPEED_ICON_URLS = {
   classical: 'https://www.chess.com/bundles/web/images/color-icons/time-daily.svg',
 };
 function speedIcon(speed) {
+  if (speed === 'correspondence' || speed === 'daily') return '<span style="font-size:11px;margin-right:4px;">✉️</span>';
   const url = SPEED_ICON_URLS[speed];
   return url ? `<img src="${url}" width="12" height="12" alt="" style="vertical-align:-2px;margin-right:4px;">` : '';
 }
@@ -12405,10 +12396,26 @@ function renderGameList() {
   }
 
   const done = getCompletedSet();
-  const allEntries = [...gameMap];
+  // Merge fetched games with MistakeLab game reviews into one timeline,
+  // sorted by date played (game.createdAt vs snapshot.ts, both ms epoch;
+  // missing dates sink to the bottom). Reviews respect the shared filter
+  // policy via reviewPassesGameFilters (correspondence speed bucket + color).
+  const allEntries = [...gameMap].map(([gid, entry]) =>
+    ({ kind: 'game', ts: new Date(entry.game.createdAt || 0).getTime() || 0, gid, entry }));
+  for (const s of reviewHistory) {
+    if (!reviewPassesGameFilters(s)) continue;
+    allEntries.push({ kind: 'review', ts: s.ts || 0, snap: s });
+  }
+  allEntries.sort((a, b) => b.ts - a.ts);
   const visibleEntries = allEntries.slice(0, gameListDisplayLimit);
 
-  for (const [gid, { game, mistakes, color }] of visibleEntries) {
+  for (const row of visibleEntries) {
+    if (row.kind === 'review') {
+      list.appendChild(buildReviewHistCard(row.snap));
+      continue;
+    }
+    const gid = row.gid;
+    const { game, mistakes, color } = row.entry;
     const completedCount = mistakes.filter(m => done.has(posId(m))).length;
     const allDone = mistakes.length > 0 && completedCount === mistakes.length;
 
@@ -12476,9 +12483,6 @@ function renderGameList() {
     btn.onclick = () => { gameListDisplayLimit += 50; renderGameList(); };
     list.appendChild(btn);
   }
-  // Internal Game Reviews history at the bottom (purple .review-hist-card
-  // styling — visually distinct from the Lichess / chess.com cards above).
-  appendReviewHistorySection(list);
 }
 
 // ─── Review mode ───
