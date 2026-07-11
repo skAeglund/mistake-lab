@@ -1727,7 +1727,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Merged games timeline + Correspondence speed chip. Game reviews now interleave with fetched Lichess / chess.com games in ONE date-sorted list (renderGameList merges gameMap entries with reviewHistory; game.createdAt coerced via new Date().getTime() to handle ISO strings, snapshot.ts already epoch; missing dates sink). Review rows reuse the game-card layout classes inside the purple .review-hist-card container. Reviews occupy a NEW 'correspondence' speed bucket: ✉️ chip added after Classical, normalizeSpeed no longer folds daily/correspondence into classical (real correspondence games share the chip — semantically what it means), speed "all selected" size check bumped 4→5, default filter set gains the value, and loadSavedFilters migrates pre-chip persisted state (all 4 legacy speeds selected → add correspondence, so "show everything" stays everything; a deliberate subset stays a subset). reviewPassesGameFilters: correspondence speed + color apply; platform/rated never hide reviews; with an opening filter active a review matches when launched FROM the filtered position (baseFen key equality). Old bottom section, header, show-all toggle and formatReviewHistDate removed; show-more paginates the merged list.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix: "Select a game to begin" overlay stuck over the board after opening a game review from the fresh empty state. openHistoricalReview never hid #emptyMsg — every other position entry point (loadPosition, filter practice, repertoire drills) does. Now hidden in the board-setup step of the restore.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -4229,6 +4229,11 @@ async function openHistoricalReview(snapId) {
   // ── Board ──
   const endFen = moves[moves.length - 1].fen;
   if (!boardObj) { document.getElementById('board').offsetHeight; initBoard(); }
+  // Hide the "Select a game to begin" placeholder — every other position
+  // entry point (loadPosition, filter practice, repertoire drills) does this;
+  // entering a review straight from the fresh empty state left it stuck on
+  // top of the board.
+  document.getElementById('emptyMsg').classList.add('hidden');
   boardObj.orientation(snap.orientation || snap.playerColor || 'white');
   boardObj.position(endFen, false);
   gameEngine = new Chess(endFen);
