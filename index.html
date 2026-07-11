@@ -1727,7 +1727,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Start view setting + decouple color filter from opening explorer. New settings dropdown (Games/Review/Repertoire/Opening explorer, default Games) selects which view opens at startup via enterStartView(). The opening filter no longer forces the color filter at the start position — it syncs to board perspective only once you navigate away, and snaps back to your persisted chip selection when the filter deactivates (back to start, cleared, or exit-with-clear). Fresh explorer entry starts flipped when your color filter is black-only.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Convert mistake to sequence via analysis lines. New 💾 Sequence button in analysis mode (visible when entered from a plain mistake): the lines built in the analysis tree are saved as a drillable practice tactic with _isSequence — first-child chain = main line, other root→leaf paths = alternative lines. Relaxed rules (no TACTIC_MIN_* gates); root must be player-to-move. Save dialog validates every user move against cached MultiPV: warns when the move isn't PV1 or when the PV1−PV2 gap is under 500cp (skipped when both PVs ≥ +1000); unverified positions listed, warnings non-blocking (Save anyway). Saving invalidates the original mistake and lands on the new sequence. Alt-line guards relaxed to length===0 across loader + unsolved counters; user-move divergences labeled 'Find another way'.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1911,8 +1911,10 @@
         <button class="btn btn-ghost btn-sm" onclick="analysisLineStep(1)">›</button>
         <button class="btn btn-ghost btn-sm" onclick="exitAnalysisMode()" style="border-color:var(--red);color:var(--red)">✕ Exit</button>
         <button class="btn btn-ghost btn-sm" onclick="copyAnalysisLinePgn(this)" title="Copy line as PGN" aria-label="Copy line as PGN">📋</button>
+        <button class="btn btn-ghost btn-sm hidden" id="btnSaveSequence" onclick="promptSaveSequence()" title="Save the lines you built as a drillable sequence (replaces the mistake)">💾 Sequence</button>
         <span class="hint">← → navigate · make moves to explore</span>
       </div>
+      <div id="seqSaveDialog"></div>
     </div>
     <div class="feedback-area" id="feedbackArea">
       <div class="info-card" id="posInfoCard" style="display:none">
@@ -7977,6 +7979,7 @@ let analysisTreeCurrent = null;  // Current node
 let analysisSavedState = null;   // Saved review-mode state for restoration
 let analysisOrientation = 'white';
 let analysisPvArrows = [];       // [{from, to, opacity, scale}] — multi-PV arrows
+let seqSaveEligible = false;     // "Save as sequence" available (analysis entered from a plain mistake)
 
 function makeTreeNode(fen, san, uci, parent) {
   const id = ++analysisNodeId;
@@ -8094,6 +8097,16 @@ function enterAnalysisMode() {
     reviewSnapshot,
     tacticSnapshot,
   };
+
+  // "Save as sequence" (mistake → multi-move drill conversion) is offered only
+  // when analysis was entered from a plain mistake review — game-review entry
+  // seeds the tree with the whole game (paths would include the full game as
+  // the main line) and tactic entry already IS a multi-move drill.
+  seqSaveEligible = !reviewSnapshot && !tacticSnapshot && m.type === 'mistake';
+  const btnSeqEl = document.getElementById('btnSaveSequence');
+  if (btnSeqEl) btnSeqEl.classList.toggle('hidden', !seqSaveEligible);
+  const seqDlgEl = document.getElementById('seqSaveDialog');
+  if (seqDlgEl) seqDlgEl.innerHTML = '';
 
   // Determine the current position on the board
   let startFen;
@@ -8359,6 +8372,9 @@ function exitAnalysisMode() {
   analysisTreeCurrent = null;
   analysisNodes = {};
   analysisSavedState = null;
+  seqSaveEligible = false;
+  const seqDlgExit = document.getElementById('seqSaveDialog');
+  if (seqDlgExit) seqDlgExit.innerHTML = '';
   // EL9: the tactic-snapshot restore path re-applies feedbackContainer.innerHTML
   // (line 6469–6470) and the review-snapshot path does likewise via
   // restoreReviewStateAfterAnalysis. Both snapshots were captured BEFORE
@@ -8378,6 +8394,289 @@ function exitAnalysisMode() {
   // this, the 📝 .has-note marker still reflects the last analysis
   // position the user navigated to before hitting Exit.
   updateNoteButton();
+}
+
+// ─── Convert Mistake → Sequence ───
+// "💾 Sequence" in analysis mode: the lines the user built in the analysis
+// tree become a drillable practice tactic (relaxed rules — none of the
+// TACTIC_MIN_* pre-filters apply). Persisted to gistData.practiceTactics
+// with _isSequence:true so the standard tactic extraction / drill /
+// invalidation / sync path picks it up unchanged. On save, the original
+// mistake is invalidated (design decision: convert REPLACES — mirrors the
+// reverse "Convert to mistake" flow in the all-invalid tactic dialog).
+//
+// Line mapping: first-child chain of the tree = main line (WYSIWYG with the
+// analysis panel's mainline rendering); every other root→leaf path becomes
+// an alternative line in DFS order. Branches at opponent moves are classic
+// alt lines; branches at USER moves also drill (prefix auto-play stops just
+// before the divergence), labeled "Find another way" in loadNextTacticAlt.
+
+const SEQ_GAP_WARN_CP = 500;            // warn when PV1−PV2 gap is below this
+const SEQ_GAP_WINNING_EXEMPT_CP = 1000; // ...unless both PVs are completely winning
+
+function analysisTreeToSequenceLines(playerColor) {
+  if (!analysisTree) return [];
+  const userChar = playerColor === 'white' ? 'w' : 'b';
+  const lines = [];
+  const walk = (node, path) => {
+    // Defensive: skip malformed children (seeded-game nodes can carry uci:'',
+    // though the game-review entry path is excluded by seqSaveEligible anyway)
+    const kids = (node.children || []).filter(c => c.uci && c.uci.length >= 4 && c.san && c.fen);
+    if (kids.length === 0) {
+      if (path.length > 0) lines.push(path);
+      return;
+    }
+    for (const child of kids) {
+      const isUser = node.fen.split(' ')[1] === userChar;
+      walk(child, [...path, { uci: child.uci, san: child.san, fen: child.fen, isUser, _parentFen: node.fen }]);
+    }
+  };
+  walk(analysisTree, []);
+  return lines;
+}
+
+// PVs for the position BEFORE a move: prefer the live tree-node cache, fall
+// back to the cross-device eval cache. Both store [{cp, move(uci), san, ...}]
+// with cp from side-to-move POV (raw SF convention; mate clamped to ±10000).
+function seqPvsForFen(fen) {
+  for (const id in analysisNodes) {
+    const n = analysisNodes[id];
+    if (n.fen === fen && n.cachedPvs && n.cachedPvs.length > 0) return n.cachedPvs;
+  }
+  const entry = evalCacheGet(fen, 1, 1);
+  if (entry) {
+    if (Array.isArray(entry.pvs) && entry.pvs.length > 0) return entry.pvs;
+    if (entry.bestMove) return [{ cp: entry.bestCp, move: entry.bestMove, san: null }];
+  }
+  return null;
+}
+
+function seqMoveLabel(mv) {
+  const parts = mv._parentFen.split(' ');
+  const num = parseInt(parts[5]) || 1;
+  return parts[1] === 'w' ? `${num}. ${mv.san}` : `${num}... ${mv.san}`;
+}
+
+function seqFmtCp(cp) {
+  if (cp >= 10000) return '+M';
+  if (cp <= -10000) return '−M';
+  return (cp > 0 ? '+' : '') + cp;
+}
+
+// Validation walk over all USER moves across all lines (dedup'd by
+// position+move so shared prefixes don't repeat warnings). Two checks:
+//   1. user move ≠ PV1  → "not the engine's best"
+//   2. PV1−PV2 < 500cp  → "second-best is nearly as good" (skipped when both
+//      PVs ≥ +1000 — the gap is meaningless in completely won positions)
+// Positions without cached PVs are listed as unverified — no silent SF calls
+// at save time. Non-blocking: the dialog offers "Save anyway".
+function validateSequenceLines(lines) {
+  const warnings = [];
+  const unverified = [];
+  const seen = new Set();
+  for (const line of lines) {
+    for (const mv of line) {
+      if (!mv.isUser) continue;
+      const dedupKey = mv._parentFen + '|' + mv.uci;
+      if (seen.has(dedupKey)) continue;
+      seen.add(dedupKey);
+      const label = seqMoveLabel(mv);
+      const pvs = seqPvsForFen(mv._parentFen);
+      if (!pvs) { unverified.push(label); continue; }
+      const pv1 = pvs[0];
+      if (pv1.move !== mv.uci) {
+        warnings.push(`<strong>${escHtml(label)}</strong> isn't the engine's best — best is ${escHtml(pv1.san || pv1.move)} (${seqFmtCp(pv1.cp)})`);
+        continue; // PV1/PV2 gap doesn't describe this (non-best) move
+      }
+      if (pvs.length >= 2) {
+        const gap = pv1.cp - pvs[1].cp;
+        const bothWinning = pv1.cp >= SEQ_GAP_WINNING_EXEMPT_CP && pvs[1].cp >= SEQ_GAP_WINNING_EXEMPT_CP;
+        if (gap < SEQ_GAP_WARN_CP && !bothWinning) {
+          warnings.push(`Before <strong>${escHtml(label)}</strong>: second-best ${escHtml(pvs[1].san || pvs[1].move)} is nearly as good (gap ${gap}cp)`);
+        }
+      } else {
+        unverified.push(label + ' (single PV only)');
+      }
+    }
+  }
+  return { warnings, unverified };
+}
+
+function promptSaveSequence() {
+  const dlg = document.getElementById('seqSaveDialog');
+  if (!dlg || !analysisMode || !seqSaveEligible || !analysisTree) return;
+  const m = filteredMistakes[analysisSavedState?.mistakeIdx ?? -1];
+  if (!m || m.type !== 'mistake') return;
+  const playerColor = m.playerColor || 'white';
+  const userChar = playerColor === 'white' ? 'w' : 'b';
+
+  // The drill machinery assumes tacticMoves[0] is the user's move, so the
+  // sequence root must be player-to-move.
+  if (analysisTree.fen.split(' ')[1] !== userChar) {
+    dlg.innerHTML = `<div class="feedback-box" style="border-left:3px solid var(--yellow);">
+      <div class="feedback-text" style="font-size:12px;">A sequence must start with <strong>your</strong> move,
+      but analysis started on the opponent's turn. Re-enter analysis from the mistake position.</div></div>`;
+    return;
+  }
+
+  const lines = analysisTreeToSequenceLines(playerColor);
+  if (lines.length === 0) {
+    dlg.innerHTML = `<div class="feedback-box" style="border-left:3px solid var(--yellow);">
+      <div class="feedback-text" style="font-size:12px;">Make the moves of the sequence on the board first —
+      the lines you build here become the drill (branches become alternative lines).</div></div>`;
+    return;
+  }
+
+  // Dedup against already-saved practice tactics (same key as savePracticeTactic)
+  const chainSig = lines[0].map(mv => mv.uci).join(',');
+  if (gistData?.practiceTactics?.some(pt => pt.fenBefore === analysisTree.fen && pt._chainSig === chainSig)) {
+    dlg.innerHTML = `<div class="feedback-box" style="border-left:3px solid var(--yellow);">
+      <div class="feedback-text" style="font-size:12px;">This sequence is already saved.</div></div>`;
+    return;
+  }
+
+  const { warnings, unverified } = validateSequenceLines(lines);
+  const userMoveCount = lines[0].filter(mv => mv.isUser).length;
+  const altCount = lines.length - 1;
+  const mainPreview = buildPgnMoveText(analysisTree.fen, lines[0].map(mv => mv.san));
+
+  let warnHtml = '';
+  if (warnings.length > 0) {
+    warnHtml = `<div style="margin-top:8px;color:var(--yellow);font-size:12px;">
+      <div style="font-weight:600;">⚠ ${warnings.length} warning${warnings.length > 1 ? 's' : ''}</div>
+      ${warnings.map(w => `<div style="margin-top:2px;">· ${w}</div>`).join('')}
+    </div>`;
+  }
+  if (unverified.length > 0) {
+    warnHtml += `<div style="margin-top:6px;color:var(--text-muted);font-size:11px;">
+      Not verified (no cached eval): ${unverified.map(escHtml).join(', ')}</div>`;
+  }
+
+  dlg.innerHTML = `
+    <div class="feedback-box" style="border-left:3px solid var(--${warnings.length ? 'yellow' : 'green'});">
+      <div class="feedback-title">Save as sequence?</div>
+      <div class="feedback-text">
+        <div style="font-size:12px;"><code>${escHtml(mainPreview)}</code></div>
+        <div style="font-size:12px;margin-top:4px;">${userMoveCount} move${userMoveCount !== 1 ? 's' : ''} to find${altCount > 0 ? ` + ${altCount} alt line${altCount > 1 ? 's' : ''}` : ''}</div>
+        ${warnHtml}
+        <div style="margin-top:6px;font-size:11px;color:var(--text-muted);">Saving removes the original mistake from reviews.</div>
+        <div style="margin-top:8px;display:flex;gap:8px;">
+          <button class="btn btn-ghost btn-sm" style="border-color:var(--green);color:var(--green);" onclick="confirmSaveSequence()">${warnings.length ? 'Save anyway' : 'Save'}</button>
+          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('seqSaveDialog').innerHTML=''">Cancel</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function confirmSaveSequence() {
+  const dlg = document.getElementById('seqSaveDialog');
+  if (!analysisMode || !seqSaveEligible || !analysisTree) return;
+  const mIdx = analysisSavedState?.mistakeIdx ?? -1;
+  const m = filteredMistakes[mIdx];
+  if (!m || m.type !== 'mistake') return;
+  const playerColor = m.playerColor || 'white';
+
+  // Re-walk at confirm time — the user can keep exploring while the dialog
+  // is open, so the prompt-time snapshot may be stale. Strip _parentFen
+  // (validation-only) before persisting.
+  const rawLines = analysisTreeToSequenceLines(playerColor);
+  if (rawLines.length === 0) return;
+  const lines = rawLines.map(line => line.map(({ _parentFen, ...mv }) => mv));
+
+  const fenBefore = analysisTree.fen;
+  const fenParts = fenBefore.split(' ');
+  const moveNum = parseInt(fenParts[5]) || 1;
+  const ply = (moveNum - 1) * 2 + (fenParts[1] === 'b' ? 1 : 0);
+  const chainSig = lines[0].map(mv => mv.uci).join(',');
+
+  ensureGistData();
+  if (!gistData.practiceTactics) gistData.practiceTactics = [];
+  if (gistData.practiceTactics.some(pt => pt.fenBefore === fenBefore && pt._chainSig === chainSig)) {
+    if (dlg) dlg.innerHTML = `<div class="feedback-box" style="border-left:3px solid var(--yellow);">
+      <div class="feedback-text" style="font-size:12px;">This sequence is already saved.</div></div>`;
+    return;
+  }
+
+  const origPid = posId(m);
+  const rootPvs = seqPvsForFen(fenBefore);
+  const gameId = `_practice_tactic_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const rec = {
+    type: 'tactic',
+    gameId,
+    movePly: ply,
+    fenBefore,
+    playerColor,
+    moveNumber: moveNum,
+    tacticMoves: lines[0],
+    tacticAltLines: lines.slice(1),
+    maiaOpponentMoves: null,
+    wpSwing: Math.abs(m.wpDrop || 0),
+    wpDrop: Math.abs(m.wpDrop || 0),
+    found: false,   // they blundered here in the game — accurate for converted mistakes
+    evalBefore: { eval: rootPvs?.[0]?.cp ?? 0 },  // side-to-move (user) POV, matches savePracticeTactic
+    evalAfter: null,
+    _opening: m.game?.opening?.name || lookupOpeningName(fenBefore) || 'Sequence',
+    _createdAt: Date.now(),
+    _source: 'converted-mistake',
+    _isSequence: true,
+    _sourceGameId: m.gameId,
+    _sourcePosId: origPid,
+    _chainSig: chainSig,
+  };
+  gistData.practiceTactics.push(rec);
+
+  // Convert REPLACES: invalidate + drop the original mistake.
+  // invalidateMistake also debounces the Gist sync, covering the push above.
+  invalidateMistake(origPid);
+  allMistakes = allMistakes.filter(mm => posId(mm) !== origPid);
+
+  // Inject the sequence into live lists (same wrapper as savePracticeTactic)
+  const liveEntry = {
+    ...rec,
+    game: {
+      id: gameId,
+      speed: 'practice',
+      opening: { name: rec._opening },
+      createdAt: rec._createdAt,
+      _source: 'practice',
+      rated: false,
+      players: {},
+    },
+  };
+  allMistakes.push(liveEntry);
+
+  // Leave analysis and land on the new sequence. Null analysisSavedState
+  // first so exitAnalysisMode's restore-to-mistake branch (which references
+  // filteredMistakes[mistakeIdx] — the item we just removed) is skipped.
+  analysisSavedState = null;
+  exitAnalysisMode();
+  applyFilters();
+  renderGameList();
+  buildReviewQueue();
+  updateSessionProgress();
+
+  const newPid = posId(liveEntry);
+  const newIdx = filteredMistakes.findIndex(x => posId(x) === newPid);
+  if (newIdx >= 0) {
+    loadPosition(newIdx);
+    if (liveEntry.gameId !== activeGameId) {
+      activeGameId = liveEntry.gameId;
+      renderGameList();
+    }
+    showFeedback('info', 'Converted to sequence', 'The original mistake was removed from reviews. Solving the sequence grades it from now on.');
+  } else if (filteredMistakes.length > 0) {
+    // Current filters exclude the new item (e.g. Tactics type chip off)
+    loadPosition(Math.min(Math.max(mIdx, 0), filteredMistakes.length - 1));
+    showFeedback('info', 'Sequence saved', 'The new sequence is hidden by your current type/speed filters.');
+  } else {
+    currentMistakeIdx = -1;
+    boardObj.position('start', false);
+    clearLastMoveHighlight();
+    clearCheckHighlight();
+    document.getElementById('emptyMsg').classList.remove('hidden');
+    document.getElementById('posInfoCard').style.display = 'none';
+    showFeedback('info', 'Sequence saved', 'The new sequence is hidden by your current filters.');
+  }
 }
 
 function captureBoardHighlights() {
@@ -13668,8 +13967,10 @@ function loadPosition(globalIdx, skipAnimation = false) {
     const altCount = tacticAltLines.length;
     document.getElementById('posInfoContent').innerHTML = `
       <div style="font-size:13px;line-height:1.7">
-        <div>${ICON_TACTIC} <strong>Tactic</strong> — ${userMoveCount} moves to find${altCount > 0 ? ` <span style="font-size:11px;color:var(--text-muted)">(+${altCount} alt line${altCount>1?'s':''})</span>` : ''}</div>
-        <div style="color:var(--green)">Win% swing: +${Math.abs(m.wpSwing)}%</div>
+        <div>${ICON_TACTIC} <strong>${m._isSequence ? 'Sequence' : 'Tactic'}</strong> — ${userMoveCount} moves to find${altCount > 0 ? ` <span style="font-size:11px;color:var(--text-muted)">(+${altCount} alt line${altCount>1?'s':''})</span>` : ''}</div>
+        ${m._isSequence
+          ? '<div style="font-size:11px;color:var(--text-muted)">Converted from a game mistake</div>'
+          : `<div style="color:var(--green)">Win% swing: +${Math.abs(m.wpSwing)}%</div>`}
         <div id="tacticProgress" style="font-size:12px;margin-top:2px;color:var(--text-muted)">Move 1 of ${userMoveCount}</div>
         ${m.found === false ? '<div style="font-size:11px;margin-top:2px;color:var(--yellow)">You missed this in the game</div>' : ''}
       </div>
@@ -14188,7 +14489,9 @@ async function evaluateTacticMove(from, to, move) {
       let unsolvedAltCount = 0;
       for (let ai = tacticAltIdx + 1; ai < tacticAltLines.length; ai++) {
         const alt = tacticAltLines[ai];
-        if (!alt || alt.length < 3) continue;
+        // length===0 (not <3) — user-authored sequence alts may be short;
+        // must match loadNextTacticAlt's guard or counts diverge from loads
+        if (!alt || alt.length === 0) continue;
         if (invLinesCheck.has(lineFingerprint(alt))) continue;
         let commonLen = 0;
         for (const solved of tacticSolvedLines) {
@@ -14430,7 +14733,10 @@ function loadNextTacticAlt() {
   // entry) previously silently halted the flow, leaving the user on a blank
   // state with no progression. Match the invalidated-branch pattern below:
   // recurse to the next alt, or finish if exhausted.
-  if (!altLine || altLine.length < 3) {
+  // Empty/missing = malformed entry → skip. User-authored sequences (converted
+  // mistakes) may legitimately have short alt lines (1–2 plies), so the guard
+  // is length===0, not the old <3 (analyzer tactics always produce ≥3 anyway).
+  if (!altLine || altLine.length === 0) {
     if (tacticAltIdx + 1 < tacticAltLines.length) {
       loadNextTacticAlt();
     } else {
@@ -14523,7 +14829,7 @@ function loadNextTacticAlt() {
   document.getElementById('posInfoContent').innerHTML = `
     <div style="font-size:13px;line-height:1.7">
       <div>${ICON_TACTIC} <strong>${altLabel}</strong> — ${remainingUserMoves} move${remainingUserMoves !== 1 ? 's' : ''} to find</div>
-      <div style="font-size:11px;color:var(--text-muted)">${isMaia ? '🧠 Opponent plays a common human mistake' : 'Opponent plays differently'}</div>
+      <div style="font-size:11px;color:var(--text-muted)">${isMaia ? '🧠 Opponent plays a common human mistake' : (altLine[commonLen] && altLine[commonLen].isUser ? 'Find another way' : 'Opponent plays differently')}</div>
       <div id="tacticProgress" style="font-size:12px;margin-top:2px;color:var(--text-muted)">Move 1 of ${remainingUserMoves}</div>
     </div>
   `;
@@ -14844,7 +15150,8 @@ function confirmInvalidateLine(convertToMistake) {
   let hasUnsolved = false;
   for (let ai = tacticAltIdx + 1; ai < tacticAltLines.length; ai++) {
     const alt = tacticAltLines[ai];
-    if (!alt || alt.length < 3) continue;
+    // length===0 (not <3) — must match loadNextTacticAlt's relaxed guard
+    if (!alt || alt.length === 0) continue;
     if (getInvalidatedLines(pid).has(lineFingerprint(alt))) continue;
     let commonLen = 0;
     for (const solved of tacticSolvedLines) {
