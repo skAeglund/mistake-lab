@@ -453,6 +453,18 @@
   .show-more-btn:hover { background:var(--bg-hover); }
   .badge-done { background: var(--green-dim); color: var(--green); }
 
+  /* Game Reviews history — internal practice reviews on the Games tab.
+     Visually distinct from Lichess / chess.com game cards: purple book
+     identity (left bar + faint tint) instead of the neutral game-card look. */
+  .review-hist-card {
+    padding: 10px 12px; border-radius: 8px; margin-bottom: 4px;
+    cursor: pointer; transition: all 0.15s; font-size: 12px;
+    border: 1px solid rgba(139,125,216,0.18);
+    border-left: 3px solid #8b7dd8;
+    background: rgba(139,125,216,0.05);
+  }
+  .review-hist-card:hover { background: rgba(139,125,216,0.13); }
+
   /* Review mode */
   .btn-review-active {
     border-color: var(--accent) !important; color: var(--accent) !important;
@@ -1715,7 +1727,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Corrected deviations: land pre-move, hide the answer until solved. The walkthrough previously navigated to the position AFTER a corrected deviation — the move on the board IS the recall answer (the study move the mid-practice banner showed), so retry was pointless. reviewNext/PrevKeyMove now land at moveIdx-1 for corrected deviations; the key-move card gains a revealed param and a hideAnswer state that suppresses the san in the title, replaces the tried-move context with "can you recall it now?", forces the purple treatment even when the move is also an eval mistake (which would otherwise leak the san via the mistake title), and gates Show best / Show line behind the reveal (engine best usually equals the rep move in prep). The tried move is also held back from the retry prompt ("You needed help finding this move during the game") and only surfaces in the repMatch success card ("During the game you first tried X before correcting to it"). Reveal paths pass revealed=true: Skip (cancelReviewRetry), retry-canceled-on-entry restore, Back from Show line, and the refutation fallbacks; the Show-repertoire-move button on a hidden card flips it to revealed before drawing the purple arrow (the render clears bestMoveArrow, so order matters).</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Game Reviews list moved from the Review tab to the Games tab, rendered at the bottom of renderGameList below the fetched game cards. New .review-hist-card styling makes the internal practice reviews visually distinct from Lichess / chess.com games: purple book identity — 3px purple left bar, faint purple tint and border, purple section header with a top divider — versus the neutral .game-card look. Show-all toggles and the loadReviewHistory completion hook now re-render the Games list (when the Games tab is active, i.e. neither reviewMode nor repertoireMode); renderReviewList is restored to its pre-history form with the plain empty-queue early return. Since both tabs share the #gameList container, tab switches naturally swap the section in and out.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -4075,11 +4087,9 @@ async function loadReviewHistory() {
     }
   }
   if (reviewHistory.length > 0) console.log(`[Reviews] Loaded ${reviewHistory.length} review snapshots`);
-  // If the user is already sitting on the Review tab, surface the freshly
+  // If the user is already sitting on the Games tab, surface the freshly
   // loaded history without requiring a tab re-entry.
-  if (typeof reviewMode !== 'undefined' && reviewMode) {
-    try { renderReviewList(); } catch (_) {}
-  }
+  try { if (!reviewMode && !repertoireMode) renderGameList(); } catch (_) {}
 }
 
 // ─── Review History: restore + Review-tab UI ───
@@ -4108,13 +4118,15 @@ function formatReviewHistDate(ts) {
     d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 }
 
-// Renders the "Game Reviews" section under the SRS queue on the Review tab.
-// Called from renderReviewList (both the queue-populated and all-caught-up
-// branches — history is most useful precisely when the queue is empty).
+// Renders the "Game Reviews" section at the bottom of the GAMES tab (below
+// the Lichess / chess.com game cards). Called from renderGameList. The
+// .review-hist-card styling (purple left bar + tint) keeps these visually
+// distinct from real game cards — they're internal MistakeLab practice
+// reviews, not fetched games.
 function appendReviewHistorySection(list) {
   if (!reviewHistory || reviewHistory.length === 0) return;
   const header = document.createElement('div');
-  header.style.cssText = 'padding:10px 12px 4px;font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;';
+  header.style.cssText = 'padding:10px 12px 4px;font-size:11px;font-weight:600;color:#8b7dd8;text-transform:uppercase;letter-spacing:0.5px;border-top:1px solid var(--border);margin-top:8px;';
   header.textContent = `📋 Game Reviews (${reviewHistory.length})`;
   list.appendChild(header);
 
@@ -4124,7 +4136,7 @@ function appendReviewHistorySection(list) {
     const src = REVIEW_HIST_SOURCE_META[s.source] || REVIEW_HIST_SOURCE_META.cont;
     const oc = REVIEW_HIST_OUTCOME_META[s.outcome] || REVIEW_HIST_OUTCOME_META.ended;
     const item = document.createElement('div');
-    item.className = 'review-item';
+    item.className = 'review-hist-card';
     item.onclick = () => openHistoricalReview(s.id);
     const accHtml = (s.accuracy != null)
       ? `<span style="font-weight:600;">${s.accuracy}%</span>` : '';
@@ -4148,13 +4160,13 @@ function appendReviewHistorySection(list) {
     const btn = document.createElement('div');
     btn.className = 'show-more-btn';
     btn.textContent = `Show all ${reviewHistory.length} reviews`;
-    btn.onclick = () => { window._reviewHistShowAll = true; renderReviewList(); };
+    btn.onclick = () => { window._reviewHistShowAll = true; renderGameList(); };
     list.appendChild(btn);
   } else if (window._reviewHistShowAll && reviewHistory.length > 15) {
     const btn = document.createElement('div');
     btn.className = 'show-more-btn';
     btn.textContent = 'Show fewer';
-    btn.onclick = () => { window._reviewHistShowAll = false; renderReviewList(); };
+    btn.onclick = () => { window._reviewHistShowAll = false; renderGameList(); };
     list.appendChild(btn);
   }
 }
@@ -12464,6 +12476,9 @@ function renderGameList() {
     btn.onclick = () => { gameListDisplayLimit += 50; renderGameList(); };
     list.appendChild(btn);
   }
+  // Internal Game Reviews history at the bottom (purple .review-hist-card
+  // styling — visually distinct from the Lichess / chess.com cards above).
+  appendReviewHistorySection(list);
 }
 
 // ─── Review mode ───
@@ -12565,9 +12580,6 @@ function renderReviewList() {
       <div style="font-size:24px;margin-bottom:8px;">✓</div>
       All caught up! No positions due for review.
     </div>`;
-    // Game Reviews history still renders below the empty state — an empty
-    // queue is exactly when browsing past reviews is most useful.
-    appendReviewHistorySection(list);
     return;
   }
 
@@ -12679,7 +12691,6 @@ function renderReviewList() {
     btn.onclick = () => { reviewListDisplayLimit += 50; renderReviewList(); };
     list.appendChild(btn);
   }
-  appendReviewHistorySection(list);
 }
 
 // ─── Board init ───
