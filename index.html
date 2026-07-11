@@ -1727,7 +1727,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Fix: "Select a game to begin" overlay stuck over the board after opening a game review from the fresh empty state. openHistoricalReview never hid #emptyMsg — every other position entry point (loadPosition, filter practice, repertoire drills) does. Now hidden in the board-setup step of the restore.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Start view setting + decouple color filter from opening explorer. New settings dropdown (Games/Review/Repertoire/Opening explorer, default Games) selects which view opens at startup via enterStartView(). The opening filter no longer forces the color filter at the start position — it syncs to board perspective only once you navigate away, and snaps back to your persisted chip selection when the filter deactivates (back to start, cleared, or exit-with-clear). Fresh explorer entry starts flipped when your color filter is black-only.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1998,6 +1998,18 @@
     <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
       <label style="font-size:13px;font-weight:600;color:var(--text-primary);margin-top:0;margin-bottom:2px;">Training</label>
       <div style="display:flex;align-items:center;justify-content:space-between;margin:8px 0 0;">
+        <div>
+          <span style="font-size:13px;">Start view</span>
+          <div class="hint" style="margin-top:2px;">Which view opens when the app starts.</div>
+        </div>
+        <select id="settingsStartView" style="flex-shrink:0;margin-left:12px;font-size:12px;padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);">
+          <option value="games">Games</option>
+          <option value="review">Review</option>
+          <option value="repertoire">Repertoire</option>
+          <option value="explorer">Opening explorer</option>
+        </select>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin:14px 0 0;">
         <div>
           <span style="font-size:13px;">Instant Feedback</span>
           <div class="hint" style="margin-top:2px;">Show move quality after each move in continuation practice. Turn off for a game-like experience with post-game review.</div>
@@ -2710,6 +2722,13 @@ function ensureGistData() {
 let airplaneMode = localStorage.getItem('airplaneMode') === 'true';
 let postProgressOnReturn = localStorage.getItem('postProgressOnReturn') !== 'false';
 let instantFeedback = localStorage.getItem('instantFeedback') !== 'false'; // default true
+// Which view opens once loading completes: 'games' | 'review' | 'repertoire' | 'explorer'.
+// Default 'games' (neutral start). 'explorer' reproduces the legacy behavior of
+// auto-entering the opening filter.
+let startView = (() => {
+  const v = localStorage.getItem('mistakelab_start_view');
+  return ['games', 'review', 'repertoire', 'explorer'].includes(v) ? v : 'games';
+})();
 let syncDebounceTimer = null;
 let appShown = false; // guard to prevent double showMainApp()
 const GIST_FILENAME = 'mistakelab_progress.json';
@@ -4719,6 +4738,15 @@ function openSettings() {
     postProgressOnReturn = this.checked;
     localStorage.setItem('postProgressOnReturn', postProgressOnReturn);
   };
+  // Start view selector
+  const startViewSel = document.getElementById('settingsStartView');
+  if (startViewSel) {
+    startViewSel.value = startView;
+    startViewSel.onchange = function() {
+      startView = this.value;
+      localStorage.setItem('mistakelab_start_view', startView);
+    };
+  }
   // Instant Feedback toggle
   const instantFeedbackToggle = document.getElementById('settingsInstantFeedback');
   instantFeedbackToggle.checked = instantFeedback;
@@ -11308,6 +11336,38 @@ function toggleOpeningFilter() {
   }
 }
 
+// Force the color filter to a single color matching the board perspective.
+// Used while an opening-position filter is active — its results are
+// perspective-dependent. Deliberately does NOT call saveFilters(): the
+// persisted set must keep reflecting the user's own chip selection so it
+// can be restored when the filter deactivates.
+function syncColorFilterToOrientation(orientation) {
+  if (filters.color.size === 1 && filters.color.has(orientation)) return;
+  filters.color = new Set([orientation]);
+  document.querySelectorAll('.filter-chip[data-filter="color"]').forEach(c => {
+    c.classList.toggle('active', filters.color.has(c.dataset.value));
+  });
+}
+
+// Snap the color filter back to the user's persisted chip selection. Called
+// whenever the opening filter deactivates (navigated back to the start
+// position, filter cleared) so a forced single-color set doesn't outlive the
+// filter that required it. Callers are responsible for applyFilters().
+function restorePersistedColorFilter() {
+  let colors = ['white', 'black'];
+  try {
+    const raw = localStorage.getItem('mistakelab_filters');
+    if (raw) {
+      const obj = JSON.parse(raw);
+      if (Array.isArray(obj.color) && obj.color.length > 0) colors = obj.color;
+    }
+  } catch (e) {}
+  filters.color = new Set(colors);
+  document.querySelectorAll('.filter-chip[data-filter="color"]').forEach(c => {
+    c.classList.toggle('active', filters.color.has(c.dataset.value));
+  });
+}
+
 function enterOpeningFilter() {
   if (analysisMode) exitAnalysisMode();
   // BUG-005: wipe any lingering review state (review mode flag, _reviewBestLine,
@@ -11378,16 +11438,22 @@ function enterOpeningFilter() {
   clearBoardOverlays();
   clearLastMoveHighlight();
 
-  // Restore saved filter orientation, or default to white on first entry
-  const filterOrientation = savedFilterOrientation || 'white';
+  // Restore saved filter orientation. On fresh entry: a deliberate black-only
+  // color filter means the user studies black openings — start flipped from
+  // black's perspective; otherwise default to white.
+  let filterOrientation = savedFilterOrientation;
+  if (!filterOrientation) {
+    filterOrientation = (filters.color.size === 1 && filters.color.has('black')) ? 'black' : 'white';
+  }
   boardObj.orientation(filterOrientation);
   // Check highlight MUST come AFTER orientation — chessboard.js rebuilds its
   // square DOM on orientation change, wiping any classes we'd added before.
   showCheckHighlight(filterChess);
-  filters.color = new Set([filterOrientation]);
-  document.querySelectorAll('.filter-chip[data-filter="color"]').forEach(c => {
-    c.classList.toggle('active', filters.color.has(c.dataset.value));
-  });
+  // Force the color filter to the board perspective ONLY when an actual
+  // position filter is active on entry (gap exploration, re-entry with a live
+  // filter). At the start position the user's chip selection stays untouched;
+  // applyOpeningFilterFromBoard applies the sync once they navigate away.
+  if (openingFilterFen) syncColorFilterToOrientation(filterOrientation);
 
   applyFilters();
   gameListDisplayLimit = 50;
@@ -11416,6 +11482,9 @@ function exitOpeningFilter(clearFilter) {
     filterMoveHistory = [];
     filterMoveIdx = -1;
     savedFilterOrientation = null;
+    // The filter is gone — snap the color filter back to the user's own
+    // chip selection (applyFilters below picks it up).
+    restorePersistedColorFilter();
   }
 
   // Recompute filters first so filteredMistakes is up to date
@@ -11473,6 +11542,7 @@ function clearOpeningFilter() {
     filterMoveHistory = [];
     filterMoveIdx = -1;
     savedFilterOrientation = null;
+    restorePersistedColorFilter();
     applyFilters();
     gameListDisplayLimit = 50;
     reviewListDisplayLimit = 50;
@@ -11488,7 +11558,20 @@ function applyOpeningFilterFromBoard() {
   const key = fenPositionKey(filterChess.fen());
   // Only filter if not the starting position
   const startKey = fenPositionKey('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1');
+  const wasActive = !!openingFilterFen;
   openingFilterFen = (key === startKey) ? null : key;
+  // The color filter follows the board perspective only while a position
+  // filter is active (its results are perspective-dependent). Navigating back
+  // to the start position deactivates the filter → snap the color filter back
+  // to the user's persisted chip selection. Guarded on openingFilterMode so
+  // the background index-rebuild caller can't mutate filters.
+  if (openingFilterMode) {
+    if (openingFilterFen) {
+      syncColorFilterToOrientation(boardObj ? boardObj.orientation() : 'white');
+    } else if (wasActive) {
+      restorePersistedColorFilter();
+    }
+  }
   applyFilters();
   gameListDisplayLimit = 50;
   if (reviewMode) renderReviewList();
@@ -11656,11 +11739,10 @@ function filterFlipBoard() {
   // Orientation flip rebuilds chessboard.js's square DOM, wiping our custom
   // classes — re-derive the check aura from the current filter position.
   if (filterChess) showCheckHighlight(filterChess);
-  // Sync the color filter to match board perspective
-  filters.color = new Set([newOrientation]);
-  document.querySelectorAll('.filter-chip[data-filter="color"]').forEach(c => {
-    c.classList.toggle('active', filters.color.has(c.dataset.value));
-  });
+  // Sync the color filter to match board perspective — but only while a
+  // position filter is active. At the start position, flipping is just a
+  // view change and must not touch the user's chip selection.
+  if (openingFilterFen) syncColorFilterToOrientation(newOrientation);
   applyFilters();
   gameListDisplayLimit = 50;
   if (reviewMode) renderReviewList();
@@ -12306,8 +12388,53 @@ function showMainApp() {
     return;
   }
 
-  // Start with the opening explorer open
-  enterOpeningFilter();
+  // Open the configured start view (settings → Training → Start view)
+  enterStartView();
+}
+
+// ─── Start view ───
+// Neutral board for start views that don't load a position themselves.
+// Desktop: empty start-position board + the "select a game" hint.
+// Mobile: stay in the browsing (list) view — initBoard remains deferred to
+// the first loadPosition, as designed.
+function showNeutralStartBoard() {
+  if (isMobileView()) return;
+  if (!boardObj) { document.getElementById('board').offsetHeight; initBoard(); }
+  boardObj.position('start', false);
+  boardObj.orientation('white');
+  document.getElementById('emptyMsg').classList.remove('hidden');
+}
+
+// Dispatch to the configured start view once loading completes. Replaces the
+// old hard-coded enterOpeningFilter() at startup (and after discarding an
+// interrupted continuation session). 'explorer' reproduces legacy behavior —
+// except it no longer mutates the color filter at the start position (see
+// enterOpeningFilter / applyOpeningFilterFromBoard).
+function enterStartView() {
+  if (startView === 'explorer') {
+    enterOpeningFilter();
+    return;
+  }
+  if (startView === 'review') {
+    activatePanelTab('review');
+    // toggleReviewMode auto-loads the first due item; if nothing is due,
+    // fall back to a neutral board.
+    if (currentMistakeIdx < 0) showNeutralStartBoard();
+    return;
+  }
+  if (startView === 'repertoire') {
+    activatePanelTab('repertoire');
+    showNeutralStartBoard();
+    return;
+  }
+  // 'games' (default): neutral start — game list, empty board, no mode
+  // entered, no filter mutation.
+  applyFilters();
+  gameListDisplayLimit = 50;
+  renderGameList();
+  updateSessionProgress();
+  updatePanelTabs();
+  showNeutralStartBoard();
 }
 
 function showContResumeBanner(session) {
@@ -12339,7 +12466,7 @@ function discardContSession() {
   clearContSession();
   window._pendingContSession = null;
   document.getElementById('posInfoCard').style.display = 'none';
-  enterOpeningFilter();
+  enterStartView();
 }
 
 function updateSessionProgress() {
