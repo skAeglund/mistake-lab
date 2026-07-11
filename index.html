@@ -1727,7 +1727,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Convert mistake to sequence via analysis lines. New 💾 Sequence button in analysis mode (visible when entered from a plain mistake): the lines built in the analysis tree are saved as a drillable practice tactic with _isSequence — first-child chain = main line, other root→leaf paths = alternative lines. Relaxed rules (no TACTIC_MIN_* gates); root must be player-to-move. Save dialog validates every user move against cached MultiPV: warns when the move isn't PV1 or when the PV1−PV2 gap is under 500cp (skipped when both PVs ≥ +1000); unverified positions listed, warnings non-blocking (Save anyway). Saving invalidates the original mistake and lands on the new sequence. Alt-line guards relaxed to length===0 across loader + unsolved counters; user-move divergences labeled 'Find another way'.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Sequence validation on win% + optional alternative user moves. Sequence save validation now works in win-chance terms (SEQ_ALT_WP_THRESHOLD 5%): warns on covered user moves losing >5% wp vs best, and on any top-3 PV move within 5% of best that ISN'T covered by a branch (it would count as wrong in the drill) — the cp gap and won-position exemption are gone. User moves get their PV cp annotated at save. Drilling: playing a sibling unsolved line's expected user move switches the active line (swap; universal — no-ops for opponent-divergent analyzer tactics). Remaining alts are classified mandatory (opponent-divergent, or user-divergent with no proven sibling) vs optional (user-divergent with strictly higher stored eval than the best proven sibling; equal/worse/unmeasured are excluded, cascading to sub-lines until the branch is solved). loadNextTacticAlt is scan-based over mandatory lines; optional ones appear as '💡 Find a stronger move (+Ncp)' buttons on the completion card (grade not gated on them), loaded via loadOptionalTacticAlt.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -8411,8 +8411,7 @@ function exitAnalysisMode() {
 // alt lines; branches at USER moves also drill (prefix auto-play stops just
 // before the divergence), labeled "Find another way" in loadNextTacticAlt.
 
-const SEQ_GAP_WARN_CP = 500;            // warn when PV1−PV2 gap is below this
-const SEQ_GAP_WINNING_EXEMPT_CP = 1000; // ...unless both PVs are completely winning
+const SEQ_ALT_WP_THRESHOLD = 5; // win% gap under which an alternative move counts as "equally good"
 
 function analysisTreeToSequenceLines(playerColor) {
   if (!analysisTree) return [];
@@ -8457,49 +8456,69 @@ function seqMoveLabel(mv) {
   return parts[1] === 'w' ? `${num}. ${mv.san}` : `${num}... ${mv.san}`;
 }
 
-function seqFmtCp(cp) {
-  if (cp >= 10000) return '+M';
-  if (cp <= -10000) return '−M';
-  return (cp > 0 ? '+' : '') + cp;
-}
-
-// Validation walk over all USER moves across all lines (dedup'd by
-// position+move so shared prefixes don't repeat warnings). Two checks:
-//   1. user move ≠ PV1  → "not the engine's best"
-//   2. PV1−PV2 < 500cp  → "second-best is nearly as good" (skipped when both
-//      PVs ≥ +1000 — the gap is meaningless in completely won positions)
-// Positions without cached PVs are listed as unverified — no silent SF calls
-// at save time. Non-blocking: the dialog offers "Save anyway".
+// Validation walk — wp-based with branch coverage. For every position where
+// the user moves, collect the set of branched user moves ("covered"), then:
+//   (a) each covered move losing > SEQ_ALT_WP_THRESHOLD win% vs PV1 → warn
+//       (a covered move absent from all PVs → "not among top engine moves")
+//   (b) each PV move within the threshold of PV1 that is NOT covered → warn —
+//       during the drill it would count as wrong; branching it clears the warn
+// Win% saturation means near-equal moves in won positions warn too (by
+// design: any winning move the drill would reject deserves a branch or a
+// conscious "Save anyway"). MultiPV is 3, so coverage can only be verified
+// against the top 3 — a fourth near-equal move is invisible to validation.
+// Positions without cached PVs are listed as unverified — no SF calls here.
 function validateSequenceLines(lines) {
   const warnings = [];
   const unverified = [];
-  const seen = new Set();
+  // Group user moves by the position they're played from
+  const positions = new Map(); // parentFen → Map<uci, mv>
   for (const line of lines) {
     for (const mv of line) {
       if (!mv.isUser) continue;
-      const dedupKey = mv._parentFen + '|' + mv.uci;
-      if (seen.has(dedupKey)) continue;
-      seen.add(dedupKey);
-      const label = seqMoveLabel(mv);
-      const pvs = seqPvsForFen(mv._parentFen);
-      if (!pvs) { unverified.push(label); continue; }
-      const pv1 = pvs[0];
-      if (pv1.move !== mv.uci) {
-        warnings.push(`<strong>${escHtml(label)}</strong> isn't the engine's best — best is ${escHtml(pv1.san || pv1.move)} (${seqFmtCp(pv1.cp)})`);
-        continue; // PV1/PV2 gap doesn't describe this (non-best) move
-      }
-      if (pvs.length >= 2) {
-        const gap = pv1.cp - pvs[1].cp;
-        const bothWinning = pv1.cp >= SEQ_GAP_WINNING_EXEMPT_CP && pvs[1].cp >= SEQ_GAP_WINNING_EXEMPT_CP;
-        if (gap < SEQ_GAP_WARN_CP && !bothWinning) {
-          warnings.push(`Before <strong>${escHtml(label)}</strong>: second-best ${escHtml(pvs[1].san || pvs[1].move)} is nearly as good (gap ${gap}cp)`);
+      let covered = positions.get(mv._parentFen);
+      if (!covered) { covered = new Map(); positions.set(mv._parentFen, covered); }
+      if (!covered.has(mv.uci)) covered.set(mv.uci, mv);
+    }
+  }
+  for (const [fen, covered] of positions) {
+    const pvs = seqPvsForFen(fen);
+    if (!pvs || pvs.length === 0) {
+      for (const mv of covered.values()) unverified.push(seqMoveLabel(mv));
+      continue;
+    }
+    const pv1Wp = cpToWinPct(pvs[0].cp);
+    // (a) covered moves substantially worse than best
+    for (const mv of covered.values()) {
+      const hit = pvs.find(p => p.move === mv.uci);
+      if (!hit) {
+        if (mv.uci !== pvs[0].move) {
+          warnings.push(`<strong>${escHtml(seqMoveLabel(mv))}</strong> isn't among the top ${pvs.length} engine moves (best: ${escHtml(pvs[0].san || pvs[0].move)})`);
         }
-      } else {
-        unverified.push(label + ' (single PV only)');
+        continue;
       }
+      const drop = pv1Wp - cpToWinPct(hit.cp);
+      if (drop > SEQ_ALT_WP_THRESHOLD) {
+        warnings.push(`<strong>${escHtml(seqMoveLabel(mv))}</strong> loses ${drop.toFixed(1)}% win chance vs best ${escHtml(pvs[0].san || pvs[0].move)}`);
+      }
+    }
+    // (b) near-equal PV moves not covered by a branch
+    for (const pv of pvs) {
+      const gap = pv1Wp - cpToWinPct(pv.cp);
+      if (gap <= SEQ_ALT_WP_THRESHOLD && !covered.has(pv.move)) {
+        warnings.push(`${escHtml(seqPosLabel(fen))}: ${escHtml(pv.san || pv.move)} is equally good (−${gap.toFixed(1)}%) but not covered — it would count as wrong in the drill`);
+      }
+    }
+    if (pvs.length < 2) {
+      unverified.push(seqPosLabel(fen) + ' (single PV only — near-equal alternatives unknown)');
     }
   }
   return { warnings, unverified };
+}
+
+function seqPosLabel(fen) {
+  const parts = fen.split(' ');
+  const num = parseInt(parts[5]) || 1;
+  return parts[1] === 'w' ? `At move ${num}` : `At move ${num}…`;
 }
 
 function promptSaveSequence() {
@@ -8581,7 +8600,18 @@ function confirmSaveSequence() {
   // (validation-only) before persisting.
   const rawLines = analysisTreeToSequenceLines(playerColor);
   if (rawLines.length === 0) return;
-  const lines = rawLines.map(line => line.map(({ _parentFen, ...mv }) => mv));
+  // Annotate user moves with their PV eval (side-to-move POV) before
+  // stripping _parentFen — classifyRemainingTacticAlts compares these cp
+  // values at drill time to decide whether a user-divergent alt line is
+  // offered as an optional "Find a stronger move".
+  const lines = rawLines.map(line => line.map(({ _parentFen, ...mv }) => {
+    if (mv.isUser) {
+      const pvs = seqPvsForFen(_parentFen);
+      const hit = pvs ? pvs.find(p => p.move === mv.uci) : null;
+      if (hit && typeof hit.cp === 'number') return { ...mv, cp: hit.cp };
+    }
+    return mv;
+  }));
 
   const fenBefore = analysisTree.fen;
   const fenParts = fenBefore.split(' ');
@@ -14455,7 +14485,13 @@ async function evaluateTacticMove(from, to, move) {
   if (!expectedMove || !expectedMove.isUser) return;
 
   const userUci = from + to + (move.promotion || '');
-  const isCorrect = userUci === expectedMove.uci;
+  let isCorrect = userUci === expectedMove.uci;
+  // Universal sibling-line switch: if the move doesn't match the active
+  // line but IS the expected user move of another unsolved line sharing
+  // the walked prefix (user-move branch), accept it and swap the active
+  // line. For analyzer/detected tactics all lines diverge at opponent
+  // moves, so this never fires there — no behavioral change.
+  if (!isCorrect && tryTacticLineSwitch(userUci)) isCorrect = true;
 
   clearHintHighlights();
   const container = document.getElementById('feedbackContainer');
@@ -14486,25 +14522,11 @@ async function evaluateTacticMove(from, to, move) {
       const invLinesCheck = detectedTacticSolveMode
         ? new Set()
         : getInvalidatedLines(posId(m));
-      let unsolvedAltCount = 0;
-      for (let ai = tacticAltIdx + 1; ai < tacticAltLines.length; ai++) {
-        const alt = tacticAltLines[ai];
-        // length===0 (not <3) — user-authored sequence alts may be short;
-        // must match loadNextTacticAlt's guard or counts diverge from loads
-        if (!alt || alt.length === 0) continue;
-        if (invLinesCheck.has(lineFingerprint(alt))) continue;
-        let commonLen = 0;
-        for (const solved of tacticSolvedLines) {
-          let len = 0;
-          for (let i = 0; i < Math.min(alt.length, solved.length); i++) {
-            if (alt[i].uci === solved[i].uci) len++; else break;
-          }
-          if (len > commonLen) commonLen = len;
-        }
-        const totalUser = alt.filter(tm => tm.isUser).length;
-        const solvedUser = alt.slice(0, commonLen).filter(tm => tm.isUser).length;
-        if (solvedUser < totalUser) unsolvedAltCount++;
-      }
+      // Mandatory = opponent-divergent lines (must be drilled). Optional
+      // better-eval user-divergent lines don't force a "next line" — they
+      // are offered on the completion card by finishTacticComplete.
+      const clsRemain = classifyRemainingTacticAlts(invLinesCheck);
+      const unsolvedAltCount = clsRemain.mandatory.length;
 
       if (unsolvedAltCount > 0) {
         // ── Line complete, but alternatives remain ──
@@ -14697,11 +14719,18 @@ function finishTacticComplete(lastMoveSan) {
 
   const linesLabel = tacticAltLines.length > 0
     ? ` (${tacticAltLines.length + 1} lines)` : '';
+  // Optional better-eval user-divergent lines: completion (and the grade
+  // recorded above) is NOT gated on them — each is offered as a button.
+  let optionalBtns = '';
+  const clsFinish = classifyRemainingTacticAlts(getInvalidatedLines(pid));
+  for (const opt of clsFinish.optional) {
+    optionalBtns += `<button class="btn btn-ghost btn-sm" style="font-size:12px;border-color:var(--yellow);color:var(--yellow);" onclick="loadOptionalTacticAlt(${opt.idx})">💡 Find a stronger move (+${opt.gainCp}cp)</button>`;
+  }
   const invalidateBtn = `<button class="btn btn-ghost btn-sm" style="font-size:10px;color:var(--text-muted);border-color:var(--border);" onclick="handleInvalidateLine()">✕ Bad line</button>`;
   const contBtns = `<div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">` +
     `<button class="btn btn-primary btn-sm" style="font-size:12px;" onclick="startTacticContinuation()">▶ Play Continuation</button>` +
     `<button class="btn btn-ghost btn-sm" style="font-size:12px;" onclick="showTacticEngineLine()">Show engine line</button>` +
-    `${invalidateBtn}</div>`;
+    `${optionalBtns}${invalidateBtn}</div>`;
 
   const moveLabel = lastMoveSan ? `<code>${escHtml(lastMoveSan)}</code> — solved` : 'Solved';
   showColorFeedback('#3ecc6f', 'rgba(62,204,111,0.08)',
@@ -14717,67 +14746,171 @@ function finishTacticComplete(lastMoveSan) {
   document.getElementById('btnHint').classList.add('hidden');
 }
 
+// Longest common prefix (in plies) between `alt` and any solved line.
+function tacticCommonPrefixLen(alt) {
+  let d = 0;
+  for (const solved of tacticSolvedLines) {
+    let len = 0;
+    for (let i = 0; i < Math.min(alt.length, solved.length); i++) {
+      if (alt[i].uci === solved[i].uci) len++; else break;
+    }
+    if (len > d) d = len;
+  }
+  return d;
+}
+
+// Classify every not-yet-solved alternative line against tacticSolvedLines.
+// Returns { mandatory: [idx...], optional: [{idx, gainCp}...] }.
+// - mandatory: the divergence from solved lines is at an OPPONENT move (the
+//   opponent chooses — the user must know the response), or at a user move
+//   where no sibling has been proven yet (nothing solved at that node).
+// - optional: divergence is at a USER move with a proven sibling, and the
+//   branch move's stored eval (mv.cp, annotated at sequence save time) is
+//   strictly higher than the best proven sibling move at the same node —
+//   offered as "Find a stronger move" on the completion card.
+// - excluded (returned in neither list): user-divergent with a proven
+//   sibling that is equal/better/unmeasured — the user already proved a
+//   sufficient move there. Exclusion cascades to sub-lines automatically:
+//   they share the same divergence-from-solved point until the branch
+//   itself gets solved (e.g. via mid-drill line switching), after which
+//   their own divergence becomes opponent-relative and thus mandatory.
+function classifyRemainingTacticAlts(invLines) {
+  const res = { mandatory: [], optional: [] };
+  for (let ai = 0; ai < tacticAltLines.length; ai++) {
+    const alt = tacticAltLines[ai];
+    if (!alt || alt.length === 0) continue;
+    if (invLines.has(lineFingerprint(alt))) continue;
+    const d = tacticCommonPrefixLen(alt);
+    const totalUser = alt.filter(tm => tm.isUser).length;
+    const solvedUser = alt.slice(0, d).filter(tm => tm.isUser).length;
+    if (solvedUser >= totalUser) continue; // nothing left to prove
+    const div = alt[d];
+    if (!div || !div.isUser) { res.mandatory.push(ai); continue; }
+    // User-move divergence — look for a proven sibling at this node:
+    // a solved line whose common prefix with `alt` is exactly d and that
+    // has a move at index d (played from the same position).
+    let hasSibling = false, bestSolvedCp = null;
+    for (const solved of tacticSolvedLines) {
+      let len = 0;
+      for (let i = 0; i < Math.min(alt.length, solved.length); i++) {
+        if (alt[i].uci === solved[i].uci) len++; else break;
+      }
+      if (len === d && solved.length > d) {
+        hasSibling = true;
+        if (typeof solved[d].cp === 'number' &&
+            (bestSolvedCp === null || solved[d].cp > bestSolvedCp)) {
+          bestSolvedCp = solved[d].cp;
+        }
+      }
+    }
+    if (!hasSibling) { res.mandatory.push(ai); continue; }
+    if (typeof div.cp === 'number' && bestSolvedCp !== null && div.cp > bestSolvedCp) {
+      res.optional.push({ idx: ai, gainCp: div.cp - bestSolvedCp });
+    }
+    // else: excluded — equal/worse/unmeasured alternative already proven
+  }
+  return res;
+}
+
+// Accept a user move that belongs to a sibling unsolved line sharing the
+// walked prefix: swap it in as the active line; the current line takes its
+// slot in tacticAltLines so the sequential machinery drills it later.
+function tryTacticLineSwitch(userUci) {
+  const m = filteredMistakes[currentMistakeIdx];
+  const invLines = (detectedTacticSolveMode || !m || m.type !== 'tactic')
+    ? new Set() : getInvalidatedLines(posId(m));
+  for (let ai = 0; ai < tacticAltLines.length; ai++) {
+    const c = tacticAltLines[ai];
+    if (!c || c.length <= tacticStepIdx) continue;
+    let samePrefix = true;
+    for (let i = 0; i < tacticStepIdx; i++) {
+      if (!c[i] || c[i].uci !== tacticMoves[i].uci) { samePrefix = false; break; }
+    }
+    if (!samePrefix) continue;
+    const step = c[tacticStepIdx];
+    if (!step || !step.isUser || step.uci !== userUci) continue;
+    if (invLines.has(lineFingerprint(c))) continue;
+    if (tacticSolvedLines.some(s => lineFingerprint(s) === lineFingerprint(c))) continue;
+    tacticAltLines[ai] = tacticMoves;
+    tacticMoves = c;
+    return true;
+  }
+  return false;
+}
+
 function loadNextTacticAlt() {
   const m = filteredMistakes[currentMistakeIdx];
   const inDetectedSolve = detectedTacticSolveMode;
   if (!inDetectedSolve && (!m || m.type !== 'tactic')) return;
 
-  // In detected-tactic solve, the root fen comes from the candidate, not `m`.
-  // No invalidated-lines tracking — detected tactics aren't in SRS yet.
-  const tacticBaseFen = inDetectedSolve ? _detectedTacticCand.preFen : m.fenBefore;
+  // In detected-tactic solve there is no invalidated-lines tracking —
+  // detected tactics aren't in SRS yet.
   const invLines = inDetectedSolve ? new Set() : getInvalidatedLines(posId(m));
 
-  tacticAltIdx++;
-  const altLine = tacticAltLines[tacticAltIdx];
-  // L1: a malformed short alt (cached with < 3 moves — legacy / corrupt
-  // entry) previously silently halted the flow, leaving the user on a blank
-  // state with no progression. Match the invalidated-branch pattern below:
-  // recurse to the next alt, or finish if exhausted.
-  // Empty/missing = malformed entry → skip. User-authored sequences (converted
-  // mistakes) may legitimately have short alt lines (1–2 plies), so the guard
-  // is length===0, not the old <3 (analyzer tactics always produce ≥3 anyway).
-  if (!altLine || altLine.length === 0) {
-    if (tacticAltIdx + 1 < tacticAltLines.length) {
-      loadNextTacticAlt();
-    } else {
-      finishTacticComplete();
+  // Credit lines whose user moves are already fully covered by solved
+  // prefixes (cascades: each push can extend prefixes for further lines —
+  // preserves the old sequential flow's auto-solve behavior).
+  let pushed = true;
+  while (pushed) {
+    pushed = false;
+    for (const alt of tacticAltLines) {
+      if (!alt || alt.length === 0) continue;
+      if (invLines.has(lineFingerprint(alt))) continue;
+      if (tacticSolvedLines.some(s => lineFingerprint(s) === lineFingerprint(alt))) continue;
+      const d = tacticCommonPrefixLen(alt);
+      const totalUser = alt.filter(tm => tm.isUser).length;
+      const solvedUser = alt.slice(0, d).filter(tm => tm.isUser).length;
+      if (solvedUser >= totalUser) { tacticSolvedLines.push([...alt]); pushed = true; }
     }
+  }
+
+  // Scan-based selection (replaces the old sequential tacticAltIdx++):
+  // load the first remaining MANDATORY line; optional lines never load
+  // from here (only via loadOptionalTacticAlt on the completion card).
+  const cls = classifyRemainingTacticAlts(invLines);
+  if (cls.mandatory.length === 0) {
+    finishTacticComplete();
     return;
   }
+  loadTacticAltAt(cls.mandatory[0]);
+}
 
-  // Skip invalidated lines
-  if (invLines.has(lineFingerprint(altLine))) {
-    if (tacticAltIdx + 1 < tacticAltLines.length) {
-      loadNextTacticAlt();
-    } else {
-      finishTacticComplete();
-    }
-    return;
-  }
+// Force-load an optional (better-eval, user-divergent) line from the
+// completion card. Re-arms drill state — tacticCompleted blocks moves via
+// the onDragStart guard, and SRS re-grading is prevented by srsRecorded.
+function loadOptionalTacticAlt(ai) {
+  const m = filteredMistakes[currentMistakeIdx];
+  if (!detectedTacticSolveMode && (!m || m.type !== 'tactic')) return;
+  const invLines = (detectedTacticSolveMode || !m) ? new Set() : getInvalidatedLines(posId(m));
+  const alt = tacticAltLines[ai];
+  if (!alt || alt.length === 0) return;
+  if (invLines.has(lineFingerprint(alt))) return;
+  if (tacticSolvedLines.some(s => lineFingerprint(s) === lineFingerprint(alt))) return;
+  tacticCompleted = false;
+  loadTacticAltAt(ai);
+}
 
-  // Find the longest common prefix with any previously solved line.
-  // This tells us how many moves the user has already proven they know.
-  let commonLen = 0;
-  for (const solved of tacticSolvedLines) {
-    let len = 0;
-    for (let i = 0; i < Math.min(altLine.length, solved.length); i++) {
-      if (altLine[i].uci === solved[i].uci) len++;
-      else break;
-    }
-    if (len > commonLen) commonLen = len;
-  }
+function loadTacticAltAt(ai) {
+  const m = filteredMistakes[currentMistakeIdx];
+  const inDetectedSolve = detectedTacticSolveMode;
+  if (!inDetectedSolve && (!m || m.type !== 'tactic')) return;
 
-  // If all user moves are already in the common prefix, skip this alt line
+  // In detected-tactic solve, the root fen comes from the candidate, not `m`.
+  const tacticBaseFen = inDetectedSolve ? _detectedTacticCand.preFen : m.fenBefore;
+
+  tacticAltIdx = ai;
+  const altLine = tacticAltLines[ai];
+  if (!altLine || altLine.length === 0) { finishTacticComplete(); return; }
+
+  // Prefix already proven against solved lines — replayed below, and the
+  // user only solves from the divergence onward.
+  const commonLen = tacticCommonPrefixLen(altLine);
   const totalUserMoves = altLine.filter(tm => tm.isUser).length;
   const solvedUserMoves = altLine.slice(0, commonLen).filter(tm => tm.isUser).length;
   if (solvedUserMoves >= totalUserMoves) {
+    // Fully covered (shouldn't reach here — callers pre-filter) — credit and rescan
     tacticSolvedLines.push([...altLine]);
-    if (tacticAltIdx + 1 < tacticAltLines.length) {
-      loadNextTacticAlt(); // skip to next alt
-    } else {
-      // All lines exhausted — trigger tactic completion
-      finishTacticComplete();
-    }
+    loadNextTacticAlt();
     return;
   }
 
@@ -14829,7 +14962,7 @@ function loadNextTacticAlt() {
   document.getElementById('posInfoContent').innerHTML = `
     <div style="font-size:13px;line-height:1.7">
       <div>${ICON_TACTIC} <strong>${altLabel}</strong> — ${remainingUserMoves} move${remainingUserMoves !== 1 ? 's' : ''} to find</div>
-      <div style="font-size:11px;color:var(--text-muted)">${isMaia ? '🧠 Opponent plays a common human mistake' : (altLine[commonLen] && altLine[commonLen].isUser ? 'Find another way' : 'Opponent plays differently')}</div>
+      <div style="font-size:11px;color:var(--text-muted)">${commonLen > 0 && altLine[commonLen] && altLine[commonLen].isUser ? '💡 Find a stronger move than before' : (isMaia ? '🧠 Opponent plays a common human mistake' : 'Opponent plays differently')}</div>
       <div id="tacticProgress" style="font-size:12px;margin-top:2px;color:var(--text-muted)">Move 1 of ${remainingUserMoves}</div>
     </div>
   `;
@@ -15146,25 +15279,14 @@ function confirmInvalidateLine(convertToMistake) {
     return;
   }
 
-  // Check for remaining unsolved alts
-  let hasUnsolved = false;
-  for (let ai = tacticAltIdx + 1; ai < tacticAltLines.length; ai++) {
-    const alt = tacticAltLines[ai];
-    // length===0 (not <3) — must match loadNextTacticAlt's relaxed guard
-    if (!alt || alt.length === 0) continue;
-    if (getInvalidatedLines(pid).has(lineFingerprint(alt))) continue;
-    let commonLen = 0;
-    for (const solved of tacticSolvedLines) {
-      let len = 0;
-      for (let i = 0; i < Math.min(alt.length, solved.length); i++) {
-        if (alt[i].uci === solved[i].uci) len++; else break;
-      }
-      if (len > commonLen) commonLen = len;
-    }
-    const totalUser = alt.filter(tm => tm.isUser).length;
-    const solvedUser = alt.slice(0, commonLen).filter(tm => tm.isUser).length;
-    if (solvedUser < totalUser) { hasUnsolved = true; break; }
-  }
+  // Check for remaining unsolved MANDATORY alts. Optional better-eval
+  // user-divergent lines don't force continuation — they're offered on the
+  // completion card. The just-invalidated line's fingerprint is already in
+  // getInvalidatedLines(pid), so classify skips it. Note: when the user
+  // invalidates mid-solve with nothing solved yet, user-divergent alts have
+  // no proven sibling and classify keeps them mandatory — they still drill.
+  const clsInv = classifyRemainingTacticAlts(getInvalidatedLines(pid));
+  const hasUnsolved = clsInv.mandatory.length > 0;
 
   if (hasUnsolved) {
     loadNextTacticAlt();
