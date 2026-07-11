@@ -1727,7 +1727,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Sequence validation on win% + optional alternative user moves. Sequence save validation now works in win-chance terms (SEQ_ALT_WP_THRESHOLD 5%): warns on covered user moves losing >5% wp vs best, and on any top-3 PV move within 5% of best that ISN'T covered by a branch (it would count as wrong in the drill) — the cp gap and won-position exemption are gone. User moves get their PV cp annotated at save. Drilling: playing a sibling unsolved line's expected user move switches the active line (swap; universal — no-ops for opponent-divergent analyzer tactics). Remaining alts are classified mandatory (opponent-divergent, or user-divergent with no proven sibling) vs optional (user-divergent with strictly higher stored eval than the best proven sibling; equal/worse/unmeasured are excluded, cascading to sub-lines until the branch is solved). loadNextTacticAlt is scan-based over mandatory lines; optional ones appear as '💡 Find a stronger move (+Ncp)' buttons on the completion card (grade not gated on them), loaded via loadOptionalTacticAlt.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Analysis root fixes + move deletion + sequence save from game review. (1) Plain-mistake analysis entry now roots the tree at m.fenBefore (the position PRIOR to the mistake) instead of the post-move board position; any move(s) already played on the board (gameEngine history) are seeded as the opening of the line with the cursor at the root — the pre-mistake position is reachable and sequence saving works there (root is player-to-move). (2) New 🗑 button (+ Delete key) in analysis controls: removes the current move and its whole subtree, lands on the parent; disabled at the root; deleted children[0] promotes the next sibling to main line. (3) New 🔍 Sequence button on game-review key-move and retry-result cards (user moves, wpDrop>2; hidden for unrevealed corrected deviations): enters analysis rooted at the position before that move with the played move seeded as a deletable first line move and 💾 Sequence enabled. seqSaveContext {kind:'mistake'|'review'} routes the save: review-sourced sequences save + inject like savePracticeTactic (no applyFilters, nothing invalidated, stays in analysis); mistake conversion path unchanged.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1911,6 +1911,7 @@
         <button class="btn btn-ghost btn-sm" onclick="analysisLineStep(1)">›</button>
         <button class="btn btn-ghost btn-sm" onclick="exitAnalysisMode()" style="border-color:var(--red);color:var(--red)">✕ Exit</button>
         <button class="btn btn-ghost btn-sm" onclick="copyAnalysisLinePgn(this)" title="Copy line as PGN" aria-label="Copy line as PGN">📋</button>
+        <button class="btn btn-ghost btn-sm" id="btnAnalysisDelete" onclick="analysisDeleteCurrent()" title="Remove this move and everything after it (Delete)" aria-label="Remove this move and everything after it">🗑</button>
         <button class="btn btn-ghost btn-sm hidden" id="btnSaveSequence" onclick="promptSaveSequence()" title="Save the lines you built as a drillable sequence (replaces the mistake)">💾 Sequence</button>
         <span class="hint">← → navigate · make moves to explore</span>
       </div>
@@ -7979,7 +7980,8 @@ let analysisTreeCurrent = null;  // Current node
 let analysisSavedState = null;   // Saved review-mode state for restoration
 let analysisOrientation = 'white';
 let analysisPvArrows = [];       // [{from, to, opacity, scale}] — multi-PV arrows
-let seqSaveEligible = false;     // "Save as sequence" available (analysis entered from a plain mistake)
+let seqSaveEligible = false;     // "Save as sequence" available (plain mistake OR game-review sequence analysis)
+let seqSaveContext = null;       // { kind:'mistake', mistakeIdx } | { kind:'review', playerColor, wpDrop }
 
 function makeTreeNode(fen, san, uci, parent) {
   const id = ++analysisNodeId;
@@ -7988,7 +7990,7 @@ function makeTreeNode(fen, san, uci, parent) {
   return node;
 }
 
-function enterAnalysisMode() {
+function enterAnalysisMode(opts = {}) {
   if (analysisMode) return;
   // Block during detected-tactic solve — entering analysis would orphan the
   // tactic state and the review snapshot we took in tryDetectedTactic
@@ -8098,11 +8100,22 @@ function enterAnalysisMode() {
     tacticSnapshot,
   };
 
-  // "Save as sequence" (mistake → multi-move drill conversion) is offered only
-  // when analysis was entered from a plain mistake review — game-review entry
-  // seeds the tree with the whole game (paths would include the full game as
-  // the main line) and tactic entry already IS a multi-move drill.
-  seqSaveEligible = !reviewSnapshot && !tacticSnapshot && m.type === 'mistake';
+  // "Save as sequence" (mistake → multi-move drill conversion) is offered when
+  // analysis was entered from a plain mistake review, OR as an explicit
+  // "Sequence analysis" from a game-review key move (opts.seqReview — tree
+  // rooted at the position before that move, see below). Plain game-review
+  // entry stays excluded: it seeds the tree with the whole game (paths would
+  // include the full game as the main line); tactic entry already IS a
+  // multi-move drill. seqSaveContext tells promptSaveSequence /
+  // confirmSaveSequence which flow to use ('mistake' = convert-and-replace,
+  // 'review' = plain save, nothing to invalidate).
+  const seqReview = opts && opts.seqReview ? opts.seqReview : null;
+  seqSaveEligible = !!seqReview || (!reviewSnapshot && !tacticSnapshot && m.type === 'mistake');
+  seqSaveContext = seqReview
+    ? { kind: 'review',
+        playerColor: seqReview.rootFen.split(' ')[1] === 'w' ? 'white' : 'black',
+        wpDrop: seqReview.wpDrop || 0 }
+    : (seqSaveEligible ? { kind: 'mistake', mistakeIdx: currentMistakeIdx } : null);
   const btnSeqEl = document.getElementById('btnSaveSequence');
   if (btnSeqEl) btnSeqEl.classList.toggle('hidden', !seqSaveEligible);
   const seqDlgEl = document.getElementById('seqSaveDialog');
@@ -8131,10 +8144,24 @@ function enterAnalysisMode() {
   analysisDepth = 0;
   analysisComplete = false;
 
-  // Build initial tree — seed with the full continuation game when entering
-  // from game review so the user can navigate any move and branch anywhere.
-  const fullGameAvailable = inReviewContext && contLine && Array.isArray(contLine.moves) && contLine.moves.length > 0;
-  const treeRootFen = fullGameAvailable ? contLine.baseFen : startFen;
+  // Build initial tree. Root selection:
+  //   - Sequence analysis from a game-review key move (opts.seqReview): root
+  //     at the position BEFORE that move; the played move is seeded as the
+  //     first move of the line (removable via 🗑 / Delete).
+  //   - Plain mistake entry (no review/tactic context, no continuation): root
+  //     at m.fenBefore — the position PRIOR to the mistake — with any move(s)
+  //     already played on the board seeded as the opening of the line.
+  //     Previously the root was the post-move board position, which made the
+  //     pre-mistake position unreachable and blocked sequence saving there
+  //     (root was opponent-to-move).
+  //   - Game review entry: whole game seeded (unchanged).
+  const plainMistakeEntry = !seqReview && !reviewSnapshot && !tacticSnapshot &&
+                            !contLine && m.type === 'mistake';
+  const fullGameAvailable = !seqReview && inReviewContext && contLine && Array.isArray(contLine.moves) && contLine.moves.length > 0;
+  const treeRootFen = seqReview ? seqReview.rootFen
+    : fullGameAvailable ? contLine.baseFen
+    : plainMistakeEntry ? m.fenBefore
+    : startFen;
   analysisTree = makeTreeNode(treeRootFen, null, null, null);
   analysisTreeCurrent = analysisTree;
 
@@ -8160,6 +8187,37 @@ function enterAnalysisMode() {
       matched = n;
     }
     if (matched) analysisTreeCurrent = matched;
+  } else if (seqReview && seqReview.seedMove && seqReview.seedMove.uci && seqReview.seedMove.uci.length >= 4) {
+    // Seed the key move from the game as the first move of the line so the
+    // context isn't lost. It becomes children[0] — i.e. the main line as
+    // saved — so remove it (🗑) or branch around it when building the
+    // correct line. analysisTreeCurrent stays at the root: analysis starts
+    // at the position BEFORE the mistake.
+    const c = new Chess(treeRootFen);
+    const u = seqReview.seedMove.uci;
+    const mvv = c.move({ from: u.substring(0, 2), to: u.substring(2, 4), promotion: u.length > 4 ? u[4] : undefined });
+    if (mvv) {
+      analysisTree.children.push(makeTreeNode(c.fen(), mvv.san, u, analysisTree));
+    }
+  } else if (plainMistakeEntry && gameEngine) {
+    // Seed whatever was already played from the mistake position (the retry
+    // attempt / revealed best move — gameEngine is rooted at m.fenBefore in
+    // this state, incl. while browsing an engine line, whose navigation only
+    // moves boardObj). analysisTreeCurrent stays at the root so analysis
+    // starts at the position PRIOR to the mistake, with the played move one
+    // → away.
+    const hist = gameEngine.history({ verbose: true });
+    if (hist.length > 0) {
+      const c = new Chess(m.fenBefore);
+      let parent = analysisTree;
+      for (const h of hist) {
+        const mvv = c.move({ from: h.from, to: h.to, promotion: h.promotion });
+        if (!mvv) break;   // gameEngine wasn't rooted at fenBefore — abort seeding
+        const node = makeTreeNode(c.fen(), mvv.san, h.from + h.to + (h.promotion || ''), parent);
+        parent.children.push(node);
+        parent = node;
+      }
+    }
   }
 
   // Initialize separate chess engine for analysis
@@ -8203,8 +8261,10 @@ function enterAnalysisMode() {
   // Highlight the selected move's from/to squares so the user can see which
   // position is current in the loaded game. Only relevant when the tree was
   // seeded with moves — in the empty-tree case we preserve whatever highlight
-  // the prior context left on the board.
-  if (fullGameAvailable) {
+  // the prior context left on the board. seqReview / plainMistakeEntry roots
+  // move the board to the PRE-move position (current = root, no uci), so a
+  // lingering played-move highlight would be stale — clear it.
+  if (fullGameAvailable || seqReview || plainMistakeEntry) {
     if (analysisTreeCurrent.uci && analysisTreeCurrent.uci.length >= 4) {
       showLastMoveHighlight(analysisTreeCurrent.uci.substring(0, 2), analysisTreeCurrent.uci.substring(2, 4));
     } else {
@@ -8222,6 +8282,27 @@ function enterAnalysisMode() {
 
   // Start analysis
   startAnalysisSearch(analysisTreeCurrent.fen);
+}
+
+// "🔍 Sequence" on a game-review key-move / retry-result card: enter analysis
+// in sequence mode — tree rooted at the position BEFORE the key move, the
+// played move seeded as the first (deletable) line move, 💾 Sequence enabled.
+// Escape / ✕ Exit restores the review via the reviewSnapshot taken in
+// enterAnalysisMode, exactly like a normal review→analysis round-trip.
+function enterSequenceAnalysisFromReview(moveIdx) {
+  if (analysisMode || detectedTacticSolveMode) return;
+  if (!contLine || !Array.isArray(contLine.moves) || !contLine.moves[moveIdx]) return;
+  const mv = contLine.moves[moveIdx];
+  if (!mv.isUser) return;  // sequence root must be player-to-move
+  const rootFen = moveIdx > 0 ? contLine.moves[moveIdx - 1].fen : contLine.baseFen;
+  if (!rootFen) return;
+  enterAnalysisMode({
+    seqReview: {
+      rootFen,
+      seedMove: { uci: mv.uci, san: mv.san },
+      wpDrop: mv.wpDrop || 0,
+    },
+  });
 }
 
 function exitAnalysisMode() {
@@ -8523,10 +8604,17 @@ function seqPosLabel(fen) {
 
 function promptSaveSequence() {
   const dlg = document.getElementById('seqSaveDialog');
-  if (!dlg || !analysisMode || !seqSaveEligible || !analysisTree) return;
-  const m = filteredMistakes[analysisSavedState?.mistakeIdx ?? -1];
-  if (!m || m.type !== 'mistake') return;
-  const playerColor = m.playerColor || 'white';
+  if (!dlg || !analysisMode || !seqSaveEligible || !analysisTree || !seqSaveContext) return;
+  let playerColor;
+  if (seqSaveContext.kind === 'review') {
+    // Game-review sequence analysis — the root fen is the position before the
+    // key move (player-to-move by construction; color derived from it).
+    playerColor = seqSaveContext.playerColor || 'white';
+  } else {
+    const m = filteredMistakes[analysisSavedState?.mistakeIdx ?? -1];
+    if (!m || m.type !== 'mistake') return;
+    playerColor = m.playerColor || 'white';
+  }
   const userChar = playerColor === 'white' ? 'w' : 'b';
 
   // The drill machinery assumes tacticMoves[0] is the user's move, so the
@@ -8578,7 +8666,7 @@ function promptSaveSequence() {
         <div style="font-size:12px;"><code>${escHtml(mainPreview)}</code></div>
         <div style="font-size:12px;margin-top:4px;">${userMoveCount} move${userMoveCount !== 1 ? 's' : ''} to find${altCount > 0 ? ` + ${altCount} alt line${altCount > 1 ? 's' : ''}` : ''}</div>
         ${warnHtml}
-        <div style="margin-top:6px;font-size:11px;color:var(--text-muted);">Saving removes the original mistake from reviews.</div>
+        ${seqSaveContext.kind === 'mistake' ? '<div style="margin-top:6px;font-size:11px;color:var(--text-muted);">Saving removes the original mistake from reviews.</div>' : ''}
         <div style="margin-top:8px;display:flex;gap:8px;">
           <button class="btn btn-ghost btn-sm" style="border-color:var(--green);color:var(--green);" onclick="confirmSaveSequence()">${warnings.length ? 'Save anyway' : 'Save'}</button>
           <button class="btn btn-ghost btn-sm" onclick="document.getElementById('seqSaveDialog').innerHTML=''">Cancel</button>
@@ -8589,11 +8677,12 @@ function promptSaveSequence() {
 
 function confirmSaveSequence() {
   const dlg = document.getElementById('seqSaveDialog');
-  if (!analysisMode || !seqSaveEligible || !analysisTree) return;
-  const mIdx = analysisSavedState?.mistakeIdx ?? -1;
-  const m = filteredMistakes[mIdx];
-  if (!m || m.type !== 'mistake') return;
-  const playerColor = m.playerColor || 'white';
+  if (!analysisMode || !seqSaveEligible || !analysisTree || !seqSaveContext) return;
+  const fromReview = seqSaveContext.kind === 'review';
+  const mIdx = fromReview ? -1 : (analysisSavedState?.mistakeIdx ?? -1);
+  const m = fromReview ? null : filteredMistakes[mIdx];
+  if (!fromReview && (!m || m.type !== 'mistake')) return;
+  const playerColor = fromReview ? (seqSaveContext.playerColor || 'white') : (m.playerColor || 'white');
 
   // Re-walk at confirm time — the user can keep exploring while the dialog
   // is open, so the prompt-time snapshot may be stale. Strip _parentFen
@@ -8627,7 +8716,8 @@ function confirmSaveSequence() {
     return;
   }
 
-  const origPid = posId(m);
+  const origPid = fromReview ? null : posId(m);
+  const seqWpDrop = Math.abs((fromReview ? seqSaveContext.wpDrop : m.wpDrop) || 0);
   const rootPvs = seqPvsForFen(fenBefore);
   const gameId = `_practice_tactic_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const rec = {
@@ -8640,27 +8730,24 @@ function confirmSaveSequence() {
     tacticMoves: lines[0],
     tacticAltLines: lines.slice(1),
     maiaOpponentMoves: null,
-    wpSwing: Math.abs(m.wpDrop || 0),
-    wpDrop: Math.abs(m.wpDrop || 0),
+    wpSwing: seqWpDrop,
+    wpDrop: seqWpDrop,
     found: false,   // they blundered here in the game — accurate for converted mistakes
     evalBefore: { eval: rootPvs?.[0]?.cp ?? 0 },  // side-to-move (user) POV, matches savePracticeTactic
     evalAfter: null,
-    _opening: m.game?.opening?.name || lookupOpeningName(fenBefore) || 'Sequence',
+    _opening: (!fromReview && m.game?.opening?.name) || lookupOpeningName(fenBefore) || 'Sequence',
     _createdAt: Date.now(),
-    _source: 'converted-mistake',
+    _source: fromReview ? 'game-review' : 'converted-mistake',
     _isSequence: true,
-    _sourceGameId: m.gameId,
-    _sourcePosId: origPid,
     _chainSig: chainSig,
   };
+  if (!fromReview) {
+    rec._sourceGameId = m.gameId;
+    rec._sourcePosId = origPid;
+  }
   gistData.practiceTactics.push(rec);
 
-  // Convert REPLACES: invalidate + drop the original mistake.
-  // invalidateMistake also debounces the Gist sync, covering the push above.
-  invalidateMistake(origPid);
-  allMistakes = allMistakes.filter(mm => posId(mm) !== origPid);
-
-  // Inject the sequence into live lists (same wrapper as savePracticeTactic)
+  // Live-list wrapper (same as savePracticeTactic)
   const liveEntry = {
     ...rec,
     game: {
@@ -8673,6 +8760,25 @@ function confirmSaveSequence() {
       players: {},
     },
   };
+
+  if (fromReview) {
+    // Game-review sourced sequence: nothing to invalidate or replace — the
+    // key move isn't an SRS item. Save + inject (no applyFilters: it would
+    // wipe an active practiceContItem when reviewing a filter-practice game)
+    // and STAY in analysis so the user can keep exploring or exit back to
+    // the review (reviewSnapshot restore handles that as usual).
+    debounceSyncToGist();
+    allMistakes.push(liveEntry);
+    filteredMistakes.push(liveEntry);
+    if (dlg) dlg.innerHTML = `<div class="feedback-box" style="border-left:3px solid var(--green);">
+      <div class="feedback-text" style="font-size:12px;">✓ Sequence saved — it's now in your review queue.</div></div>`;
+    return;
+  }
+
+  // Convert REPLACES: invalidate + drop the original mistake.
+  // invalidateMistake also debounces the Gist sync, covering the push above.
+  invalidateMistake(origPid);
+  allMistakes = allMistakes.filter(mm => posId(mm) !== origPid);
   allMistakes.push(liveEntry);
 
   // Leave analysis and land on the new sequence. Null analysisSavedState
@@ -9310,6 +9416,14 @@ function renderAnalysisTree() {
   const active = container.querySelector('.active');
   if (active) active.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   updateLineNavBar();
+
+  // 🗑 only makes sense on an actual move — disabled at the root position.
+  const delBtn = document.getElementById('btnAnalysisDelete');
+  if (delBtn) {
+    const canDelete = !!(analysisTreeCurrent && analysisTreeCurrent.parent);
+    delBtn.disabled = !canDelete;
+    delBtn.style.opacity = canDelete ? '' : '0.4';
+  }
 }
 
 function analysisGoToNode(nodeId) {
@@ -9351,6 +9465,27 @@ function analysisLineStep(delta) {
       analysisGoToNode(analysisTreeCurrent.parent.id);
     }
   }
+}
+
+// 🗑 / Delete key: remove the current move AND its whole subtree from the
+// analysis tree, landing on the parent position. No-op at the root (there is
+// no move to remove there — the button is disabled by renderAnalysisTree).
+// If the removed node was children[0] of its parent, the next sibling (if
+// any) is promoted to main line automatically by array order.
+function analysisDeleteCurrent() {
+  if (!analysisMode || !analysisTreeCurrent || !analysisTreeCurrent.parent) return;
+  const node = analysisTreeCurrent;
+  const parent = node.parent;
+  parent.children = parent.children.filter(c => c !== node);
+  // Purge the subtree from the id lookup so stale onclick="analysisGoToNode(id)"
+  // handlers (pre-rerender) and future id reuse can't resurrect it.
+  (function purge(n) {
+    delete analysisNodes[n.id];
+    for (const c of (n.children || [])) purge(c);
+  })(node);
+  // analysisGoToNode re-renders the tree, refreshes the note indicator and
+  // restarts/restores analysis for the parent position.
+  analysisGoToNode(parent.id);
 }
 
 // ─── Maia 3 Engine ───
@@ -19299,6 +19434,15 @@ function showReviewKeyMoveInfo(moveIdx, revealed = false) {
       ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" disabled>✓ Saved</button>`
       : `<button class="btn btn-ghost btn-sm" style="font-size:11px;" id="btnSaveMistake${moveIdx}" onclick="savePracticeMistake(${moveIdx})">💾 Save</button>`)
     : '';
+  // Sequence analysis: analysis rooted at the position BEFORE this move with
+  // 💾 Sequence enabled — build the correct line(s) and save them as a
+  // drillable sequence directly from the review, instead of the old
+  // save-mistake → wait for review → convert round-trip. Hidden for
+  // unrevealed corrected deviations (the played move IS the answer; seeding
+  // it into the tree would spoil the recall drill).
+  const seqBtn = (mv.isUser && mv.wpDrop > 2 && !hideAnswer)
+    ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="enterSequenceAnalysisFromReview(${moveIdx})" title="Analyze from the position before this move and save the lines you build as a drillable sequence">🔍 Sequence</button>`
+    : '';
 
   const container = document.getElementById('feedbackContainer');
   const navHtml = `
@@ -19362,6 +19506,7 @@ function showReviewKeyMoveInfo(moveIdx, revealed = false) {
           ${mv.bestMoveUci && !hideAnswer ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewBestLine(${moveIdx})">Show line</button>` : ''}
           ${refutationBtn}
           ${saveBtn}
+          ${seqBtn}
         </div>
         ${navHtml}
       </div>
@@ -20126,6 +20271,12 @@ function handleReviewRetryResult(wpDrop, move, bestMoveSan, isExactBest, repMatc
       ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" disabled>✓ Saved</button>`
       : `<button class="btn btn-ghost btn-sm" style="font-size:11px;" id="btnSaveMistake${moveIdx}" onclick="savePracticeMistake(${moveIdx})">💾 Save</button>`)
     : '';
+  // Same "Sequence analysis" entry as on the key-move card (see
+  // showReviewKeyMoveInfo) — post-retry is the natural moment: the user just
+  // found (or was shown) a better move and can turn the line into a drill.
+  const seqBtn = (originalMv.isUser && originalMv.wpDrop > 2)
+    ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="enterSequenceAnalysisFromReview(${moveIdx})" title="Analyze from the position before this move and save the lines you build as a drillable sequence">🔍 Sequence</button>`
+    : '';
 
   const navHtml = `
     <div style="display:flex;gap:8px;margin-top:10px;">
@@ -20138,7 +20289,7 @@ function handleReviewRetryResult(wpDrop, move, bestMoveSan, isExactBest, repMatc
   container.innerHTML = `
     <div class="feedback-box" style="background:${repMatch ? 'rgba(139,125,216,0.10)' : wpDropToColorDim(wpDrop)};border-left:3px solid ${color};">
       <div class="feedback-title" style="color:${color}">${title}</div>
-      <div class="feedback-text">${body}${exploreBtns}${saveBtn ? `<div style="margin-top:6px;">${saveBtn}</div>` : ''}${navHtml}</div>
+      <div class="feedback-text">${body}${exploreBtns}${(saveBtn || seqBtn) ? `<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">${saveBtn}${seqBtn}</div>` : ''}${navHtml}</div>
     </div>
   `;
 }
@@ -26688,6 +26839,7 @@ document.addEventListener('keydown', (e) => {
   if (analysisMode) {
     if (e.key === 'ArrowLeft') { analysisLineStep(-1); e.preventDefault(); }
     if (e.key === 'ArrowRight') { analysisLineStep(1); e.preventDefault(); }
+    if (e.key === 'Delete') { analysisDeleteCurrent(); e.preventDefault(); }
     if (e.key === 'f' || e.key === 'F') analysisFlipBoard();
     // Issue #15: allow the note-panel toggle inside analysis mode; the
     // rest of the document-level shortcut block below this return is
