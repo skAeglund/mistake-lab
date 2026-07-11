@@ -605,6 +605,22 @@
   }
   .analysis-pv-moves .pv-move:hover { background: var(--bg-card-hover); color: var(--text-primary); }
   .analysis-pv-moves .move-num { color: var(--text-muted); font-size: 11px; }
+  .analysis-pv-row .maia-prob {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600;
+    color: #c58fe0; background: rgba(197,143,224,0.12);
+    padding: 1px 5px; border-radius: 4px; flex-shrink: 0; margin-left: 4px;
+    align-self: center;
+  }
+  .analysis-pv-row .maia-prob.top { background: rgba(197,143,224,0.22); }
+  .analysis-pv-row.maia-row .analysis-pv-eval.maia {
+    background: rgba(197,143,224,0.15); color: #c58fe0; font-size: 12px;
+  }
+  #btnAnalysisMaia.active { border-color: #c58fe0; color: #c58fe0; }
+  .analysis-maia-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 5px 10px; border-bottom: 1px solid var(--border);
+  }
+  .analysis-maia-row input[type=range] { flex: 1; max-width: 160px; }
   .analysis-tree {
     flex: 1; overflow-y: auto; padding: 10px 12px;
   }
@@ -1727,7 +1743,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Analysis root fixes + move deletion + sequence save from game review. (1) Plain-mistake analysis entry now roots the tree at m.fenBefore (the position PRIOR to the mistake) instead of the post-move board position; any move(s) already played on the board (gameEngine history) are seeded as the opening of the line with the cursor at the root — the pre-mistake position is reachable and sequence saving works there (root is player-to-move). (2) New 🗑 button (+ Delete key) in analysis controls: removes the current move and its whole subtree, lands on the parent; disabled at the root; deleted children[0] promotes the next sibling to main line. (3) New 🔍 Sequence button on game-review key-move and retry-result cards (user moves, wpDrop>2; hidden for unrevealed corrected deviations): enters analysis rooted at the position before that move with the played move seeded as a deletable first line move and 💾 Sequence enabled. seqSaveContext {kind:'mistake'|'review'} routes the save: review-sourced sequences save + inject like savePracticeTactic (no applyFilters, nothing invalidated, stays in analysis); mistake conversion path unchanged.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Maia predictions in Analysis Mode. New 🧠 toggle in the analysis header runs the current position through Maia 3 (raw policy softmax at temperature 1 — the human-move distribution at the chosen ELO) and annotates the PV list: probability badges (≥10%) on matching PV rows, and when Maia's top move isn't among the 3 engine PVs it's appended as a clickable violet 4th row with a matching board arrow. Adjustable ELO slider (1600–2200, step 25) independent of the continuation opponent, persisted with the toggle in localStorage 'mistakelab_analysis_maia'. Predictions kick on every position change via startAnalysisSearch, memoized by fenPositionKey|elo (300-entry cache), stale-async guarded by a session token, and serialized through a promise chain (ort-web sessions aren't re-entrant under rapid navigation). Compiles the model on demand with a 'Preparing Maia…' status row; new maiaPolicyTopMoves() returns the full legal-move distribution (SANs from the original FEN — mirrored-board SANs are wrong for black).</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1895,9 +1911,15 @@
       <div class="analysis-header">
         <span>SF 18 · <span class="analysis-depth" id="analysisDepthTag"><span class="depth-num">0</span></span></span>
         <span style="display:flex;gap:4px;align-items:center;">
+          <button class="btn btn-ghost btn-sm" id="btnAnalysisMaia" style="font-size:11px;padding:2px 6px;" onclick="toggleAnalysisMaia()" title="Show Maia move predictions (what a human would play)">🧠</button>
           <button class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 6px;" onclick="analysisFlipBoard()" title="Flip board">⇅</button>
           <button class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 6px;" onclick="openLichessAnalysisFromMode()" title="Open in Lichess">♟</button>
         </span>
+      </div>
+      <div class="analysis-maia-row hidden" id="analysisMaiaRow">
+        <span style="font-size:11px;color:var(--text-muted);white-space:nowrap;">🧠 Maia ELO</span>
+        <input type="range" id="analysisMaiaEloSlider" min="1600" max="2200" step="25" value="2000" oninput="onAnalysisMaiaEloChange(this.value)">
+        <span id="analysisMaiaEloValue" style="font-size:11px;font-weight:600;color:#c58fe0;">2000</span>
       </div>
       <div class="analysis-pvs" id="analysisPvsContainer">
         <div class="analysis-pv-row" style="color:var(--text-muted);font-size:12px;">Starting analysis…</div>
@@ -7983,6 +8005,37 @@ let analysisPvArrows = [];       // [{from, to, opacity, scale}] — multi-PV ar
 let seqSaveEligible = false;     // "Save as sequence" available (plain mistake OR game-review sequence analysis)
 let seqSaveContext = null;       // { kind:'mistake', mistakeIdx } | { kind:'review', playerColor, wpDrop }
 
+// ─── Maia predictions in analysis mode ───
+// When toggled on (🧠 in the analysis header), the current position is run
+// through Maia 3 and the raw policy distribution (softmax at temperature 1 —
+// what a human at analysisMaiaElo actually plays) annotates the PV list:
+// probability badges on matching PV rows, plus a violet extra row (and board
+// arrow) when Maia's top move isn't among the 3 engine PVs.
+const ANALYSIS_MAIA_LS_KEY = 'mistakelab_analysis_maia';
+const ANALYSIS_MAIA_FLAG_MIN = 10;   // % — badge PV rows at/above this probability
+const ANALYSIS_MAIA_CACHE_MAX = 300; // memoized positions (fenPositionKey|elo → moves)
+let analysisMaiaOn = false;
+let analysisMaiaElo = 2000;          // independent of the continuation opponent's maiaElo
+let analysisMaiaResult = null;       // { fen, elo, moves: [{uci, san, prob}] } for the current position
+let analysisMaiaSession = 0;         // stale-async guard (bumped on every position/elo change)
+let analysisMaiaFailed = false;      // last prediction attempt failed / model unavailable
+const analysisMaiaCache = new Map();
+let _analysisMaiaEloTimer = null;
+let _maiaPolicyChain = Promise.resolve(); // serializes session.run() — ort-web sessions aren't re-entrant
+
+function loadAnalysisMaiaSettings() {
+  try {
+    const s = JSON.parse(localStorage.getItem(ANALYSIS_MAIA_LS_KEY) || '{}');
+    if (typeof s.elo === 'number' && s.elo >= 1600 && s.elo <= 2200) analysisMaiaElo = s.elo;
+    analysisMaiaOn = !!s.on;
+  } catch (_) {}
+}
+loadAnalysisMaiaSettings();
+
+function saveAnalysisMaiaSettings() {
+  lsSetSafe(ANALYSIS_MAIA_LS_KEY, JSON.stringify({ on: analysisMaiaOn, elo: analysisMaiaElo }), 'analysis-maia settings');
+}
+
 function makeTreeNode(fen, san, uci, parent) {
   const id = ++analysisNodeId;
   const node = { id, fen, san, uci, parent, children: [], cachedPvs: null, cachedDepth: 0 };
@@ -8231,6 +8284,9 @@ function enterAnalysisMode(opts = {}) {
 
   // Show analysis panel
   document.getElementById('analysisPanel').classList.remove('hidden');
+  // Reflect the persisted 🧠 Maia toggle/ELO state (row visibility, slider,
+  // button accent). The prediction itself is kicked by startAnalysisSearch.
+  syncAnalysisMaiaUi();
 
   // Exit any engine line / continuation / tactic state
   stopPreAnalysis();
@@ -8308,6 +8364,11 @@ function enterSequenceAnalysisFromReview(moveIdx) {
 function exitAnalysisMode() {
   if (!analysisMode) return;
   analysisMode = false;
+
+  // Discard any in-flight / stale Maia prediction
+  analysisMaiaSession++;
+  analysisMaiaResult = null;
+  clearTimeout(_analysisMaiaEloTimer);
 
   // Stop analysis search
   stopAnalysisSearch();
@@ -8957,6 +9018,10 @@ function stopAnalysisSearch() {
 
 function startAnalysisSearch(fen) {
   stopAnalysisSearch();
+  // Maia prediction runs alongside the SF search (fire-and-forget; no-ops
+  // when the 🧠 toggle is off). Placed here because every analysis position
+  // change funnels through startAnalysisSearch.
+  updateAnalysisMaia(fen);
   analysisPvs = [];
   analysisDepth = 0;
   analysisComplete = false;
@@ -9129,6 +9194,14 @@ function renderAnalysisPvs() {
   const fen = analysisEngine ? analysisEngine.fen() : '';
   const isBlackTurn = fen.split(' ')[1] === 'b';
 
+  // Maia annotations: only when the result matches the rendered position
+  // (re-renders happen constantly while SF deepens; the prediction for the
+  // previous position must never leak onto the new one).
+  const maiaActive = analysisMaiaOn && analysisMaiaResult && analysisMaiaResult.fen === fen;
+  const maiaByUci = {};
+  if (maiaActive) for (const mm of analysisMaiaResult.moves) maiaByUci[mm.uci] = mm.prob;
+  const maiaTop = maiaActive && analysisMaiaResult.moves.length > 0 ? analysisMaiaResult.moves[0] : null;
+
   let html = '';
   for (let i = 0; i < analysisPvs.length; i++) {
     const pv = analysisPvs[i];
@@ -9142,11 +9215,32 @@ function renderAnalysisPvs() {
     // Convert UCI line to SAN
     const sansHtml = uciLineToSansHtml(fen, pv.uciLine, i);
 
+    // 🧠 badge on rows Maia considers likely (top prediction gets the
+    // stronger tint)
+    let maiaBadge = '';
+    if (maiaActive && maiaByUci[pv.move] !== undefined && maiaByUci[pv.move] >= ANALYSIS_MAIA_FLAG_MIN) {
+      const isTop = maiaTop && maiaTop.uci === pv.move;
+      maiaBadge = `<span class="maia-prob${isTop ? ' top' : ''}" title="A human at ${analysisMaiaResult.elo} plays this ${Math.round(maiaByUci[pv.move])}% of the time (Maia 3)">🧠 ${Math.round(maiaByUci[pv.move])}%</span>`;
+    }
+
     html += `<div class="analysis-pv-row${bestClass}" onmouseenter="analysisPvHover(${i})" onmouseleave="analysisPvLeave()">
       <span class="analysis-pv-eval ${evalClass}">${evalStr}</span>
-      <span class="analysis-pv-moves">${sansHtml}</span>
+      <span class="analysis-pv-moves">${sansHtml}</span>${maiaBadge}
     </div>`;
   }
+
+  // Maia's top prediction as an extra row when it isn't among the engine's
+  // top-3 first moves; status row while the model prepares / thinks.
+  if (maiaTop && maiaTop.uci && !analysisPvs.some(pv => pv.move === maiaTop.uci)) {
+    html += `<div class="analysis-pv-row maia-row" onclick="analysisPlayMaiaMove('${maiaTop.uci}')" onmouseenter="analysisMaiaHover('${maiaTop.uci}')" onmouseleave="analysisPvLeave()" title="Maia's most likely human move at ${analysisMaiaResult.elo} — click to play it">
+      <span class="analysis-pv-eval maia">🧠</span>
+      <span class="analysis-pv-moves"><span class="pv-move">${escHtml(maiaTop.san)}</span></span>
+      <span class="maia-prob top">${Math.round(maiaTop.prob)}%</span>
+    </div>`;
+  } else if (analysisMaiaOn && !maiaActive) {
+    html += `<div class="analysis-pv-row" style="color:var(--text-muted);font-size:11px;cursor:default;">🧠 ${analysisMaiaFailed ? 'Maia unavailable' : (maiaReady ? 'Maia thinking…' : 'Preparing Maia model…')}</div>`;
+  }
+
   container.innerHTML = html;
   updateAnalysisPvArrows();
   renderArrows();
@@ -9227,6 +9321,19 @@ function updateAnalysisPvArrows() {
     const g = Math.round(180 - t * 60);
     const b = Math.round(164 - t * 137);
     arrows.push({ from, to, opacity, scale, color: `rgb(${r},${g},${b})` });
+  }
+
+  // Violet arrow for Maia's top prediction when it isn't one of the PV first
+  // moves (matches the extra 🧠 row in the PV list). `seen` holds ALL PV first
+  // moves (added before the gap cutoff), so this fires exactly when the extra
+  // row renders.
+  const curFen = analysisEngine ? analysisEngine.fen() : null;
+  if (analysisMaiaOn && analysisMaiaResult && analysisMaiaResult.fen === curFen &&
+      analysisMaiaResult.moves.length > 0) {
+    const mm = analysisMaiaResult.moves[0];
+    if (mm.uci && mm.uci.length >= 4 && !seen.has(mm.uci.substring(0, 4))) {
+      arrows.push({ from: mm.uci.substring(0, 2), to: mm.uci.substring(2, 4), opacity: 0.55, scale: 0.9, color: 'rgb(197,143,224)' });
+    }
   }
   analysisPvArrows = arrows;
 }
@@ -9799,6 +9906,208 @@ async function maiaPredict(fen) {
     console.error('[Maia] Prediction failed:', err);
     return null;
   }
+}
+
+/**
+ * Full Maia policy for a position at a given ELO: softmax over legal moves at
+ * temperature 1 (the raw human-move distribution, no sampling). Returns the
+ * top moves as [{uci, san, prob}] sorted by probability (prob in %), or null
+ * if Maia is unavailable / inference fails. Used by the analysis-mode 🧠
+ * predictions — deliberately separate from maiaPredict (which samples a single
+ * move at the global maiaElo/maiaPrecision for the continuation opponent).
+ */
+async function maiaPolicyTopMoves(fen, elo) {
+  if (!maiaReady || !maiaSession || !maiaMovesForward || !maiaMovesReverse) return null;
+  try {
+    const isBlack = fen.split(' ')[1] === 'b';
+    const workFen = isBlack ? maiaMirrorFEN(fen) : fen;
+    const boardTokens = maiaEncodeBoard(workFen);
+
+    // Legal move mask on the (possibly mirrored) FEN — same as maiaPredict
+    const chess = new Chess(workFen);
+    const legalMoves = chess.moves({ verbose: true });
+    const legalMask = new Float32Array(4352);
+    for (const m of legalMoves) {
+      const idx = maiaMovesForward[m.from + m.to + (m.promotion || '')];
+      if (idx !== undefined) legalMask[idx] = 1.0;
+    }
+
+    const feeds = {};
+    for (const name of maiaInputNames) {
+      const n = name.toLowerCase();
+      if (n.includes('board') || n.includes('token') || n.includes('input')) {
+        feeds[name] = new ort.Tensor('float32', boardTokens, [1, 64, 12]);
+      } else {
+        // self / oppo / unknown scalar inputs all get the requested ELO
+        feeds[name] = new ort.Tensor('float32', Float32Array.from([elo]), [1]);
+      }
+    }
+
+    const result = await maiaSession.run(feeds);
+    let logits = null;
+    for (const name of maiaOutputNames) {
+      const data = result[name].data;
+      if (data.length >= 4352) { logits = data; break; }
+    }
+    if (!logits) return null;
+
+    // Softmax over legal indices only
+    const idxs = [], vals = [];
+    for (let i = 0; i < 4352; i++) {
+      if (legalMask[i] > 0) { idxs.push(i); vals.push(logits[i]); }
+    }
+    if (idxs.length === 0) return null;
+    const maxL = Math.max(...vals);
+    const exps = vals.map(v => Math.exp(v - maxL));
+    const sum = exps.reduce((a, b) => a + b, 0);
+
+    // SANs must come from the ORIGINAL fen — the mirrored board's SANs are
+    // wrong for black-to-move positions.
+    const sanByUci = {};
+    for (const m of new Chess(fen).moves({ verbose: true })) {
+      sanByUci[m.from + m.to + (m.promotion || '')] = m.san;
+    }
+
+    return idxs.map((idx, i) => {
+      let uci = maiaMovesReverse[String(idx)];
+      if (isBlack && uci) uci = maiaMirrorMove(uci);
+      return { uci, san: (uci && sanByUci[uci]) || uci, prob: (exps[i] / sum) * 100 };
+    }).filter(mv => mv.uci)
+      .sort((a, b) => b.prob - a.prob)
+      .slice(0, 8);
+  } catch (err) {
+    console.warn('[Maia] Policy prediction failed:', err);
+    return null;
+  }
+}
+
+// ─── Analysis-mode Maia predictions ───
+function toggleAnalysisMaia() {
+  analysisMaiaOn = !analysisMaiaOn;
+  analysisMaiaFailed = false;
+  saveAnalysisMaiaSettings();
+  syncAnalysisMaiaUi();
+  if (analysisMaiaOn) {
+    if (analysisMode && analysisTreeCurrent) updateAnalysisMaia(analysisTreeCurrent.fen);
+  } else {
+    analysisMaiaSession++;      // discard any in-flight prediction
+    analysisMaiaResult = null;
+    if (analysisMode) renderAnalysisPvs();
+  }
+}
+
+function syncAnalysisMaiaUi() {
+  const btn = document.getElementById('btnAnalysisMaia');
+  if (btn) btn.classList.toggle('active', analysisMaiaOn);
+  const row = document.getElementById('analysisMaiaRow');
+  if (row) row.classList.toggle('hidden', !analysisMaiaOn);
+  const slider = document.getElementById('analysisMaiaEloSlider');
+  if (slider) slider.value = analysisMaiaElo;
+  const lbl = document.getElementById('analysisMaiaEloValue');
+  if (lbl) lbl.textContent = String(analysisMaiaElo);
+}
+
+function onAnalysisMaiaEloChange(val) {
+  analysisMaiaElo = parseInt(val) || 2000;
+  const lbl = document.getElementById('analysisMaiaEloValue');
+  if (lbl) lbl.textContent = String(analysisMaiaElo);
+  saveAnalysisMaiaSettings();
+  // Debounce — the slider fires continuously while dragging
+  clearTimeout(_analysisMaiaEloTimer);
+  _analysisMaiaEloTimer = setTimeout(() => {
+    if (analysisMode && analysisMaiaOn && analysisTreeCurrent) {
+      updateAnalysisMaia(analysisTreeCurrent.fen);
+    }
+  }, 250);
+}
+
+/** Kick a Maia prediction for the current analysis position. Fire-and-forget;
+ *  results land in analysisMaiaResult and re-render the PV list. Stale results
+ *  (position/elo changed, mode exited, toggle flipped) are discarded via the
+ *  session token. Memoized by fenPositionKey|elo. */
+async function updateAnalysisMaia(fen) {
+  analysisMaiaResult = null;
+  if (!analysisMaiaOn || !analysisMode || !fen) return;
+  const session = ++analysisMaiaSession;
+  analysisMaiaFailed = false;
+
+  const key = fenPositionKey(fen) + '|' + analysisMaiaElo;
+  const cached = analysisMaiaCache.get(key);
+  if (cached) {
+    analysisMaiaResult = { fen, elo: analysisMaiaElo, moves: cached };
+    renderAnalysisPvs();
+    return;
+  }
+
+  // Compile on demand — prefetch happened at startup, so this is usually just
+  // the one-time WASM session build. The PV list shows "Preparing Maia…"
+  // (rendered by renderAnalysisPvs while result is null and !maiaReady).
+  if (!maiaReady) {
+    if (!_maiaCompilePromise) compileMaia();
+    try { await _maiaCompilePromise; } catch (_) {}
+    if (session !== analysisMaiaSession) return;
+    if (!maiaReady) {
+      analysisMaiaFailed = true;
+      if (analysisMode && analysisMaiaOn) renderAnalysisPvs();
+      return;
+    }
+  }
+
+  // Serialize through the chain: rapid navigation would otherwise fire
+  // overlapping run() calls on the same ONNX session. Requests that went
+  // stale while queued are skipped entirely (no wasted inference).
+  const moves = await (_maiaPolicyChain = _maiaPolicyChain
+    .then(() => (session === analysisMaiaSession && analysisMode && analysisMaiaOn)
+      ? maiaPolicyTopMoves(fen, analysisMaiaElo)
+      : null)
+    .catch(() => null));
+  if (session !== analysisMaiaSession || !analysisMode || !analysisMaiaOn) return;
+  if (!moves || moves.length === 0) {
+    analysisMaiaFailed = true;
+    renderAnalysisPvs();
+    return;
+  }
+  analysisMaiaCache.set(key, moves);
+  if (analysisMaiaCache.size > ANALYSIS_MAIA_CACHE_MAX) {
+    analysisMaiaCache.delete(analysisMaiaCache.keys().next().value);
+  }
+  if (analysisTreeCurrent && analysisTreeCurrent.fen === fen) {
+    analysisMaiaResult = { fen, elo: analysisMaiaElo, moves };
+    renderAnalysisPvs();
+  }
+}
+
+/** Play Maia's predicted move from the extra PV row (mirrors analysisOnDrop's
+ *  tree handling, minus the drag). */
+function analysisPlayMaiaMove(uci) {
+  if (!analysisMode || !analysisEngine || !uci || uci.length < 4) return;
+  const move = analysisEngine.move({
+    from: uci.substring(0, 2), to: uci.substring(2, 4),
+    promotion: uci.length > 4 ? uci[4] : undefined,
+  });
+  if (!move) return;
+  const newFen = analysisEngine.fen();
+  let childNode = analysisTreeCurrent.children.find(c => c.uci === uci);
+  if (!childNode) {
+    childNode = makeTreeNode(newFen, move.san, uci, analysisTreeCurrent);
+    analysisTreeCurrent.children.push(childNode);
+  }
+  analysisTreeCurrent = childNode;
+  boardObj.position(newFen, false);
+  clearHighlights();
+  clearArrows();
+  showLastMoveHighlight(uci.substring(0, 2), uci.substring(2, 4));
+  showCheckHighlight(analysisEngine);
+  renderAnalysisTree();
+  updateNoteButton();
+  startAnalysisSearch(newFen);
+}
+
+/** Hover on the extra Maia row — violet arrow for the predicted move. */
+function analysisMaiaHover(uci) {
+  if (!analysisMode || !uci || uci.length < 4) return;
+  analysisPvArrows = [{ from: uci.substring(0, 2), to: uci.substring(2, 4), opacity: 0.7, scale: 1.0, color: 'rgb(197,143,224)' }];
+  renderArrows();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
