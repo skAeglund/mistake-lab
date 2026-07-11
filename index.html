@@ -621,6 +621,41 @@
     padding: 5px 10px; border-bottom: 1px solid var(--border);
   }
   .analysis-maia-row input[type=range] { flex: 1; max-width: 160px; }
+  /* 📊 Lichess Database annotations (blue, parallel to the violet Maia set) */
+  .analysis-pv-row .db-prob {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600;
+    color: #5b9bd5; background: rgba(91,155,213,0.12);
+    padding: 1px 5px; border-radius: 4px; flex-shrink: 0; margin-left: 4px;
+    align-self: center;
+  }
+  .analysis-pv-row .db-prob.top { background: rgba(91,155,213,0.22); }
+  .analysis-pv-row.db-row .analysis-pv-eval.db {
+    background: rgba(91,155,213,0.15); color: #5b9bd5; font-size: 12px;
+  }
+  #btnAnalysisDb.active { border-color: #5b9bd5; color: #5b9bd5; }
+  .analysis-db-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 5px 10px; border-bottom: 1px solid var(--border);
+    font-size: 11px; color: var(--text-muted);
+  }
+  .analysis-db-row .db-summary {
+    flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .analysis-db-settings {
+    padding: 6px 10px 8px; border-bottom: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .analysis-db-settings .db-set-group {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .analysis-db-settings .db-set-label {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+    color: var(--text-muted); min-width: 46px;
+  }
+  .analysis-db-settings label {
+    font-size: 11px; color: var(--text-secondary); display: inline-flex;
+    align-items: center; gap: 3px; cursor: pointer;
+  }
   .analysis-tree {
     flex: 1; overflow-y: auto; padding: 10px 12px;
   }
@@ -1743,7 +1778,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Maia predictions in Analysis Mode. New 🧠 toggle in the analysis header runs the current position through Maia 3 (raw policy softmax at temperature 1 — the human-move distribution at the chosen ELO) and annotates the PV list: probability badges (≥10%) on matching PV rows, and when Maia's top move isn't among the 3 engine PVs it's appended as a clickable violet 4th row with a matching board arrow. Adjustable ELO slider (1600–2200, step 25) independent of the continuation opponent, persisted with the toggle in localStorage 'mistakelab_analysis_maia'. Predictions kick on every position change via startAnalysisSearch, memoized by fenPositionKey|elo (300-entry cache), stale-async guarded by a session token, and serialized through a promise chain (ort-web sessions aren't re-entrant under rapid navigation). Compiles the model on demand with a 'Preparing Maia…' status row; new maiaPolicyTopMoves() returns the full legal-move distribution (SANs from the original FEN — mirrored-board SANs are wrong for black).</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Lichess Database in Analysis Mode. New 📊 toggle next to 🧠 looks the current position up in the Lichess opening explorer (fetchExplorerMoves with independent rating/speed settings, force:true) and annotates the PV list in blue, parallel to the violet Maia set: frequency badges on matching PV rows, plus a clickable blue extra row (and hover arrow) when the database's most-played move isn't among the 3 engine PVs. Sample-size thresholds: ≥25 games shows database numbers only (Maia annotations suppressed at render time — real humans beat a model of humans), 5–24 shows both, below 5 a muted 'only N games' status. Rating + time-control checkboxes live in an expandable ⚙ settings row, persisted with the toggle in localStorage 'mistakelab_analysis_db' (independent of continuation practice settings). Lookups are debounced 300ms (network API vs rapid arrow-key navigation), memoized by fenPositionKey|ratings|speeds (300 entries), and stale-async guarded by a session token. Explorer UCIs are normalized to chess.js convention via SAN (castling e1h1→e1g1) so O-O badges match PV rows and the extra row is playable.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1912,6 +1947,7 @@
         <span>SF 18 · <span class="analysis-depth" id="analysisDepthTag"><span class="depth-num">0</span></span></span>
         <span style="display:flex;gap:4px;align-items:center;">
           <button class="btn btn-ghost btn-sm" id="btnAnalysisMaia" style="font-size:11px;padding:2px 6px;" onclick="toggleAnalysisMaia()" title="Show Maia move predictions (what a human would play)">🧠</button>
+          <button class="btn btn-ghost btn-sm" id="btnAnalysisDb" style="font-size:11px;padding:2px 6px;" onclick="toggleAnalysisDb()" title="Show Lichess database move frequencies">📊</button>
           <button class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 6px;" onclick="analysisFlipBoard()" title="Flip board">⇅</button>
           <button class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 6px;" onclick="openLichessAnalysisFromMode()" title="Open in Lichess">♟</button>
         </span>
@@ -1921,6 +1957,12 @@
         <input type="range" id="analysisMaiaEloSlider" min="1600" max="2200" step="25" value="2000" oninput="onAnalysisMaiaEloChange(this.value)">
         <span id="analysisMaiaEloValue" style="font-size:11px;font-weight:600;color:#c58fe0;">2000</span>
       </div>
+      <div class="analysis-db-row hidden" id="analysisDbRow">
+        <span style="white-space:nowrap;">📊 Database</span>
+        <span class="db-summary" id="analysisDbSummary"></span>
+        <button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 6px;" onclick="toggleAnalysisDbSettings()" title="Database rating / time-control settings">⚙</button>
+      </div>
+      <div class="analysis-db-settings hidden" id="analysisDbSettings"></div>
       <div class="analysis-pvs" id="analysisPvsContainer">
         <div class="analysis-pv-row" style="color:var(--text-muted);font-size:12px;">Starting analysis…</div>
       </div>
@@ -8036,6 +8078,42 @@ function saveAnalysisMaiaSettings() {
   lsSetSafe(ANALYSIS_MAIA_LS_KEY, JSON.stringify({ on: analysisMaiaOn, elo: analysisMaiaElo }), 'analysis-maia settings');
 }
 
+// ─── Lichess Database in analysis mode ───
+// When toggled on (📊 in the analysis header), the current position is looked
+// up in the Lichess opening explorer (fetchExplorerMoves, force:true, with
+// independent rating/speed settings) and move frequencies annotate the PV
+// list in blue, parallel to the violet Maia set. Threshold logic on total
+// games: ≥ ANALYSIS_DB_HIDE_MAIA_MIN → DB only (Maia annotations suppressed
+// at render time); ANALYSIS_DB_MIN_GAMES..24 → both; below → DB hidden
+// (muted "only N games" status row).
+const ANALYSIS_DB_LS_KEY = 'mistakelab_analysis_db';
+const ANALYSIS_DB_MIN_GAMES = 5;      // below this: no DB visualization
+const ANALYSIS_DB_HIDE_MAIA_MIN = 25; // at/above this: DB numbers only, Maia hidden
+const ANALYSIS_DB_CACHE_MAX = 300;    // memoized lookups (fenPositionKey|ratings|speeds)
+const ANALYSIS_DB_DEBOUNCE_MS = 300;  // network API — don't hammer during rapid nav
+let analysisDbOn = false;
+let analysisDbRatings = [1600, 1800, 2000];
+let analysisDbSpeeds = ['blitz', 'rapid', 'classical'];
+let analysisDbResult = null;   // { fen, totalGames, moves: [{uci, san, prob, games}] }
+let analysisDbSession = 0;     // stale-async guard (bumped on position/settings change)
+let analysisDbFailed = false;  // last lookup failed (network / API)
+const analysisDbCache = new Map();
+let _analysisDbDebounceTimer = null;
+
+function loadAnalysisDbSettings() {
+  try {
+    const s = JSON.parse(localStorage.getItem(ANALYSIS_DB_LS_KEY) || '{}');
+    if (Array.isArray(s.ratings) && s.ratings.length > 0) analysisDbRatings = s.ratings;
+    if (Array.isArray(s.speeds) && s.speeds.length > 0) analysisDbSpeeds = s.speeds;
+    analysisDbOn = !!s.on;
+  } catch (_) {}
+}
+loadAnalysisDbSettings();
+
+function saveAnalysisDbSettings() {
+  lsSetSafe(ANALYSIS_DB_LS_KEY, JSON.stringify({ on: analysisDbOn, ratings: analysisDbRatings, speeds: analysisDbSpeeds }), 'analysis-db settings');
+}
+
 function makeTreeNode(fen, san, uci, parent) {
   const id = ++analysisNodeId;
   const node = { id, fen, san, uci, parent, children: [], cachedPvs: null, cachedDepth: 0 };
@@ -8287,6 +8365,8 @@ function enterAnalysisMode(opts = {}) {
   // Reflect the persisted 🧠 Maia toggle/ELO state (row visibility, slider,
   // button accent). The prediction itself is kicked by startAnalysisSearch.
   syncAnalysisMaiaUi();
+  // Same for the 📊 database toggle / settings summary
+  syncAnalysisDbUi();
 
   // Exit any engine line / continuation / tactic state
   stopPreAnalysis();
@@ -8369,6 +8449,11 @@ function exitAnalysisMode() {
   analysisMaiaSession++;
   analysisMaiaResult = null;
   clearTimeout(_analysisMaiaEloTimer);
+
+  // Discard any in-flight / stale database lookup
+  analysisDbSession++;
+  analysisDbResult = null;
+  clearTimeout(_analysisDbDebounceTimer);
 
   // Stop analysis search
   stopAnalysisSearch();
@@ -9022,6 +9107,8 @@ function startAnalysisSearch(fen) {
   // when the 🧠 toggle is off). Placed here because every analysis position
   // change funnels through startAnalysisSearch.
   updateAnalysisMaia(fen);
+  // Same for the 📊 database lookup (debounced — network API)
+  updateAnalysisDb(fen);
   analysisPvs = [];
   analysisDepth = 0;
   analysisComplete = false;
@@ -9194,10 +9281,20 @@ function renderAnalysisPvs() {
   const fen = analysisEngine ? analysisEngine.fen() : '';
   const isBlackTurn = fen.split(' ')[1] === 'b';
 
+  // Database annotations: only when the result matches the rendered position
+  // and the sample is big enough. At ≥ ANALYSIS_DB_HIDE_MAIA_MIN games the DB
+  // numbers fully replace Maia's (real humans beat a model of humans).
+  const dbHasResult = analysisDbOn && analysisDbResult && analysisDbResult.fen === fen;
+  const dbActive = dbHasResult && analysisDbResult.totalGames >= ANALYSIS_DB_MIN_GAMES;
+  const dbHidesMaia = dbActive && analysisDbResult.totalGames >= ANALYSIS_DB_HIDE_MAIA_MIN;
+  const dbByUci = {};
+  if (dbActive) for (const dm of analysisDbResult.moves) dbByUci[dm.uci] = dm.prob;
+  const dbTop = dbActive && analysisDbResult.moves.length > 0 ? analysisDbResult.moves[0] : null;
+
   // Maia annotations: only when the result matches the rendered position
   // (re-renders happen constantly while SF deepens; the prediction for the
   // previous position must never leak onto the new one).
-  const maiaActive = analysisMaiaOn && analysisMaiaResult && analysisMaiaResult.fen === fen;
+  const maiaActive = analysisMaiaOn && !dbHidesMaia && analysisMaiaResult && analysisMaiaResult.fen === fen;
   const maiaByUci = {};
   if (maiaActive) for (const mm of analysisMaiaResult.moves) maiaByUci[mm.uci] = mm.prob;
   const maiaTop = maiaActive && analysisMaiaResult.moves.length > 0 ? analysisMaiaResult.moves[0] : null;
@@ -9215,6 +9312,15 @@ function renderAnalysisPvs() {
     // Convert UCI line to SAN
     const sansHtml = uciLineToSansHtml(fen, pv.uciLine, i);
 
+    // 📊 badge on rows present in the database result — no minimum threshold,
+    // "humans (almost) never play this engine move" is exactly the point.
+    let dbBadge = '';
+    if (dbActive && dbByUci[pv.move] !== undefined) {
+      const isTop = dbTop && dbTop.uci === pv.move;
+      const pct = dbByUci[pv.move];
+      dbBadge = `<span class="db-prob${isTop ? ' top' : ''}" title="Played in ${pct < 1 ? pct.toFixed(1) : Math.round(pct)}% of ${analysisDbResult.totalGames} database games">📊 ${pct < 1 ? pct.toFixed(1) : Math.round(pct)}%</span>`;
+    }
+
     // 🧠 badge on rows Maia considers likely (top prediction gets the
     // stronger tint)
     let maiaBadge = '';
@@ -9225,7 +9331,7 @@ function renderAnalysisPvs() {
 
     html += `<div class="analysis-pv-row${bestClass}" onmouseenter="analysisPvHover(${i})" onmouseleave="analysisPvLeave()">
       <span class="analysis-pv-eval ${evalClass}">${evalStr}</span>
-      <span class="analysis-pv-moves">${sansHtml}</span>${maiaBadge}
+      <span class="analysis-pv-moves">${sansHtml}</span>${dbBadge}${maiaBadge}
     </div>`;
   }
 
@@ -9237,8 +9343,28 @@ function renderAnalysisPvs() {
       <span class="analysis-pv-moves"><span class="pv-move">${escHtml(maiaTop.san)}</span></span>
       <span class="maia-prob top">${Math.round(maiaTop.prob)}%</span>
     </div>`;
-  } else if (analysisMaiaOn && !maiaActive) {
+  } else if (analysisMaiaOn && !dbHidesMaia && !maiaActive) {
     html += `<div class="analysis-pv-row" style="color:var(--text-muted);font-size:11px;cursor:default;">🧠 ${analysisMaiaFailed ? 'Maia unavailable' : (maiaReady ? 'Maia thinking…' : 'Preparing Maia model…')}</div>`;
+  }
+
+  // Database's most-played move as an extra row when it isn't among the
+  // engine's top-3 first moves; status rows for the small-sample / pending /
+  // no-token / failed states.
+  if (dbTop && dbTop.uci && !analysisPvs.some(pv => pv.move === dbTop.uci)) {
+    html += `<div class="analysis-pv-row db-row" onclick="analysisPlayMaiaMove('${dbTop.uci}')" onmouseenter="analysisDbHover('${dbTop.uci}')" onmouseleave="analysisPvLeave()" title="Most played move in ${analysisDbResult.totalGames} database games — click to play it">
+      <span class="analysis-pv-eval db">📊</span>
+      <span class="analysis-pv-moves"><span class="pv-move">${escHtml(dbTop.san)}</span></span>
+      <span class="db-prob top">${dbTop.prob < 1 ? dbTop.prob.toFixed(1) : Math.round(dbTop.prob)}%</span>
+    </div>`;
+  } else if (analysisDbOn && dbHasResult && !dbActive) {
+    const n = analysisDbResult.totalGames;
+    html += `<div class="analysis-pv-row" style="color:var(--text-muted);font-size:11px;cursor:default;">📊 Only ${n} game${n === 1 ? '' : 's'} in database</div>`;
+  } else if (analysisDbOn && !dbHasResult) {
+    const dbStatus = !lichessToken ? 'Database requires Lichess login (Repertoire tab)'
+      : (analysisDbRatings.length === 0 || analysisDbSpeeds.length === 0) ? 'Select rating & speed in ⚙'
+      : analysisDbFailed ? 'Database unavailable'
+      : 'Checking database…';
+    html += `<div class="analysis-pv-row" style="color:var(--text-muted);font-size:11px;cursor:default;">📊 ${dbStatus}</div>`;
   }
 
   container.innerHTML = html;
@@ -10077,8 +10203,8 @@ async function updateAnalysisMaia(fen) {
   }
 }
 
-/** Play Maia's predicted move from the extra PV row (mirrors analysisOnDrop's
- *  tree handling, minus the drag). */
+/** Play a move from an extra PV row — Maia's prediction or the database's
+ *  most-played move (mirrors analysisOnDrop's tree handling, minus the drag). */
 function analysisPlayMaiaMove(uci) {
   if (!analysisMode || !analysisEngine || !uci || uci.length < 4) return;
   const move = analysisEngine.move({
@@ -10107,6 +10233,157 @@ function analysisPlayMaiaMove(uci) {
 function analysisMaiaHover(uci) {
   if (!analysisMode || !uci || uci.length < 4) return;
   analysisPvArrows = [{ from: uci.substring(0, 2), to: uci.substring(2, 4), opacity: 0.7, scale: 1.0, color: 'rgb(197,143,224)' }];
+  renderArrows();
+}
+
+// ─── Analysis-mode Lichess Database ───
+function toggleAnalysisDb() {
+  analysisDbOn = !analysisDbOn;
+  analysisDbFailed = false;
+  saveAnalysisDbSettings();
+  syncAnalysisDbUi();
+  if (analysisDbOn) {
+    if (analysisMode && analysisTreeCurrent) updateAnalysisDb(analysisTreeCurrent.fen);
+  } else {
+    analysisDbSession++;        // discard any in-flight lookup
+    analysisDbResult = null;
+    clearTimeout(_analysisDbDebounceTimer);
+    if (analysisMode) renderAnalysisPvs();
+  }
+}
+
+function syncAnalysisDbUi() {
+  const btn = document.getElementById('btnAnalysisDb');
+  if (btn) btn.classList.toggle('active', analysisDbOn);
+  const row = document.getElementById('analysisDbRow');
+  if (row) row.classList.toggle('hidden', !analysisDbOn);
+  if (!analysisDbOn) {
+    const panel = document.getElementById('analysisDbSettings');
+    if (panel) panel.classList.add('hidden');
+  }
+  const summary = document.getElementById('analysisDbSummary');
+  if (summary) {
+    const r = analysisDbRatings.slice().sort((a, b) => a - b);
+    const ratingsTxt = r.length === 0 ? '—'
+      : r.length === 1 ? String(r[0])
+      : `${r[0]}–${r[r.length - 1]}`;
+    summary.textContent = `${ratingsTxt} · ${analysisDbSpeeds.join(', ') || '—'}`;
+  }
+}
+
+function toggleAnalysisDbSettings() {
+  const panel = document.getElementById('analysisDbSettings');
+  if (!panel) return;
+  const opening = panel.classList.contains('hidden');
+  if (opening) renderAnalysisDbSettings();
+  panel.classList.toggle('hidden', !opening);
+}
+
+function renderAnalysisDbSettings() {
+  const panel = document.getElementById('analysisDbSettings');
+  if (!panel) return;
+  const allRatings = [1600, 1800, 2000, 2200, 2500];
+  const allSpeeds = [
+    { val: 'bullet', label: 'Bullet' },
+    { val: 'blitz', label: 'Blitz' },
+    { val: 'rapid', label: 'Rapid' },
+    { val: 'classical', label: 'Classical' },
+  ];
+  const ratingBoxes = allRatings.map(r =>
+    `<label><input type="checkbox" value="${r}" ${analysisDbRatings.includes(r) ? 'checked' : ''} onchange="onAnalysisDbSettingChange()">${r}</label>`
+  ).join('');
+  const speedBoxes = allSpeeds.map(s =>
+    `<label><input type="checkbox" value="${s.val}" ${analysisDbSpeeds.includes(s.val) ? 'checked' : ''} onchange="onAnalysisDbSettingChange()">${s.label}</label>`
+  ).join('');
+  panel.innerHTML = `
+    <div class="db-set-group"><span class="db-set-label">Rating</span>${ratingBoxes}</div>
+    <div class="db-set-group"><span class="db-set-label">Speed</span>${speedBoxes}</div>`;
+}
+
+function onAnalysisDbSettingChange() {
+  const panel = document.getElementById('analysisDbSettings');
+  if (!panel) return;
+  const ratings = [], speeds = [];
+  panel.querySelectorAll('.db-set-group:nth-child(1) input:checked').forEach(cb => ratings.push(parseInt(cb.value)));
+  panel.querySelectorAll('.db-set-group:nth-child(2) input:checked').forEach(cb => speeds.push(cb.value));
+  analysisDbRatings = ratings;
+  analysisDbSpeeds = speeds;
+  saveAnalysisDbSettings();
+  syncAnalysisDbUi();
+  // Settings changed → current result is for the old pool
+  analysisDbResult = null;
+  if (analysisMode && analysisTreeCurrent) updateAnalysisDb(analysisTreeCurrent.fen);
+  else if (analysisMode) renderAnalysisPvs();
+}
+
+/** Kick a database lookup for the current analysis position. Fire-and-forget;
+ *  results land in analysisDbResult and re-render the PV list. Debounced
+ *  (network API — rapid arrow-key navigation must not hammer the explorer);
+ *  memoized positions skip the debounce and render instantly. Stale results
+ *  (position/settings changed, mode exited, toggle flipped) are discarded via
+ *  the session token. */
+function updateAnalysisDb(fen) {
+  analysisDbResult = null;
+  clearTimeout(_analysisDbDebounceTimer);
+  if (!analysisDbOn || !analysisMode || !fen) return;
+  const session = ++analysisDbSession;
+  analysisDbFailed = false;
+  if (analysisDbRatings.length === 0 || analysisDbSpeeds.length === 0 || !lichessToken) {
+    if (analysisMode) renderAnalysisPvs();  // status row explains why
+    return;
+  }
+
+  const key = fenPositionKey(fen) + '|' + analysisDbRatings.slice().sort().join(',') + '|' + analysisDbSpeeds.slice().sort().join(',');
+  const cached = analysisDbCache.get(key);
+  if (cached) {
+    analysisDbResult = { fen, totalGames: cached.totalGames, moves: cached.moves };
+    renderAnalysisPvs();
+    return;
+  }
+
+  _analysisDbDebounceTimer = setTimeout(async () => {
+    if (session !== analysisDbSession || !analysisMode || !analysisDbOn) return;
+    const data = await fetchExplorerMoves(fen, { ratings: analysisDbRatings, speeds: analysisDbSpeeds, force: true });
+    if (session !== analysisDbSession || !analysisMode || !analysisDbOn) return;
+    if (!data) {
+      analysisDbFailed = true;
+      renderAnalysisPvs();
+      return;
+    }
+    const totalGames = (data.white || 0) + (data.draws || 0) + (data.black || 0);
+    // Normalize explorer UCIs to chess.js convention via SAN — the explorer
+    // encodes castling as king-onto-rook (e1h1) while chess.js / Stockfish
+    // use e1g1, so a raw-uci match would never badge O-O on a PV row and
+    // clicking the extra row would fail. (Same gotcha as the TODO generator.)
+    const uciBySan = {};
+    try {
+      for (const lm of new Chess(fen).moves({ verbose: true })) {
+        uciBySan[lm.san.replace(/[+#]$/, '')] = lm.from + lm.to + (lm.promotion || '');
+      }
+    } catch (_) {}
+    const moves = (data.moves || [])
+      .map(mv => {
+        const games = (mv.white || 0) + (mv.draws || 0) + (mv.black || 0);
+        const normUci = (mv.san && uciBySan[String(mv.san).replace(/[+#]$/, '')]) || mv.uci;
+        return { uci: normUci, san: mv.san, games, prob: totalGames > 0 ? (games / totalGames) * 100 : 0 };
+      })
+      .sort((a, b) => b.games - a.games);
+    const entry = { totalGames, moves };
+    analysisDbCache.set(key, entry);
+    if (analysisDbCache.size > ANALYSIS_DB_CACHE_MAX) {
+      analysisDbCache.delete(analysisDbCache.keys().next().value);
+    }
+    if (analysisTreeCurrent && analysisTreeCurrent.fen === fen) {
+      analysisDbResult = { fen, totalGames, moves };
+      renderAnalysisPvs();
+    }
+  }, ANALYSIS_DB_DEBOUNCE_MS);
+}
+
+/** Hover on the extra database row — blue arrow for the most-played move. */
+function analysisDbHover(uci) {
+  if (!analysisMode || !uci || uci.length < 4) return;
+  analysisPvArrows = [{ from: uci.substring(0, 2), to: uci.substring(2, 4), opacity: 0.7, scale: 1.0, color: 'rgb(91,155,213)' }];
   renderArrows();
 }
 
