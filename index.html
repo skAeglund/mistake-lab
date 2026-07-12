@@ -1778,7 +1778,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Analysis DB: top-3 extra rows, game count, Maia/DB layout order. The database extra-row logic now shows up to the top 3 most-played moves (each at ≥15% share, ANALYSIS_DB_EXTRA_MIN, and not already among the 3 engine PVs) instead of only the single most-played move; the overall #1 keeps the stronger badge tint. A footer row always reports the total sample size when the database is active ('N games in database', locale-formatted), sharing the slot with the sub-threshold 'Only N games' message. Layout convention when both sources are shown: on PV rows the 📊 badge sits to the RIGHT of the 🧠 badge, and extra database move rows render ABOVE Maia's extra row.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire tab UX: fold checklists + studies config by default, sort by last attempt. Variation-checklist blocks now render folded by default with a clickable header showing overall progress (100% = every variation won at Easy, Medium AND Hard; color-coded mini-bar via winRateColor); the count/ply/Generate controls live inside the unfolded body, and a block is forced open while its list is generating. Checklists are ordered most-recently-attempted first — derived from preset-tagged practiceScoreboard timestamps at each list's leaf positions, merged with a session-local stamp set on every drill start so abandoned attempts count too. The studies config section (add-study form, study list, Refresh/Connect row) folds to a compact 'Studies (N) · ● Lichess' header by default once Lichess is connected and at least one study is added; adding a study forces it open so setup doesn't collapse mid-flow.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -23455,6 +23455,9 @@ async function addRepertoireStudy() {
 
   studies.push({ id: studyId, color, name });
   setRepertoireConfig(studies);
+  // Adding the first study while connected makes the section foldable — keep it
+  // open so setup doesn't collapse under the user mid-flow.
+  window._repConfigOpen = true;
 
   input.value = '';
   if (statusEl) statusEl.textContent = `Added "${name}" (${color})`;
@@ -23538,29 +23541,47 @@ function renderRepertoirePanel() {
 
   let html = '';
 
-  // Config section
+  // Config section — folded by default once Lichess is connected AND studies
+  // are added (setup done, section rarely needed). Session toggle.
+  const configFoldable = !!(lichessToken && studies.length);
+  const configOpen = (window._repConfigOpen !== undefined) ? window._repConfigOpen : !configFoldable;
   html += `<div style="padding:10px 12px;border-bottom:1px solid var(--border);">`;
-  html += `<div style="display:flex;gap:6px;margin-bottom:8px;">
-    <input type="text" id="repertoireStudyInput" placeholder="Study URL or ID" style="flex:1;font-size:12px;padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);">
-    <select id="repertoireStudyColor" style="font-size:12px;padding:4px;border-radius:6px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);">
-      <option value="white">White</option>
-      <option value="black">Black</option>
-    </select>
-    <button class="btn btn-primary btn-sm" onclick="addRepertoireStudy()" style="font-size:11px;padding:4px 8px;">Add</button>
-  </div>`;
-  html += `<div id="repertoireStudyList"></div>`;
-  html += `<div id="repertoireStatus" class="hint" style="margin-top:4px;min-height:14px;"></div>`;
-  html += `<div style="display:flex;gap:6px;margin-top:6px;align-items:center;">`;
-  html += `<button class="btn btn-ghost btn-sm" onclick="refreshRepertoire()" style="font-size:11px;">↻ Refresh</button>`;
-  if (lichessToken) {
-    html += `<span style="font-size:11px;color:var(--green);">● Lichess connected</span>`;
-    html += `<button class="btn btn-ghost btn-sm" onclick="lichessOAuthDisconnect();renderRepertoirePanel()" style="font-size:10px;color:var(--text-muted);">Disconnect</button>`;
+  if (!configOpen) {
+    html += `<div onclick="toggleRepConfigSection()" title="Unfold studies setup" style="display:flex;align-items:center;gap:6px;cursor:pointer;min-height:24px;">
+      <span style="font-size:10px;color:var(--text-muted);width:10px;flex-shrink:0;">▸</span>
+      <span style="flex:1;font-size:12px;font-weight:600;">Studies (${studies.length})</span>
+      ${lichessToken ? '<span style="font-size:10px;color:var(--green);flex-shrink:0;">● Lichess</span>' : ''}
+    </div>`;
+    html += `</div>`;
   } else {
-    html += `<button class="btn btn-ghost btn-sm" onclick="lichessOAuthStart()" style="font-size:11px;">🔗 Connect Lichess</button>`;
-    html += `<span style="font-size:10px;color:var(--text-muted);">for private studies</span>`;
+    if (configFoldable) {
+      html += `<div onclick="toggleRepConfigSection()" title="Fold studies setup" style="display:flex;align-items:center;gap:6px;cursor:pointer;min-height:24px;margin-bottom:6px;">
+        <span style="font-size:10px;color:var(--text-muted);width:10px;flex-shrink:0;">▾</span>
+        <span style="flex:1;font-size:12px;font-weight:600;">Studies (${studies.length})</span>
+      </div>`;
+    }
+    html += `<div style="display:flex;gap:6px;margin-bottom:8px;">
+      <input type="text" id="repertoireStudyInput" placeholder="Study URL or ID" style="flex:1;font-size:12px;padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);">
+      <select id="repertoireStudyColor" style="font-size:12px;padding:4px;border-radius:6px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);">
+        <option value="white">White</option>
+        <option value="black">Black</option>
+      </select>
+      <button class="btn btn-primary btn-sm" onclick="addRepertoireStudy()" style="font-size:11px;padding:4px 8px;">Add</button>
+    </div>`;
+    html += `<div id="repertoireStudyList"></div>`;
+    html += `<div id="repertoireStatus" class="hint" style="margin-top:4px;min-height:14px;"></div>`;
+    html += `<div style="display:flex;gap:6px;margin-top:6px;align-items:center;">`;
+    html += `<button class="btn btn-ghost btn-sm" onclick="refreshRepertoire()" style="font-size:11px;">↻ Refresh</button>`;
+    if (lichessToken) {
+      html += `<span style="font-size:11px;color:var(--green);">● Lichess connected</span>`;
+      html += `<button class="btn btn-ghost btn-sm" onclick="lichessOAuthDisconnect();renderRepertoirePanel()" style="font-size:10px;color:var(--text-muted);">Disconnect</button>`;
+    } else {
+      html += `<button class="btn btn-ghost btn-sm" onclick="lichessOAuthStart()" style="font-size:11px;">🔗 Connect Lichess</button>`;
+      html += `<span style="font-size:10px;color:var(--text-muted);">for private studies</span>`;
+    }
+    html += `</div>`;
+    html += `</div>`;
   }
-  html += `</div>`;
-  html += `</div>`;
 
   // Add position form
   html += `<div style="padding:8px 12px;border-bottom:1px solid var(--border);">
@@ -25323,6 +25344,10 @@ async function generateTodoListForStudy(studyId) {
 function startTodoFromList(studyId, vIdx, preset) {
   const list = getTodoList(studyId);
   if (!list || !list.variations[vIdx]) return;
+  // Session-local interaction stamp for checklist sorting — covers drills that
+  // end without a recorded scoreboard result (abandon/interrupt).
+  if (!window._todoTouch) window._todoTouch = {};
+  window._todoTouch[studyId] = Date.now();
   const variation = Object.assign({}, list.variations[vIdx], { color: list.color });
   if (repertoireMode) toggleRepertoireMode(); // close the panel so the board shows
   startTodoVariation(variation, preset);
@@ -25371,9 +25396,63 @@ function renderTodoChecklistSection(studies) {
     <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;margin-left:auto;" title="Hands-free play-out: speak your moves, opponent replies announced aloud (same as continuation practice). Resets off each session.">
       <input type="checkbox" id="todoVoiceToggle" ${voiceSettings.enabled ? 'checked' : ''} onchange="toggleTodoVoice(this.checked)"> 🎙 Voice</label>
   </div>`;
-  for (const s of studies) html += renderTodoStudyBlock(s);
+  // Most recently attempted checklist first (derived from preset-tagged
+  // scoreboard entries + session-local drill-start stamps); never-attempted
+  // lists keep their original order below.
+  const ordered = studies
+    .map((s, i) => ({ s, i, ts: todoLastInteraction(s.id) }))
+    .sort((a, b) => (b.ts - a.ts) || (a.i - b.i));
+  for (const o of ordered) html += renderTodoStudyBlock(o.s);
   html += `</div>`;
   return html;
+}
+
+// Last time the user interacted with a study's checklist: max ts across
+// preset-tagged practiceScoreboard entries at the list's variation leaves
+// (persists cross-device), merged with a session-local stamp set on every
+// drill start (covers attempts that end without a recorded result).
+function todoLastInteraction(studyId) {
+  let ts = (window._todoTouch && window._todoTouch[studyId]) || 0;
+  const list = getTodoList(studyId);
+  if (list && list.variations) {
+    for (const v of list.variations) {
+      const entries = gistData?.practiceScoreboard?.[v.leafKey];
+      if (!entries) continue;
+      for (const e of entries) {
+        if (e.preset && e.ts > ts) ts = e.ts;
+      }
+    }
+  }
+  return ts;
+}
+
+// Checklist completion for a whole study: each variation contributes up to
+// three difficulty-wins (Easy/Medium/Hard). 100% = every variation won at
+// every difficulty. Returns null when no list has been generated yet.
+function todoStudyProgress(studyId) {
+  const list = getTodoList(studyId);
+  if (!list || !list.variations || !list.variations.length) return null;
+  const perVar = REP_TODO_PRESET_ORDER.length;
+  const total = list.variations.length * perVar;
+  let done = 0;
+  for (const v of list.variations) {
+    done += Math.min(todoCompletedPresets(v.leafKey).size, perVar);
+  }
+  return { done, total, pct: Math.round((done / total) * 100) };
+}
+
+function toggleRepConfigSection() {
+  const configFoldable = !!(lichessToken && getRepertoireConfig().length);
+  const cur = (window._repConfigOpen !== undefined) ? window._repConfigOpen : !configFoldable;
+  window._repConfigOpen = !cur;
+  if (repertoireMode) renderRepertoirePanel();
+}
+
+function toggleTodoStudy(studyId) {
+  if (!window._todoOpenStudies) window._todoOpenStudies = new Set();
+  if (window._todoOpenStudies.has(studyId)) window._todoOpenStudies.delete(studyId);
+  else window._todoOpenStudies.add(studyId);
+  if (repertoireMode) renderRepertoirePanel();
 }
 
 function renderTodoStudyBlock(s) {
@@ -25381,9 +25460,29 @@ function renderTodoStudyBlock(s) {
   const generating = window._todoGenerating === s.id;
   const plyVal = (list && list.targetPly) || 10;
   const countVal = (list && list.maxVariations) || 10;
+  // Folded by default; forced open while generating so the status line stays
+  // visible for progress updates.
+  const open = generating || !!(window._todoOpenStudies && window._todoOpenStudies.has(s.id));
+  const prog = todoStudyProgress(s.id);
   let html = `<div style="margin:8px 0;padding:6px 8px;border:1px solid var(--border);border-radius:8px;">`;
-  html += `<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:4px;">
+  // Fold header — whole row toggles. Shows overall progress when a list exists
+  // (100% = all variations won at all difficulties).
+  const progBadge = prog !== null
+    ? `<span style="display:inline-flex;align-items:center;gap:5px;flex-shrink:0;" title="${prog.done}/${prog.total} difficulty wins (all variations × Easy/Medium/Hard = 100%)">
+        <span style="width:52px;height:5px;background:var(--bg-secondary);border-radius:3px;overflow:hidden;display:inline-block;"><span style="display:block;height:100%;width:${prog.pct}%;background:${winRateColor(prog.pct / 100)};"></span></span>
+        <span style="font-size:10px;color:var(--text-muted);font-variant-numeric:tabular-nums;min-width:30px;text-align:right;">${prog.pct}%</span>
+      </span>`
+    : `<span style="font-size:10px;color:var(--text-muted);flex-shrink:0;">not generated</span>`;
+  html += `<div onclick="toggleTodoStudy('${s.id}')" title="${open ? 'Fold' : 'Unfold'} checklist" style="display:flex;align-items:center;gap:6px;cursor:pointer;min-height:24px;">
+    <span style="font-size:10px;color:var(--text-muted);width:10px;flex-shrink:0;">${open ? '▾' : '▸'}</span>
     <span style="flex:1;min-width:0;font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(s.name || s.id)} <span style="opacity:0.5;font-weight:400;">(${s.color})</span></span>
+    ${progBadge}
+  </div>`;
+  if (!open) {
+    html += `</div>`;
+    return html;
+  }
+  html += `<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end;margin:6px 0 4px;">
     <label style="font-size:10px;color:var(--text-muted);">count
       <input type="number" id="todoCount_${s.id}" min="1" max="50" value="${countVal}" style="width:42px;font-size:10px;padding:1px 3px;border-radius:4px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);">
     </label>
