@@ -1064,7 +1064,9 @@ Established mobile conventions to follow for any new UI: 44×44 minimum tap
   z-index above the drawer with a max-height, drawer closes on item taps and
   clears on rotation, tap-to-premove works during the opponent's turn, SCREEN
   WAKE LOCK held during drills (acquireWakeLock/releaseWakeLock, guarded against
-  a logout-during-acquire race), eval worker paused on tab-hidden.
+  a logout-during-acquire race), eval worker paused on tab-hidden, sync errors
+  visible in training mode (setSyncStatus mirrors state==='error' onto
+  #btnMobileSettings via .sync-error — the header dot is hidden there).
 
 PWA: manifest.json has NO orientation key → respects system orientation lock.
   Do not add "orientation": "any".

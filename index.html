@@ -1230,6 +1230,13 @@
     -webkit-tap-highlight-color: transparent;
   }
   .mobile-toolbar-btn:active { background: var(--bg-card); }
+  /* UX audit #7: sync error mirrored onto the toolbar gear (header dot is
+     hidden in mobile-training). Red tint + corner dot. */
+  .mobile-toolbar-btn.sync-error { color: var(--red); border-color: var(--red); position: relative; }
+  .mobile-toolbar-btn.sync-error::after {
+    content: ''; position: absolute; top: 5px; right: 5px;
+    width: 7px; height: 7px; border-radius: 50%; background: var(--red);
+  }
   .mobile-toolbar-nav {
     display: flex; align-items: center; gap: 2px;
   }
@@ -1822,7 +1829,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">UX: disable Prev/Next at game boundaries instead of silent no-op taps. updatePositionNav now computes boundary state (localIdx within the game's mistake list) and sets .disabled on btnPrev/NextPuzzle + mobile toolbar counterparts; generic .btn:disabled / .nav-btn:disabled dim style added. Modes that repurpose the arrows stay enabled: opening filter (undo/redo) via explicit updatePositionNav on entry, detected-tactic solve (cancel gesture) on entry + recompute on abandon. Review mode unchanged (prev hidden, Next always advances the queue). Exit paths covered by existing updateSessionProgress/loadPosition call sites.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">UX: sync errors visible in mobile training mode. The header (and its sync dot) is hidden while training, so a Gist failure mid-session surfaced nowhere. setSyncStatus now mirrors state==='error' onto the toolbar's settings gear (#btnMobileSettings, new id) via a .sync-error class — red tint, red border, corner dot — pointing at the button that opens the modal where the error can be acted on. Cleared automatically when any non-error state is set.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1842,7 +1849,7 @@
         <div class="mobile-progress-fill" id="sessionBarMobile" style="width:0%"></div>
       </div>
     </div>
-    <button class="mobile-toolbar-btn" onclick="openSettings()" aria-label="Settings">⚙</button>
+    <button class="mobile-toolbar-btn" id="btnMobileSettings" onclick="openSettings()" aria-label="Settings">⚙</button>
   </div>
 
   <div class="line-nav-bar" id="lineNavBar">
@@ -3686,6 +3693,12 @@ function setSyncStatus(state, label) {
   if (!dot) return;
   dot.className = `sync-dot ${state}`;
   lbl.textContent = label;
+  // UX audit #7: the header (and its sync dot) is hidden in mobile-training
+  // mode, so a sync error mid-session was invisible until returning to the
+  // browsing view. Mirror the error state onto the toolbar's settings gear —
+  // the button that opens the modal where the error can be acted on.
+  const mBtn = document.getElementById('btnMobileSettings');
+  if (mBtn) mBtn.classList.toggle('sync-error', state === 'error');
 }
 
 function updateSyncStatusForAirplane() {
