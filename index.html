@@ -1778,7 +1778,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire tab UX: fold checklists + studies config by default, sort by last attempt. Variation-checklist blocks now render folded by default with a clickable header showing overall progress (100% = every variation won at Easy, Medium AND Hard; color-coded mini-bar via winRateColor); the count/ply/Generate controls live inside the unfolded body, and a block is forced open while its list is generating. Checklists are ordered most-recently-attempted first — derived from preset-tagged practiceScoreboard timestamps at each list's leaf positions, merged with a session-local stamp set on every drill start so abandoned attempts count too. The studies config section (add-study form, study list, Refresh/Connect row) folds to a compact 'Studies (N) · ● Lichess' header by default once Lichess is connected and at least one study is added; adding a study forces it open so setup doesn't collapse mid-flow.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Settings: add Date filter (All time / rolling presets 3-24mo / custom date). Applied to allGames right after each Gist/localStorage/Lichess load, before extraction — trims the chess.js mistake/tactic/advantage extraction pass and detectRepertoireDeviations to games newer than the cutoff, cutting per-session processing time as game history grows. Non-destructive: only the in-memory allGames array is trimmed, the full set is still cached/synced to Gist untouched, so switching back to "All time" restores everything. Applies on next load (restart), per the existing Start View pattern. Game Review history entries in the Games tab respect the same cutoff, filtered at render time only (reviewHistory itself is never trimmed, so Gist read-merge-write sync is unaffected).</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2075,6 +2075,24 @@
           <option value="repertoire">Repertoire</option>
           <option value="explorer">Opening explorer</option>
         </select>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin:14px 0 0;">
+        <div>
+          <span style="font-size:13px;">Date filter</span>
+          <div class="hint" style="margin-top:2px;">Excludes older games from mistakes/tactics/repertoire loading — nothing is deleted, switch back to "All time" to bring them back. Applies on next load.</div>
+        </div>
+        <select id="settingsDateFilter" style="flex-shrink:0;margin-left:12px;font-size:12px;padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);">
+          <option value="all">All time</option>
+          <option value="3m">Last 3 months</option>
+          <option value="6m">Last 6 months</option>
+          <option value="12m">Last 12 months</option>
+          <option value="24m">Last 2 years</option>
+          <option value="custom">Custom date…</option>
+        </select>
+      </div>
+      <div id="settingsDateFilterCustomRow" style="display:none;align-items:center;justify-content:flex-end;margin:8px 0 0;">
+        <span style="font-size:12px;color:var(--text-secondary);margin-right:8px;">Since</span>
+        <input type="date" id="settingsDateFilterCustomInput" style="flex-shrink:0;font-size:12px;padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);">
       </div>
       <div style="display:flex;align-items:center;justify-content:space-between;margin:14px 0 0;">
         <div>
@@ -2796,6 +2814,40 @@ let startView = (() => {
   const v = localStorage.getItem('mistakelab_start_view');
   return ['games', 'review', 'repertoire', 'explorer'].includes(v) ? v : 'games';
 })();
+// Date filter: excludes games older than a cutoff from extraction (mistakes,
+// tactics, advantages, repertoire deviations all derive from allGames, so this
+// one filter propagates everywhere). Non-destructive — only trims the in-memory
+// allGames array after it's loaded from Gist/localStorage; the source data is
+// never touched, so switching back to 'all' brings everything back. Applied at
+// load time only (restart to change) since re-extraction mid-session is disruptive.
+// Value is 'all', a rolling preset ('3m'|'6m'|'12m'|'24m', recalculated from today
+// on every load), or a custom 'YYYY-MM-DD' cutoff date.
+const DATE_FILTER_PRESET_MONTHS = { '3m': 3, '6m': 6, '12m': 12, '24m': 24 };
+let dateFilterValue = localStorage.getItem('mistakelab_date_filter') || 'all';
+
+// Returns a ms-epoch cutoff (games/reviews with a timestamp before this are
+// excluded), or 0 if no filter is active.
+function getDateFilterCutoffMs() {
+  if (!dateFilterValue || dateFilterValue === 'all') return 0;
+  const months = DATE_FILTER_PRESET_MONTHS[dateFilterValue];
+  if (months) {
+    const d = new Date();
+    d.setMonth(d.getMonth() - months);
+    return d.getTime();
+  }
+  const parsed = new Date(dateFilterValue + 'T00:00:00');
+  return isNaN(parsed.getTime()) ? 0 : parsed.getTime();
+}
+
+// Applied right after allGames is (re)assigned in fetchGames, before
+// extractAllMistakes/detectRepertoireDeviations walk it — trims the expensive
+// per-move chess.js extraction pass down to the games that matter, without
+// ever mutating the cached/Gist game data itself.
+function applyDateFilterToGames(games) {
+  const cutoff = getDateFilterCutoffMs();
+  if (!cutoff) return games;
+  return games.filter(g => (g.createdAt || 0) >= cutoff);
+}
 let syncDebounceTimer = null;
 let appShown = false; // guard to prevent double showMainApp()
 const GIST_FILENAME = 'mistakelab_progress.json';
@@ -4812,6 +4864,36 @@ function openSettings() {
     startViewSel.onchange = function() {
       startView = this.value;
       localStorage.setItem('mistakelab_start_view', startView);
+    };
+  }
+  // Date filter selector (presets + custom date; see dateFilterValue/
+  // getDateFilterCutoffMs near the other startup-setting declarations)
+  const dateFilterSel = document.getElementById('settingsDateFilter');
+  const dateFilterCustomRow = document.getElementById('settingsDateFilterCustomRow');
+  const dateFilterCustomInput = document.getElementById('settingsDateFilterCustomInput');
+  if (dateFilterSel) {
+    const isPreset = ['all', ...Object.keys(DATE_FILTER_PRESET_MONTHS)].includes(dateFilterValue);
+    dateFilterSel.value = isPreset ? dateFilterValue : 'custom';
+    if (!isPreset && dateFilterCustomInput) dateFilterCustomInput.value = dateFilterValue;
+    if (dateFilterCustomRow) dateFilterCustomRow.style.display = dateFilterSel.value === 'custom' ? 'flex' : 'none';
+    dateFilterSel.onchange = function() {
+      if (this.value === 'custom') {
+        if (dateFilterCustomRow) dateFilterCustomRow.style.display = 'flex';
+        // Don't persist yet — wait for an actual date to be picked below,
+        // so switching to "Custom…" without picking a date doesn't silently
+        // filter everything out (an empty cutoff string is invalid/no-op anyway).
+      } else {
+        if (dateFilterCustomRow) dateFilterCustomRow.style.display = 'none';
+        dateFilterValue = this.value;
+        localStorage.setItem('mistakelab_date_filter', dateFilterValue);
+      }
+    };
+  }
+  if (dateFilterCustomInput) {
+    dateFilterCustomInput.onchange = function() {
+      if (!this.value) return;
+      dateFilterValue = this.value; // 'YYYY-MM-DD' from the native date input
+      localStorage.setItem('mistakelab_date_filter', dateFilterValue);
     };
   }
   // Instant Feedback toggle
@@ -11185,10 +11267,13 @@ async function fetchGames(autoUsername) {
 
       if (localGames.length > 0 && localProgressOk) {
         // ── Fast path: render from cache, background-sync ──
-        allGames = localGames;
+        // Date filter applied here (not to localGames) so the digest below still
+        // reflects the full unfiltered set — change detection must stay correct
+        // regardless of what's currently trimmed for display/extraction.
+        allGames = applyDateFilterToGames(localGames);
         localStorage.setItem('mistakelab_username', username);
         const localDigest = gamesDigest(localGames);
-        console.log(`[CacheFirst] Rendering ${allGames.length} games from localStorage`);
+        console.log(`[CacheFirst] Rendering ${allGames.length} games from localStorage${allGames.length !== localGames.length ? ` (${localGames.length} total, date filter active)` : ''}`);
 
         btn.textContent = `Loading ${allGames.length} games…`;
         setSyncStatus('syncing', 'Syncing…');
@@ -11268,8 +11353,10 @@ async function fetchGames(autoUsername) {
             if (gistDigest !== localDigest && gistGames.length > 0) {
               // Games changed — re-extract only if user isn't mid-drill
               console.log(`[CacheFirst] Games changed (${localDigest} → ${gistDigest})`);
-              allGames = gistGames;
-              saveGamesCache(username, buildGameCacheObj(username, allGames));
+              // Cache the full unfiltered set (so airplane mode / a later filter
+              // change still has everything locally), then trim for extraction.
+              saveGamesCache(username, buildGameCacheObj(username, gistGames));
+              allGames = applyDateFilterToGames(gistGames);
               if (currentMistakeIdx < 0) {
                 // Safe to re-extract: user hasn't loaded a position yet
                 setSyncStatus('syncing', 'Updating…');
@@ -11323,9 +11410,9 @@ async function fetchGames(autoUsername) {
           throw new Error('No analyzed games found in cloud storage.\nRun the batch analyzer to add games:\n  node analyzer/analyze.js --username ' + username);
         }
 
-        allGames = games;
         localStorage.setItem('mistakelab_username', username);
-        saveGamesCache(username, buildGameCacheObj(username, allGames));
+        saveGamesCache(username, buildGameCacheObj(username, games)); // full unfiltered set
+        allGames = applyDateFilterToGames(games);
 
         btn.textContent = `Analyzing ${allGames.length} games…`;
         await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
@@ -11357,8 +11444,9 @@ async function fetchGames(autoUsername) {
       let cachedGames = cache ? cache.games.filter(g => g.analysis && g.analysis.length > 0) : [];
 
       if (cachedGames.length > 0) {
-        // Render immediately from cache
-        allGames = cachedGames;
+        // Render immediately from cache (filtered for extraction; the full
+        // cachedGames set is still what gets merged/saved below)
+        allGames = applyDateFilterToGames(cachedGames);
         localStorage.setItem('mistakelab_username', username);
         btn.textContent = `Analyzing ${allGames.length} games…`;
         await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
@@ -11393,12 +11481,13 @@ async function fetchGames(autoUsername) {
           throw new Error('No analyzed games found. Make sure you have computer-analyzed games on Lichess.');
         }
       } else {
-        allGames = merged;
+        allGames = applyDateFilterToGames(merged);
       }
 
-      // Save merged cache
+      // Save merged cache (full unfiltered set — date filter only trims what's
+      // used for extraction/display this session)
       localStorage.setItem('mistakelab_username', username);
-      saveGamesCache(username, buildGameCacheObj(username, allGames));
+      saveGamesCache(username, buildGameCacheObj(username, merged.length === 0 ? cachedGames : merged));
 
       // Re-extract and re-render
       if (appShown) setSyncStatus('syncing', 'Analyzing…');
@@ -13599,8 +13688,13 @@ function renderGameList() {
   // policy via reviewPassesGameFilters (correspondence speed bucket + color).
   const allEntries = [...gameMap].map(([gid, entry]) =>
     ({ kind: 'game', ts: new Date(entry.game.createdAt || 0).getTime() || 0, gid, entry }));
+  // Date filter applies to review history at display time only — reviewHistory
+  // itself is never trimmed, so syncReviewHistoryToGist's read-merge-write keeps
+  // seeing (and preserving) the full set regardless of the current cutoff.
+  const dateFilterCutoff = getDateFilterCutoffMs();
   for (const s of reviewHistory) {
     if (!reviewPassesGameFilters(s)) continue;
+    if (dateFilterCutoff && (s.ts || 0) < dateFilterCutoff) continue;
     allEntries.push({ kind: 'review', ts: s.ts || 0, snap: s });
   }
   allEntries.sort((a, b) => b.ts - a.ts);

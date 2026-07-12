@@ -160,6 +160,25 @@ Startup (cache-first path, extractAllMistakes → showMainApp):
   3. loadFromGist() must complete before extractAllMistakes() so gistData.positions
      (invalidations, invalidatedLines) is populated first.
 
+Date filter (Settings → Training → Date filter, `mistakelab_date_filter` LS key):
+  dateFilterValue = 'all' | rolling preset '3m'|'6m'|'12m'|'24m' (recalculated from
+  today via getDateFilterCutoffMs on every load) | custom 'YYYY-MM-DD'.
+  applyDateFilterToGames(games) filters by game.createdAt and is called at all 5
+  `allGames = ` assignment sites inside fetchGames (fast-path render, phase-2
+  background-sync-changed, Gist cold-start, standalone-cache-render, standalone-
+  post-fetch-merge) — always AFTER saveGamesCache/buildGameCacheObj is given the
+  FULL unfiltered set, so the localStorage games cache and Gist never shrink; only
+  the in-memory allGames used for extraction/display is trimmed. This means
+  extractAllMistakes and detectRepertoireDeviations (both iterate allGames) only
+  process games newer than the cutoff — the actual load-time win, since the Gist
+  fetch itself is one monolithic JSON regardless of the filter. Switching back to
+  'all' restores everything with no re-fetch needed. Takes effect on next load
+  (restart), matching the Start View setting's pattern — no mid-session re-extract.
+  Game Review history entries respect the same cutoff but ONLY at render time,
+  inside renderGameList's reviewHistory loop (checked against s.ts) — reviewHistory
+  itself is never trimmed, so syncReviewHistoryToGist's read-merge-write still
+  operates on the full set and can't reintroduce/lose entries across the toggle.
+
 Startup order in showMainApp() (appShown guard prevents double init):
   loadContSettings → loadVoiceSettings → initStockfish → prefetchMaia (I/O only)
   → migrateOldLocalStorageFenCache → migrateLegacyFenDataPosKeys
