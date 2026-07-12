@@ -849,6 +849,9 @@ noteArrows/noteCircles rendered by renderArrows() only when note panel is OPEN â
 checkForNote / updateNoteButton / .has-note CSS class on btnNote.
 showNoteArrows / hideNoteArrows / openNotePanel / enterNoteEditMode / saveNote /
   deleteNote route through debounceSyncToGist (not bypassing the dirty flag).
+deleteNote shows an undo-toast (6s): restore writes the pre-delete snapshot back
+  with a FRESH `updated` timestamp so merge keeps the restore over the tombstone
+  cross-device. Restore preserves the original `source` field verbatim.
 Auto-show note on correct/reveal (repertoire shows study PGN comments as notes).
 Clickable variation lines in notes: getCurrentNoteFen() prioritizes gameEngine.fen()
   (post-move) then m.fenBefore, so a note at a post-move position validates

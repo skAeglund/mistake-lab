@@ -1817,7 +1817,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">UX: add toast notification system, replace all native alert() dialogs. showToast(message, {type, duration, actionLabel, onAction}) renders a fixed bottom-center stack (z-index 300, max 3, auto-dismiss, tap-to-dismiss, optional action button for undo patterns). Replaced: detected-tactic save failures (2 sites, error toasts), custom-deviation FEN/move/duplicate validation (4 sites, error toasts), add-study validation (2 sites, moved inline to #repertoireStatus alongside the existing fetch-failure message). No native alert() calls remain.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">UX: undo-toast for note deletion. deleteNote snapshots the entry before writing the tombstone and offers a 6s Undo action; restore writes the snapshot back with a fresh `updated` timestamp so mergeGistData last-write-wins keeps the restore over the older tombstone on other devices. Undo is keyed by the captured positionKey, so it works even after navigating away.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -27603,6 +27603,11 @@ function deleteNote() {
   // Bail if there's nothing user-visible to delete (no entry, or already a tombstone).
   if (!existing || existing.deleted) { closeNotePanel(); return; }
 
+  // UX audit #1: snapshot the entry for the undo-toast below. Deep copy —
+  // `existing` is about to be replaced in gistData.notes and the undo may
+  // fire seconds later, after other mutations.
+  const undoSnapshot = JSON.parse(JSON.stringify(existing));
+
   // Finding A: write a tombstone instead of `delete gistData.notes[key]`.
   // mergeGistData merges notes by `updated` timestamp last-write-wins, but it
   // only iterates `local.notes` keys — a key that's been removed from local
@@ -27650,6 +27655,27 @@ function deleteNote() {
   hideNoteArrows();
   updateNoteButton();
   if (reviewMode) renderReviewList();
+
+  // UX audit #1: note deletion was irreversible (permanent tombstone) with
+  // no confirm — one mis-tap on mobile lost hand-authored content. Undo
+  // restores the snapshot with a FRESH `updated` timestamp so mergeGistData's
+  // last-write-wins keeps the restore over the (older) tombstone on other
+  // devices. Keyed by `key` captured above, so undo works even if the user
+  // has navigated to a different position; updateNoteButton then reflects
+  // whatever position is current.
+  showToast('Note deleted', {
+    duration: 6000,
+    actionLabel: 'Undo',
+    onAction: () => {
+      if (!gistData) return;
+      if (!gistData.notes) gistData.notes = {};
+      gistData.notes[key] = { ...undoSnapshot, updated: new Date().toISOString() };
+      debounceSyncToGist();
+      updateNoteButton();
+      if (reviewMode) renderReviewList();
+      showToast('Note restored', { type: 'success', duration: 2500 });
+    },
+  });
 }
 
 // Finding 6: `checkForNote` previously accepted a `fen` argument that was
