@@ -121,6 +121,11 @@
   }
   .btn-primary:hover { background: var(--accent-dim); transform: translateY(-1px); }
   .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+  /* UX audit #5: boundary-disabled Prev/Next (desktop .btn + mobile .nav-btn).
+     pointer-events:none also suppresses hover/active styling. */
+  .btn:disabled, .mobile-toolbar-nav .nav-btn:disabled {
+    opacity: 0.35; cursor: default; pointer-events: none;
+  }
   .btn-ghost {
     background: transparent; color: var(--text-secondary); border: 1px solid var(--border);
   }
@@ -1817,7 +1822,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">UX: settings modal — scope Save & Sync + Disconnect to the Cloud Sync section, two-tap Disconnect confirm, footer becomes Change user / Close. Training settings persist instantly onchange, so the old Cancel / Save & Sync footer implied a transactional modal it never was (and Save & Sync errored 'Token is required' for non-Gist users who only flipped a toggle). confirmDisconnectGist arms the button red for 3s; second tap executes, self-disarms otherwise.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">UX: disable Prev/Next at game boundaries instead of silent no-op taps. updatePositionNav now computes boundary state (localIdx within the game's mistake list) and sets .disabled on btnPrev/NextPuzzle + mobile toolbar counterparts; generic .btn:disabled / .nav-btn:disabled dim style added. Modes that repurpose the arrows stay enabled: opening filter (undo/redo) via explicit updatePositionNav on entry, detected-tactic solve (cancel gesture) on entry + recompute on abandon. Review mode unchanged (prev hidden, Next always advances the queue). Exit paths covered by existing updateSessionProgress/loadPosition call sites.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -6851,6 +6856,9 @@ function tryDetectedTactic(listIdx) {
   detectedTacticSolveMode = true;
   _detectedTacticCand = cand;
   _detectedTacticCandIdx = listIdx;
+  // UX audit #5: ‹ › act as "cancel solve" in this mode — re-enable them in
+  // case the underlying position had them boundary-disabled.
+  updatePositionNav();
 
   // Initialize tacticMode with the chain — same shape as a real tactic item
   tacticMode = true;
@@ -7107,6 +7115,9 @@ function abandonDetectedTacticSolve() {
   _detectedTacticCand = null;
   _detectedTacticCandIdx = -1;
   _detectedTacticReviewSnapshot = null;
+  // UX audit #5: recompute Prev/Next boundary state now that the mode flag
+  // is down (entry force-enabled them for the cancel-solve gesture).
+  updatePositionNav();
 
   // Reopen modal so the user can try another / continue reviewing
   openDetectedTacticsModal();
@@ -12623,6 +12634,10 @@ function enterOpeningFilter() {
   buildFenIndex();
   ensurePMI();
   openingFilterMode = true;
+  // UX audit #5: re-enable the (possibly boundary-disabled) ‹ › buttons —
+  // they map to filterUndoMove/filterRedoMove in this mode. Exit is covered
+  // by exitOpeningFilter's unconditional updateSessionProgress().
+  updatePositionNav();
 
   // Save current board state for restoration
   const currentM = currentMistakeIdx >= 0 ? filteredMistakes[currentMistakeIdx] : null;
@@ -22793,6 +22808,37 @@ function updatePositionNav() {
     nextMobile.textContent = inReview ? 'Next ›' : '›';
     nextMobile.classList.toggle('nav-review-wide', inReview);
     nextMobile.classList.toggle('nav-review-completed', completed);
+  }
+
+  // UX audit #5: disable Prev/Next at game boundaries instead of silent
+  // no-op taps (prevPosition/nextPosition return early there). Modes that
+  // repurpose the arrows stay enabled: opening filter (undo/redo — the
+  // mobile ‹ › route to filterUndoMove/filterRedoMove) and detected-tactic
+  // solve (nav = cancel solve). Review mode: prev is hidden above and Next
+  // always advances the queue, so both stay enabled while an item is loaded.
+  let prevOn = true, nextOn = true;
+  if (openingFilterMode || detectedTacticSolveMode) {
+    // repurposed — keep enabled
+  } else if (currentMistakeIdx < 0) {
+    prevOn = nextOn = false;
+  } else if (!inReview) {
+    const m = filteredMistakes[currentMistakeIdx];
+    if (m) {
+      const gameMistakes = filteredMistakes.filter(mm => mm.gameId === m.gameId);
+      const localIdx = gameMistakes.indexOf(m);
+      prevOn = localIdx > 0;
+      nextOn = localIdx < gameMistakes.length - 1;
+    } else {
+      prevOn = nextOn = false;
+    }
+  }
+  for (const [el, on] of [
+    [document.getElementById('btnPrevPuzzle'), prevOn],
+    [document.getElementById('btnPrevPuzzleMobile'), prevOn],
+    [nextDesktop, nextOn],
+    [nextMobile, nextOn],
+  ]) {
+    if (el) el.disabled = !on;
   }
 }
 
