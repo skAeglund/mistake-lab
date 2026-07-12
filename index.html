@@ -1829,7 +1829,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Mobile layout fixes: tab taps go full-screen (mobile-browsing) instead of closing the drawer over the board; initBoard flips browsing→training before construction so boards entered from the list (historical review, checklist variations) aren't built 0-width; window resize while the board container is hidden is deferred and applied on the next browsing→training flip (enterMobileTrainingLayout helper, replaces 7 inline class flips); repertoire start view re-renders the panel once the background trie load resolves, so the Deviations (Review/Drill) and Gaps sections appear without exiting and re-entering the tab.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Review-history integration: mistakes/tactics/sequences saved from a Game Review carry _reviewSnapId and the toolbar button becomes 📋 View Review (openHistoricalReview) instead of a broken View Game link — the button now hides for synthetic practice/resumed items with no backing game; checklist review snapshots are titled after the variation's opening or its study (contLine._reviewTitle, studyId stamped in startTodoFromList) instead of the bare Checklist label; review list gets a Show all section listing not-yet-due items sorted by next due date (buildReviewItemEl shared card builder + renderReviewUpcomingSection, session-local expand state); a review retry that ends on a noted position auto-opens the note panel (post-move fen preferred, pre-move fallback).</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2450,6 +2450,11 @@ function classifyWithContext(base, bestCp, pv2Cp, wpDrop) {
 
 let gameListDisplayLimit = 50;
 let reviewListDisplayLimit = 50;
+// Review list "Show all": reveal items that aren't due yet (session-local,
+// reset on entering review mode). Own display limit so the due queue's
+// paging is unaffected.
+let reviewShowUpcoming = false;
+let reviewUpcomingDisplayLimit = 50;
 
 // ─── Icon constants ───
 const ICON_MISTAKE = '<svg width="14" height="14" viewBox="0 0 40 40" style="vertical-align:-2px"><circle cx="20" cy="20" r="18" fill="#e8922d"/><text x="20" y="28" text-anchor="middle" fill="#fff" font-size="26" font-weight="700" font-family="sans-serif">?</text></svg>';
@@ -4160,7 +4165,9 @@ function buildReviewSnapshot(id, source, outcome) {
     repTried: mv.repTried,
   }));
   let openingName = '';
-  try { openingName = lookupOpeningName(contLine.baseFen) || ''; } catch (_) {}
+  // _reviewTitle: caller-provided title for drills whose baseFen is too deep
+  // for the ECO lookup (checklist leaves) — falls back to the classic lookup.
+  try { openingName = (contLine._reviewTitle || lookupOpeningName(contLine.baseFen)) || ''; } catch (_) {}
   return {
     id,
     ts: Date.now(),
@@ -4454,7 +4461,13 @@ async function openHistoricalReview(snapId) {
   // _historical gates startTacticScan (snapshots carry no _tacticCandidates —
   // a "scanned clean!" banner on an old review would be misleading) and marks
   // the contLine for any future context checks.
-  contLine = { baseFen: snap.baseFen, moves, currentIdx: moves.length - 1, _historical: true };
+  contLine = { baseFen: snap.baseFen, moves, currentIdx: moves.length - 1, _historical: true,
+    // Saves made from a reopened review (💾 Save / 🔍 Sequence / detected
+    // tactics) link back to this snapshot. Safe re: re-capture: the six
+    // capture hook sites are continuation-end paths (unreachable in review
+    // mode) and finalizeReviewSnapshotIfPending also requires _reviewSnapMeta,
+    // which is deliberately NOT set here.
+    _reviewSnapId: snapId };
   contLineBrowsing = false;
   srsRecorded = true; // defensive: nothing in a historical review may grade
   document.getElementById('contLineContainer').innerHTML = '';
@@ -8194,7 +8207,20 @@ function openLichessAnalysis() {
 function openGameOnSite() {
   if (currentMistakeIdx < 0) return;
   const m = filteredMistakes[currentMistakeIdx];
-  if (!m || !m.game) return;
+  if (!m) return;
+  // Review-sourced item (saved from a MistakeLab Game Review): the "game" is a
+  // review snapshot, not a Lichess/chess.com game — open the historical review
+  // instead. Existence re-checked at click time: the snapshot may have been
+  // pruned (REVIEW_HISTORY_CAP) or deleted since loadPosition labeled the button.
+  if (m._reviewSnapId) {
+    if (reviewHistory.some(s => s.id === m._reviewSnapId)) {
+      openHistoricalReview(m._reviewSnapId);
+    } else {
+      showToast('The Game Review this position came from is no longer in your history.', { type: 'error' });
+    }
+    return;
+  }
+  if (!m.game) return;
   const game = m.game;
   if (game.id.startsWith('chesscom_')) {
     const numId = game.id.replace('chesscom_', '');
@@ -9064,6 +9090,8 @@ function confirmSaveSequence() {
     _source: fromReview ? 'game-review' : 'converted-mistake',
     _isSequence: true,
     _chainSig: chainSig,
+    // Link back to the source Game Review (undefined vanishes in JSON.stringify)
+    _reviewSnapId: fromReview ? (contLine?._reviewSnapId || undefined) : undefined,
   };
   if (!fromReview) {
     rec._sourceGameId = m.gameId;
@@ -13965,6 +13993,8 @@ function toggleReviewMode() {
     filterRows.forEach(r => r.style.display = 'none');
     buildReviewQueue();
     reviewListDisplayLimit = 50;
+    reviewShowUpcoming = false;
+    reviewUpcomingDisplayLimit = 50;
     renderReviewList();
     // Auto-load first due position
     if (reviewQueue.length > 0) {
@@ -13989,13 +14019,34 @@ function renderReviewList() {
       <div style="font-size:24px;margin-bottom:8px;">✓</div>
       All caught up! No positions due for review.
     </div>`;
+    renderReviewUpcomingSection(list);
     return;
   }
 
-  const today = localDateString();
   const visibleReviewItems = reviewQueue.slice(0, reviewListDisplayLimit);
 
   for (const m of visibleReviewItems) {
+    list.appendChild(buildReviewItemEl(m, false));
+  }
+
+  if (reviewQueue.length > reviewListDisplayLimit) {
+    const remaining = reviewQueue.length - reviewListDisplayLimit;
+    const btn = document.createElement('div');
+    btn.className = 'show-more-btn';
+    btn.textContent = `Show ${Math.min(remaining, 50)} more (${remaining} hidden)`;
+    btn.onclick = () => { reviewListDisplayLimit += 50; renderReviewList(); };
+    list.appendChild(btn);
+  }
+
+  renderReviewUpcomingSection(list);
+}
+
+// Builds one review-list item card. Shared between the due queue and the
+// "Show all" upcoming section; `upcoming` swaps the status chip for the
+// item's next due date (upcoming items are by definition neither new nor
+// overdue — new cards are always due).
+function buildReviewItemEl(m, upcoming) {
+  const today = localDateString();
     const pid = posId(m);
     const card = getCardForPosition(pid);
     const globalIdx = filteredMistakes.indexOf(m);
@@ -14014,7 +14065,13 @@ function renderReviewList() {
     const isOverdue = !isNew && card.due && card.due < today;
 
     let statusText;
-    if (isNew) {
+    if (upcoming) {
+      // Not-due card: show when it comes due. Both dates are local
+      // 'YYYY-MM-DD' strings parsed as UTC midnight, so the difference is a
+      // whole number of days.
+      const days = card.due ? Math.round((new Date(card.due) - new Date(today)) / 86400000) : 0;
+      statusText = `<span style="color:var(--text-muted)">${days > 0 ? `in ${days}d` : 'Due'}</span>`;
+    } else if (isNew) {
       statusText = '<span style="color:var(--blue)">New</span>';
     } else if (isOverdue) {
       statusText = '<span style="color:var(--red)">Overdue</span>';
@@ -14089,15 +14146,58 @@ function renderReviewList() {
         ${!isNew ? `<span>reps: ${card.reps}</span><span>lapses: ${card.lapses}</span><span>stab: ${Math.round(card.stability)}d</span>` : '<span>First time</span>'}
       </div>
     `;
-    list.appendChild(item);
+  return item;
+}
+
+// "Show all" section at the end of the review list: surfaces items that
+// aren't due yet so a specific position can be found (and drilled early —
+// FSRS handles short-elapsed reviews fine). Collapsed behind a single
+// button by default; expansion is session-local (reviewShowUpcoming).
+function hideReviewUpcoming() {
+  reviewShowUpcoming = false;
+  reviewUpcomingDisplayLimit = 50;
+  renderReviewList();
+}
+
+function renderReviewUpcomingSection(list) {
+  // Same in-flight-synthetic exclusion as buildReviewQueue.
+  const isInFlightSynthetic = (m) =>
+    m.type === 'practice' || m.gameId === '_practice' || m.gameId === '_resumed';
+  const upcomingItems = filteredMistakes.filter(m => !isInFlightSynthetic(m) && !isDue(posId(m)));
+  if (upcomingItems.length === 0) return;
+
+  if (!reviewShowUpcoming) {
+    const btn = document.createElement('div');
+    btn.className = 'show-more-btn';
+    btn.textContent = `Show all — ${upcomingItems.length} upcoming (not due yet)`;
+    btn.onclick = () => { reviewShowUpcoming = true; renderReviewList(); };
+    list.appendChild(btn);
+    return;
   }
 
-  if (reviewQueue.length > reviewListDisplayLimit) {
-    const remaining = reviewQueue.length - reviewListDisplayLimit;
+  // Soonest-due first (due is a 'YYYY-MM-DD' string — lexicographic order
+  // matches chronological order).
+  upcomingItems.sort((a, b) => {
+    const da = getCardForPosition(posId(a)).due || '';
+    const db = getCardForPosition(posId(b)).due || '';
+    return da < db ? -1 : da > db ? 1 : 0;
+  });
+
+  const header = document.createElement('div');
+  header.style.cssText = 'display:flex;justify-content:space-between;align-items:center;padding:10px 12px 4px;font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;';
+  header.innerHTML = `<span>Upcoming — not due yet (${upcomingItems.length})</span>
+    <button class="btn btn-ghost btn-sm" style="font-size:11px;padding:1px 8px;" onclick="hideReviewUpcoming()">Hide</button>`;
+  list.appendChild(header);
+
+  const visible = upcomingItems.slice(0, reviewUpcomingDisplayLimit);
+  for (const m of visible) list.appendChild(buildReviewItemEl(m, true));
+
+  if (upcomingItems.length > reviewUpcomingDisplayLimit) {
+    const remaining = upcomingItems.length - reviewUpcomingDisplayLimit;
     const btn = document.createElement('div');
     btn.className = 'show-more-btn';
     btn.textContent = `Show ${Math.min(remaining, 50)} more (${remaining} hidden)`;
-    btn.onclick = () => { reviewListDisplayLimit += 50; renderReviewList(); };
+    btn.onclick = () => { reviewUpcomingDisplayLimit += 50; renderReviewList(); };
     list.appendChild(btn);
   }
 }
@@ -14817,7 +14917,26 @@ function loadPosition(globalIdx, skipAnimation = false) {
   document.getElementById('emptyMsg').classList.add('hidden');
   document.getElementById('btnRetry').classList.add('hidden');
   document.getElementById('btnLichess').classList.remove('hidden');
-  document.getElementById('btnViewGame').classList.remove('hidden');
+  // btnViewGame is context-sensitive: review-sourced items (saved from a
+  // MistakeLab Game Review — savePracticeMistake / savePracticeTactic /
+  // sequence-from-review stamp _reviewSnapId) link back to that review;
+  // other synthetic '_practice'/'_resumed' items have no real game behind
+  // them (openGameOnSite would build a broken URL) so the button hides;
+  // real fetched games keep the classic "View Game" link.
+  {
+    const vgBtn = document.getElementById('btnViewGame');
+    if (m._reviewSnapId) {
+      vgBtn.textContent = '📋 View Review';
+      vgBtn.title = 'Open the Game Review this position came from';
+      vgBtn.classList.remove('hidden');
+    } else if (m.gameId?.startsWith('_practice') || m.gameId?.startsWith('_resumed')) {
+      vgBtn.classList.add('hidden');
+    } else {
+      vgBtn.textContent = '♟ View Game';
+      vgBtn.title = 'View the original game on Lichess or Chess.com';
+      vgBtn.classList.remove('hidden');
+    }
+  }
   const hintBtn = document.getElementById('btnHint');
   hintBtn.classList.remove('hidden');
   hintBtn.disabled = false;
@@ -19331,6 +19450,10 @@ function savePracticeMistake(moveIdx) {
     bestEval: { eval: mv.bestCp || 0 },
     _opening: lookupOpeningName(fenBefore) || filteredMistakes[currentMistakeIdx]?.game?.opening?.name || 'Practice',
     _createdAt: Date.now(),
+    // Link back to the Game Review this was saved from (the Save button only
+    // exists on review key-move/retry cards). Absent when the game was too
+    // short for a snapshot; undefined vanishes in JSON.stringify.
+    _reviewSnapId: contLine?._reviewSnapId || undefined,
   };
 
   // Save to Gist data
@@ -19421,6 +19544,9 @@ function savePracticeTactic(cand) {
     _createdAt: Date.now(),
     _source: sourceLabel,
     _chainSig: chainSig,  // for dedup on re-save attempts
+    // Link back to the source Game Review (detected tactics are saved from the
+    // post-game review's scanner modal). undefined vanishes in JSON.stringify.
+    _reviewSnapId: contLine?._reviewSnapId || undefined,
   };
 
   gistData.practiceTactics.push(tacticRecord);
@@ -21121,6 +21247,21 @@ function handleReviewRetryResult(wpDrop, move, bestMoveSan, isExactBest, repMatc
       <div class="feedback-text">${body}${exploreBtns}${(saveBtn || seqBtn) ? `<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">${saveBtn}${seqBtn}</div>` : ''}${navHtml}</div>
     </div>
   `;
+
+  // Auto-popup a saved note when the retry ends on a noted position — the
+  // note is the takeaway written for exactly this moment. Post-move position
+  // preferred (it's what's on the board); the pre-move position is the
+  // fallback (a note authored where the decision was made — held back before
+  // the attempt so the recall stays unspoiled, same idea as the
+  // corrected-deviation reveal). Only opens when a real note exists:
+  // openNotePanel with no note drops into edit mode. Mirrors the repertoire
+  // drill's auto-open of study comments via openNotePanel(fen).
+  try {
+    const preFen = moveIdx > 0 ? contLine.moves[moveIdx - 1].fen : contLine.baseFen;
+    const noteFen = (retryPostFen && getNoteForFen(retryPostFen)) ? retryPostFen
+                  : (preFen && getNoteForFen(preFen)) ? preFen : null;
+    if (noteFen && !notePanelOpen) openNotePanel(noteFen);
+  } catch (_) { /* note popup is best-effort — never break the result card */ }
 }
 
 function showReviewComplete() {
@@ -25273,6 +25414,14 @@ function startTodoContinuation() {
   const fenParts = leafFen.split(' ');
   const moveNum = parseInt(fenParts[5]) || 1;
   const v = repTodoState.variation;
+  // Snapshot title: deep checklist leaves rarely resolve via
+  // lookupOpeningName(baseFen), which left every checklist review named just
+  // "Checklist". Prefer the variation's opening name, then the study the
+  // checklist belongs to (studyId stamped onto the variation in
+  // startTodoFromList; absent on pre-existing _lastTodoDrill replays → null).
+  const todoStudy = v.studyId
+    ? getRepertoireConfig().find(s => s.id === v.studyId) : null;
+  const todoTitle = v.openingName || (todoStudy && (todoStudy.name || todoStudy.id)) || null;
 
   practiceContItem = {
     type: 'practice',
@@ -25282,14 +25431,14 @@ function startTodoContinuation() {
     movePly: 0,
     moveNumber: moveNum,
     wpDrop: 0, cpLoss: 0, bestMove: null, bestMoveSan: null, bestCp: 0,
-    game: { id: '_rep_todo', opening: { name: v.openingName || 'Repertoire' },
+    game: { id: '_rep_todo', opening: { name: todoTitle || 'Repertoire' },
             speed: 'practice', _source: 'rep_todo', rated: false, players: {} },
   };
   filteredMistakes.push(practiceContItem);
   currentMistakeIdx = filteredMistakes.length - 1;
 
   // Advantage-mode continuation state.
-  contLine = { baseFen: leafFen, moves: [], currentIdx: -1 };
+  contLine = { baseFen: leafFen, moves: [], currentIdx: -1, _reviewTitle: todoTitle };
   contLineBrowsing = false;
   continuationMode = true;
   continuationEvalBarOn = false;
@@ -25675,7 +25824,7 @@ function startTodoFromList(studyId, vIdx, preset) {
   // end without a recorded scoreboard result (abandon/interrupt).
   if (!window._todoTouch) window._todoTouch = {};
   window._todoTouch[studyId] = Date.now();
-  const variation = Object.assign({}, list.variations[vIdx], { color: list.color });
+  const variation = Object.assign({}, list.variations[vIdx], { color: list.color, studyId: list.studyId });
   if (repertoireMode) toggleRepertoireMode(); // close the panel so the board shows
   startTodoVariation(variation, preset);
 }

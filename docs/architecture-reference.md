@@ -250,6 +250,18 @@ FSRS-5 (fsrs_review(card, grade, now)):
   - Synthetic in-flight items (practiceContItem, resumed practice) are excluded
     from the review queue.
 
+Review-list "Show all" (upcoming items): renderReviewList delegates card
+  construction to buildReviewItemEl(m, upcoming) and appends
+  renderReviewUpcomingSection(list) after the due queue (and in the
+  "all caught up" empty state). The section lists NOT-yet-due items (same
+  in-flight-synthetic exclusion as buildReviewQueue), sorted by next due date
+  (lexicographic on 'YYYY-MM-DD'), status chip "in Nd". Collapsed behind a
+  single "Show all — N upcoming" button; expansion is session-local
+  (reviewShowUpcoming + reviewUpcomingDisplayLimit, reset on entering review
+  mode; hideReviewUpcoming collapses). Items stay OUT of reviewQueue — counts,
+  auto-advance, and session progress remain due-only; clicking one just
+  loadPosition()s it (early FSRS reviews are fine — elapsed < interval).
+
 srsRecorded resume semantics: cont-session persistence stores srsRecordedAtSave
   (= srsRecorded at save time) and itemType. On resume, srsRecorded =
   session.srsRecordedAtSave if defined, else true. Advantage items default to
@@ -537,7 +549,30 @@ Storage — split between two systems:
 Restore — `openHistoricalReview(snapId)` uses the same synthetic-practice-item
   pattern as resumeContSession to reconstruct a contLine from the slim snapshot
   and re-enter contLineReviewMode. Must hide `#emptyMsg` on entry (a stuck
-  "Select a game to begin" overlay was a real bug here).
+  "Select a game to begin" overlay was a real bug here). The restored contLine
+  is stamped `_reviewSnapId: snapId` (so saves made FROM a reopened review also
+  back-link, see below) but NOT `_reviewSnapMeta` — the capture hook sites are
+  continuation-end paths (unreachable in review mode) and
+  finalizeReviewSnapshotIfPending requires both, so no accidental re-capture.
+
+Back-links (`_reviewSnapId` on saved items): savePracticeMistake,
+  savePracticeTactic, and sequence-from-review all stamp
+  `contLine._reviewSnapId` (when present — absent for games below the snapshot
+  threshold; undefined vanishes in JSON.stringify) onto the persisted record.
+  loadPosition then labels the toolbar button per item: `_reviewSnapId` →
+  "📋 View Review" (openGameOnSite routes to openHistoricalReview, re-checking
+  existence at click time — pruned/deleted snapshot → warn toast); other
+  '_practice'/'_resumed' gameIds → button HIDDEN (no real game; the old
+  unconditional unhide built broken lichess.org/_practice_… URLs); real games →
+  classic "♟ View Game".
+
+Snapshot titles (`contLine._reviewTitle`): buildReviewSnapshot prefers
+  `contLine._reviewTitle` over lookupOpeningName(baseFen) — deep drill leaves
+  (checklist variations) rarely resolve in the ECO book, which left snapshots
+  labeled only by their source ("Checklist"). startTodoContinuation sets it to
+  the variation's openingName, falling back to the study name (studyId stamped
+  onto the drill variation in startTodoFromList; pre-existing _lastTodoDrill
+  replays from before the stamp fall through to null → old behavior).
 
 Games-tab UI — review history entries are merged into the chronological games
   list (see ITEM TYPES), not segregated. The "Correspondence" (✉️) speed chip
@@ -855,6 +890,12 @@ deleteNote shows an undo-toast (6s): restore writes the pre-delete snapshot back
   with a FRESH `updated` timestamp so merge keeps the restore over the tombstone
   cross-device. Restore preserves the original `source` field verbatim.
 Auto-show note on correct/reveal (repertoire shows study PGN comments as notes).
+Auto-show note at review-retry end: handleReviewRetryResult opens the note
+  panel when a real note exists at the retry's post-move position (preferred —
+  it's on the board) or, failing that, the pre-move position (held back before
+  the attempt so recall stays unspoiled; same reveal timing as the
+  corrected-deviation "you first tried X" context). Guarded on
+  getNoteForFen(...) — openNotePanel with no note drops into edit mode.
 Clickable variation lines in notes: getCurrentNoteFen() prioritizes gameEngine.fen()
   (post-move) then m.fenBefore, so a note at a post-move position validates
   variation moves with the right side to move. jumpBoardToNoteFen +
