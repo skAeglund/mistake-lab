@@ -1136,6 +1136,12 @@ Analysis-mode Maia/DB overlay clickable extra rows draw through the existing
 
 ─── MISC ───
 
+- Toast notifications: showToast(message, {type:'success'|'error', duration,
+  actionLabel, onAction}) — fixed bottom-center stack (#toastContainer,
+  z-index 300, max 3, auto-dismiss default 4s, tap-to-dismiss). The app's
+  replacement for native alert(); actionLabel/onAction is the undo pattern.
+  Message set via textContent (safe for interpolated strings). Mobile bottom
+  offsets: 90px, 136px when body.line-nav-active.
 - MISTAKES_CACHE_VERSION = 8 (bump on schema/extraction change)
 - REPERTOIRE_CACHE_VERSION = 5
 - FEN_DB_VERSION = 1

@@ -1727,6 +1727,45 @@
   .cont-settings-disabled {
     opacity: 0.4; pointer-events: none;
   }
+  /* ─── Toast notifications (UX audit #2) ───
+     Fixed bottom-center stack, z-index 300: above modal-backdrop (100) and
+     the mobile drawer (200) so undo-toasts fired from inside modals stay
+     visible; below the arrow overlay (1000, pointer-events:none) and the
+     voice indicator (9999). */
+  .toast-container {
+    position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: 24px; z-index: 300;
+    display: flex; flex-direction: column; gap: 8px; align-items: center;
+    pointer-events: none;
+  }
+  .toast {
+    pointer-events: auto;
+    display: flex; align-items: center; gap: 12px;
+    background: var(--bg-card); border: 1px solid var(--border-active);
+    border-radius: 8px; padding: 10px 14px;
+    font-size: 13px; color: var(--text-primary);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+    max-width: min(480px, calc(100vw - 32px));
+    animation: toast-in 0.2s ease;
+  }
+  .toast-success { border-color: rgba(62, 207, 142, 0.5); }
+  .toast-error { border-color: rgba(239, 95, 95, 0.6); }
+  .toast-action {
+    background: none; border: none; cursor: pointer;
+    color: var(--accent); font-weight: 600; font-size: 13px;
+    padding: 4px 6px; flex-shrink: 0; white-space: nowrap;
+  }
+  .toast-action:hover { text-decoration: underline; }
+  @keyframes toast-in {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: none; }
+  }
+  @media (max-width: 768px) {
+    /* Clear the position-nav button rows in training view */
+    .toast-container { bottom: 90px; }
+    /* Clear the 120px fixed line-nav bar when it's active */
+    body.line-nav-active .toast-container { bottom: 136px; }
+  }
 </style>
 </head>
 <body>
@@ -1778,7 +1817,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Settings: add Date filter (All time / rolling presets 3-24mo / custom date). Applied to allGames right after each Gist/localStorage/Lichess load, before extraction — trims the chess.js mistake/tactic/advantage extraction pass and detectRepertoireDeviations to games newer than the cutoff, cutting per-session processing time as game history grows. Non-destructive: only the in-memory allGames array is trimmed, the full set is still cached/synced to Gist untouched, so switching back to "All time" restores everything. Applies on next load (restart), per the existing Start View pattern. Game Review history entries in the Games tab respect the same cutoff, filtered at render time only (reviewHistory itself is never trimmed, so Gist read-merge-write sync is unaffected).</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">UX: add toast notification system, replace all native alert() dialogs. showToast(message, {type, duration, actionLabel, onAction}) renders a fixed bottom-center stack (z-index 300, max 3, auto-dismiss, tap-to-dismiss, optional action button for undo patterns). Replaced: detected-tactic save failures (2 sites, error toasts), custom-deviation FEN/move/duplicate validation (4 sites, error toasts), add-study validation (2 sites, moved inline to #repertoireStatus alongside the existing fetch-failure message). No native alert() calls remain.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2013,6 +2052,9 @@
     </div>
   </div>
 </div>
+
+<!-- Toast notification stack (UX audit #2) -->
+<div class="toast-container" id="toastContainer"></div>
 
 <!-- Detected tactics review modal (Step 5) -->
 <div class="modal-backdrop hidden" id="detectedTacticsModal"
@@ -6721,7 +6763,7 @@ function saveDetectedTactic(listIdx) {
   if (result.saved || result.reason === 'already-saved') {
     cand._saved = true;
   } else {
-    alert(`Couldn't save: ${result.reason || 'unknown error'}`);
+    showToast(`Couldn't save: ${result.reason || 'unknown error'}`, { type: 'error', duration: 6000 });
     return;
   }
   renderDetectedTacticsList();
@@ -6933,7 +6975,7 @@ function saveAndReturnDetectedTactic() {
     // Surface the failure instead of silently abandoning. Common reasons:
     // 'invalid-chain', 'too-few-user-moves' — both indicate scanner produced
     // something malformed (shouldn't happen for detected candidates, but guard).
-    alert(`Couldn't save this tactic (${result.reason || 'unknown error'}). You can still discard it or go back.`);
+    showToast(`Couldn't save this tactic (${result.reason || 'unknown error'}). You can still discard it or go back.`, { type: 'error', duration: 6000 });
   }
 }
 
@@ -21861,6 +21903,50 @@ function retryPosition() {
 }
 
 // ─── UI Helpers ───
+// ─── Toast notifications (UX audit #2) ───
+// Non-blocking replacement for native alert(): fixed bottom-center stack,
+// auto-dismiss, optional action button (the undo pattern). Message is set
+// via textContent — safe for interpolated error reasons / study names.
+// opts: { type: 'success'|'error' (default neutral), duration: ms (default
+// 4000), actionLabel + onAction: renders a button; action auto-dismisses. }
+// Returns { dismiss } or null if the container is missing.
+function showToast(message, opts = {}) {
+  const container = document.getElementById('toastContainer');
+  if (!container) return null;
+  const t = document.createElement('div');
+  t.className = `toast${opts.type ? ' toast-' + opts.type : ''}`;
+  const msg = document.createElement('span');
+  msg.textContent = message;
+  t.appendChild(msg);
+  let timer = null;
+  const dismiss = () => {
+    if (!t.isConnected) return;
+    clearTimeout(timer);
+    t.style.transition = 'opacity 0.2s';
+    t.style.opacity = '0';
+    setTimeout(() => t.remove(), 200);
+  };
+  if (opts.actionLabel && typeof opts.onAction === 'function') {
+    const btn = document.createElement('button');
+    btn.className = 'toast-action';
+    btn.textContent = opts.actionLabel;
+    btn.onclick = () => {
+      dismiss();
+      try { opts.onAction(); } catch (e) { console.error('[Toast] action failed', e); }
+    };
+    t.appendChild(btn);
+  }
+  // Tap the message body to dismiss early (mobile-friendly; the action
+  // button keeps its own handler).
+  msg.style.cursor = 'default';
+  msg.onclick = dismiss;
+  timer = setTimeout(dismiss, opts.duration || 4000);
+  container.appendChild(t);
+  // Cap the stack at 3 — evict oldest first
+  while (container.children.length > 3) container.removeChild(container.firstChild);
+  return { dismiss };
+}
+
 function showFeedback(type, title, text, prepend = false) {
   const container = document.getElementById('feedbackContainer');
   const div = document.createElement('div');
@@ -23519,9 +23605,12 @@ async function addRepertoireStudy() {
   const colorSelect = document.getElementById('repertoireStudyColor');
   if (!input || !colorSelect) return;
 
+  // Validation feedback goes inline via #repertoireStatus — the same element
+  // the fetch-failure path below already uses (UX audit #2: no native alerts).
+  const statusEl = document.getElementById('repertoireStatus');
   const studyId = getStudyIdFromInput(input.value);
   if (!studyId) {
-    alert('Invalid study ID or URL. Use a Lichess study URL or 8-character ID.');
+    if (statusEl) statusEl.textContent = 'Invalid study ID or URL — use a Lichess study URL or 8-character ID.';
     return;
   }
 
@@ -23529,12 +23618,9 @@ async function addRepertoireStudy() {
   const studies = getRepertoireConfig();
 
   if (studies.some(s => s.id === studyId)) {
-    alert('This study is already added.');
+    if (statusEl) statusEl.textContent = 'This study is already added.';
     return;
   }
-
-  // Try fetching to validate
-  const statusEl = document.getElementById('repertoireStatus');
   if (statusEl) statusEl.textContent = 'Fetching study...';
 
   const pgn = await fetchStudyPGN(studyId);
@@ -23968,9 +24054,9 @@ function addCustomDeviationFromInput() {
 
   // Validate the move
   const chess = new Chess();
-  if (!chess.load(fen)) { alert('Invalid FEN'); return; }
+  if (!chess.load(fen)) { showToast('Invalid FEN', { type: 'error' }); return; }
   const move = chess.move(san, { sloppy: true });
-  if (!move) { alert(`Invalid move: ${san}`); return; }
+  if (!move) { showToast(`Invalid move: ${san}`, { type: 'error' }); return; }
 
   const posKey = fenPositionKey(fen);
   const uci = move.from + move.to + (move.promotion || '');
@@ -23984,13 +24070,13 @@ function addCustomDeviation(posKey, san, uci) {
 
   // Check for duplicates
   if (gistData.repertoire.customDeviations.some(d => d.positionKey === posKey)) {
-    alert('This position is already added.');
+    showToast('This position is already added.', { type: 'error' });
     return;
   }
 
   // Also check if it already exists as an auto-detected deviation
   if (repertoireDeviations.some(d => d.positionKey === posKey)) {
-    alert('This position already exists as a detected deviation.');
+    showToast('This position already exists as a detected deviation.', { type: 'error' });
     return;
   }
 
