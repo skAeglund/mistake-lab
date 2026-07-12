@@ -1829,7 +1829,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">UX: sync errors visible in mobile training mode. The header (and its sync dot) is hidden while training, so a Gist failure mid-session surfaced nowhere. setSyncStatus now mirrors state==='error' onto the toolbar's settings gear (#btnMobileSettings, new id) via a .sync-error class — red tint, red border, corner dot — pointing at the button that opens the modal where the error can be acted on. Cleared automatically when any non-error state is set.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Mobile layout fixes: tab taps go full-screen (mobile-browsing) instead of closing the drawer over the board; initBoard flips browsing→training before construction so boards entered from the list (historical review, checklist variations) aren't built 0-width; window resize while the board container is hidden is deferred and applied on the next browsing→training flip (enterMobileTrainingLayout helper, replaces 7 inline class flips); repertoire start view re-renders the panel once the background trie load resolves, so the Deviations (Review/Drill) and Gaps sections appear without exiting and re-entering the tab.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -4430,8 +4430,14 @@ async function openHistoricalReview(snapId) {
   practiceContItem = histItem;
 
   // ── Board ──
+  // Mobile: board-first layout while reviewing; close the drawer the tap came
+  // from (matches selectGame / loadPosition item-tap behavior). Must run
+  // BEFORE board setup: initBoard needs a laid-out container, and the helper's
+  // deferred-resize branch redraws squares (would wipe highlights applied below).
+  enterMobileTrainingLayout();
+  closeDrawer();
   const endFen = moves[moves.length - 1].fen;
-  if (!boardObj) { document.getElementById('board').offsetHeight; initBoard(); }
+  if (!boardObj) initBoard();
   // Hide the "Select a game to begin" placeholder — every other position
   // entry point (loadPosition, filter practice, repertoire drills) does this;
   // entering a review straight from the fresh empty state left it stuck on
@@ -4452,14 +4458,6 @@ async function openHistoricalReview(snapId) {
   contLineBrowsing = false;
   srsRecorded = true; // defensive: nothing in a historical review may grade
   document.getElementById('contLineContainer').innerHTML = '';
-
-  // Mobile: board-first layout while reviewing; close the drawer the tap
-  // came from (matches selectGame / loadPosition item-tap behavior).
-  if (document.body.classList.contains('mobile-browsing')) {
-    document.body.classList.remove('mobile-browsing');
-    document.body.classList.add('mobile-training');
-  }
-  closeDrawer();
 
   await startContLineReview();
 }
@@ -12680,10 +12678,7 @@ function enterOpeningFilter() {
 
   // Switch to training mode on mobile BEFORE board init so panel-center is visible
   closeDrawer();
-  if (document.body.classList.contains('mobile-browsing')) {
-    document.body.classList.remove('mobile-browsing');
-    document.body.classList.add('mobile-training');
-  }
+  enterMobileTrainingLayout();
 
   // Initialize board if needed (must happen after mobile layout switch)
   if (!boardObj) { document.getElementById('board').offsetHeight; initBoard(); }
@@ -13626,6 +13621,11 @@ function showMainApp() {
   loadRepertoireTrie().then(() => {
     detectRepertoireDeviations();
     updateRepertoireBadge();
+    // Start view 'repertoire' renders the panel (via enterStartView) before
+    // this background load resolves — the Deviations (Review/Drill) and Gaps
+    // sections were missing until the user left and re-entered the tab.
+    // Re-render now that deviations/gaps exist.
+    if (repertoireMode) renderRepertoirePanel();
     // Re-extract so repertoire moves are filtered out of the mistake list.
     // Guarded on currentMistakeIdx < 0 (same pattern as the cache-first sync path)
     // so we don't re-shuffle the queue while the user is mid-drill.
@@ -13671,7 +13671,9 @@ function enterStartView() {
     return;
   }
   if (startView === 'review') {
-    activatePanelTab('review');
+    // keepMobileLayout: the auto-loaded first due item should land the user
+    // directly in the drill on mobile, not on the full-screen review list.
+    activatePanelTab('review', true);
     // toggleReviewMode auto-loads the first due item; if nothing is due,
     // fall back to a neutral board.
     if (currentMistakeIdx < 0) showNeutralStartBoard();
@@ -13878,11 +13880,15 @@ function renderGameList() {
 }
 
 // ─── Review mode ───
-function activatePanelTab(tab) {
-  // 2.3: close the mobile drawer if open. Tab buttons live inside panel-left,
-  // which IS the drawer on mobile — without this, user taps Repertoire and
-  // the panel content swaps under the still-open drawer (functionally fine
-  // but confusing UX since they came to see the tab content).
+function activatePanelTab(tab, keepMobileLayout = false) {
+  // 2.3 (revised): tab buttons live inside panel-left, which IS the drawer on
+  // mobile. Previously this just closed the drawer — hiding the very panel the
+  // user tapped a tab to see, forcing them to re-open it. Now a tab tap on
+  // mobile takes the panel full-screen (mobile-browsing, same layout as before
+  // the board is first initialized) — applied at the end of this function so
+  // it wins over any loadPosition-triggered browsing→training flip (e.g. the
+  // review tab's auto-load of the first due item). keepMobileLayout opts out
+  // (start-view 'review' should land directly in the drill, as before).
   closeDrawer();
   if (analysisMode) exitAnalysisMode();
   // Detect an actual tab transition so we can wipe any stale feedback/overlays
@@ -13915,6 +13921,13 @@ function activatePanelTab(tab) {
     if (openingFilterMode) exitOpeningFilter(false);
     if (repertoireMode) toggleRepertoireMode();
     if (!reviewMode) toggleReviewMode();
+  }
+  if (isMobileView() && !keepMobileLayout) {
+    // drawer-open removed again here (not just via closeDrawer at the top):
+    // exitOpeningFilter(false) above can re-add it, and its overflow:hidden
+    // would scroll-lock the body behind the full-screen list.
+    document.body.classList.remove('mobile-training', 'drawer-open');
+    document.body.classList.add('mobile-browsing');
   }
   updatePanelTabs();
 }
@@ -14090,8 +14103,36 @@ function renderReviewList() {
 }
 
 // ─── Board init ───
+// ─── Mobile layout: browsing → training transition ───
+// Single entry point for the mobile-browsing → mobile-training flip (board-first
+// layout). Centralized because board sizing depends on it:
+//  - In mobile-browsing, panel-center is display:none — chessboard.js reads a
+//    0-width container and builds an invisible board. initBoard calls this
+//    BEFORE construction (fixes the historical-review and checklist-variation
+//    entry points, which previously flipped classes only after board init).
+//  - If a window resize fired while the board was hidden (rotation during
+//    browsing), the resize handler defers via _boardResizePending; this applies
+//    the deferred resize once the container is measurable again.
+function enterMobileTrainingLayout() {
+  if (document.body.classList.contains('mobile-browsing')) {
+    document.body.classList.remove('mobile-browsing');
+    document.body.classList.add('mobile-training');
+  }
+  if (boardObj && window._boardResizePending) {
+    window._boardResizePending = false;
+    document.getElementById('board').offsetHeight; // reflow — container just became visible
+    boardObj.resize();
+    renderArrows();
+    if (notePanelOpen) reparentNotePanelForViewport();
+  }
+}
+
 function initBoard() {
   if (boardObj) return;
+  // Panel-center must be laid out before Chessboard construction — a hidden
+  // (display:none) container yields a 0-width, invisible board.
+  enterMobileTrainingLayout();
+  document.getElementById('board').offsetHeight; // force reflow so width is readable
   boardObj = Chessboard('board', {
     draggable: true,
     position: 'start',
@@ -14116,6 +14157,11 @@ function initBoard() {
     requestAnimationFrame(() => {
       _resizeRafScheduled = false;
       if (!boardObj) return; // re-check: logout could have fired between schedule and frame
+      // Container hidden (mobile-browsing keeps panel-center display:none):
+      // chessboard.js would measure width 0 and collapse the board to nothing.
+      // Defer — enterMobileTrainingLayout applies the resize on the next
+      // browsing→training flip, when the container is measurable again.
+      if (!document.getElementById('board').offsetWidth) { window._boardResizePending = true; return; }
       boardObj.resize();
       renderArrows();
       // IMP-001 followup: re-evaluate note panel placement on orientation change
@@ -14640,10 +14686,7 @@ function selectGame(gameId) {
     updateOpeningFilterUI();
   }
   // Ensure we leave browsing mode (safety net for no-mistakes early return)
-  if (document.body.classList.contains('mobile-browsing')) {
-    document.body.classList.remove('mobile-browsing');
-    document.body.classList.add('mobile-training');
-  }
+  enterMobileTrainingLayout();
   closeDrawer();
   activeGameId = gameId;
   const gameMistakes = filteredMistakes.filter(m => m.gameId === gameId);
@@ -14766,15 +14809,9 @@ function loadPosition(globalIdx, skipAnimation = false) {
   sfLog('loadPosition', `idx=${globalIdx} fen=${m.fenBefore.split(' ').slice(0,2).join(' ')}… gameId=${m.gameId} ply=${m.movePly} prevSession=${prevSession} prevFen=${prevFen?.split(' ').slice(0,2).join(' ')}…`);
 
   // Switch from browsing to training mode on mobile (covers review items, direct loadPosition calls)
-  const wasBrowsing = document.body.classList.contains('mobile-browsing');
-  if (wasBrowsing) {
-    document.body.classList.remove('mobile-browsing');
-    document.body.classList.add('mobile-training');
-  }
+  enterMobileTrainingLayout();
 
   // Initialize board on first load (deferred from showMainApp so container is visible)
-  // Force reflow after class changes so chessboard.js reads correct container width
-  if (!boardObj) document.getElementById('board').offsetHeight;
   initBoard();
 
   document.getElementById('emptyMsg').classList.add('hidden');
@@ -18234,9 +18271,12 @@ function resumeContSession(session) {
   currentMistakeIdx = filteredMistakes.length - 1;
   if (session.itemType === 'practice') practiceContItem = resumeItem;
 
-  // Set up board
+  // Set up board. Layout flip first: initBoard needs a laid-out container, and
+  // the helper's deferred-resize branch redraws squares (would wipe the
+  // highlights applied just below).
+  enterMobileTrainingLayout();
   const orientation = session.orientation || 'white';
-  if (!boardObj) { document.getElementById('board').offsetHeight; initBoard(); }
+  if (!boardObj) initBoard();
   boardObj.orientation(orientation);
   boardObj.position(resumeFen, false);
   gameEngine = new Chess(resumeFen);
@@ -18270,12 +18310,6 @@ function resumeContSession(session) {
   // default to true to preserve the old behavior for those (avoids
   // re-grading mistakes/tactics that *probably* already recorded).
   srsRecorded = session.srsRecordedAtSave !== undefined ? !!session.srsRecordedAtSave : true;
-
-  // Switch to training layout on mobile
-  if (document.body.classList.contains('mobile-browsing')) {
-    document.body.classList.remove('mobile-browsing');
-    document.body.classList.add('mobile-training');
-  }
 
   // Determine whose turn it is
   // BUG-C: use session.playerColor as the source of truth, NOT boardObj.orientation.
@@ -19095,7 +19129,10 @@ function launchFilterPractice() {
   filteredMistakes.push(practiceContItem);
   const practiceIdx = filteredMistakes.length - 1;
 
-  // Set up gameEngine at the practice position
+  // Set up gameEngine at the practice position. Layout flip first (defensive
+  // no-op here — filter mode is already board-first): the helper's deferred-
+  // resize branch redraws squares and would wipe the highlights applied below.
+  enterMobileTrainingLayout();
   gameEngine = new Chess(fen);
   boardObj.position(fen, false);
   boardObj.orientation(orientation);
@@ -19122,10 +19159,6 @@ function launchFilterPractice() {
   // Bxe6"); paired with cleanupPracticeCont's hide on tab-switch exit, the
   // button is shown only during the active practice session.
   document.getElementById('btnNote').classList.remove('hidden');
-  if (document.body.classList.contains('mobile-browsing')) {
-    document.body.classList.remove('mobile-browsing');
-    document.body.classList.add('mobile-training');
-  }
 
   // Enter silent continuation
   contLine = { baseFen: fen, moves: [], currentIdx: -1 };
@@ -25128,7 +25161,12 @@ function startTodoVariation(variation, presetKey) {
   _lastTodoDrill = { variation, preset: presetKey };
   applyTodoPreset(presetKey);
 
-  // Reset board to the start; the lead-up plays out from there.
+  // Reset board to the start; the lead-up plays out from there. Layout flip
+  // first: initBoard needs a laid-out container (fixes the invisible board
+  // when starting a checklist variation from the full-screen list), and the
+  // helper's deferred-resize branch redraws squares (would wipe the
+  // highlights applied below).
+  enterMobileTrainingLayout();
   gameEngine = new Chess();
   if (!boardObj) initBoard();
   boardObj.orientation(color);
@@ -25154,10 +25192,6 @@ function startTodoVariation(variation, presetKey) {
   document.getElementById('feedbackContainer').innerHTML = '';
   document.getElementById('contLineContainer').innerHTML = '';
   document.getElementById('posInfoCard').style.display = '';
-  if (document.body.classList.contains('mobile-browsing')) {
-    document.body.classList.remove('mobile-browsing');
-    document.body.classList.add('mobile-training');
-  }
 
   // Auto-play any opening opponent moves (e.g. white's 1st move when drilling a
   // black repertoire) until it's the user's turn, then prompt.

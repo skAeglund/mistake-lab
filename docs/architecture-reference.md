@@ -1052,6 +1052,23 @@ Board-first layout, auto-hiding header, drawer + backdrop + scroll lock + Escape
 Mobile toolbar prev/next; desktop hidden on mobile. mobile-browsing /
   mobile-training body classes. initBoard deferred to first loadPosition.
   touch-action:none on #board. lastTouchTime prevents double-fire.
+enterMobileTrainingLayout() is the ONLY browsing→training flip (never toggle the
+  classes inline). It also: (a) is called by initBoard BEFORE Chessboard
+  construction — mobile-browsing keeps panel-center display:none, so a board
+  built there measures 0-width and is invisible; (b) applies a deferred
+  boardObj.resize() if a window resize fired while the container was hidden
+  (_boardResizePending, set by the resize handler when #board.offsetWidth is 0).
+  Call it BEFORE board position/orientation/highlight calls — the deferred
+  resize redraws squares and wipes custom CSS classes, like orientation() does.
+activatePanelTab(tab, keepMobileLayout=false): on mobile, a tab tap ends in
+  full-screen mobile-browsing (list takes over the screen, same as pre-board
+  startup) — applied at the END of the function so it wins over any
+  loadPosition-triggered flip (review tab auto-load). keepMobileLayout=true
+  (start-view 'review') opts out so startup lands directly in the drill.
+  The ☰ drawer peek is unchanged — only tab taps go full-screen.
+Start view 'repertoire': loadRepertoireTrie().then() re-renders the repertoire
+  panel (if repertoireMode) once deviations/gaps are detected — the panel is
+  first drawn by enterStartView before that background load resolves.
 Feedback below board (not popup). #contLineContainer order:-1. Full-width ‹ ›
   tap zones at bottom.
 
