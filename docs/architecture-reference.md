@@ -1003,7 +1003,11 @@ Gear in header. Training section starts with "Start view" (dropdown, see START V
   Search Depth Offset slider (mobile only, 0–6, default 1, log2 hash 5–10)
   Hash Size slider — default 512MB desktop / 128MB mobile. Slider max: mobile 9
     (512MB ceiling) / desktop 10 (1024MB ceiling). Applies next page load.
-  Disconnect / Cancel / Save & Sync
+  Save & Sync + Disconnect live inside the Cloud Sync section (they're Gist
+    ops; saveSettingsGist requires a token). Disconnect is two-tap-confirm via
+    confirmDisconnectGist (arms red for 3s, self-disarms). Footer: Change user
+    (left) / Close. Training settings persist instantly onchange — the modal
+    is NOT transactional; Close never reverts anything.
 
 postProgressOnReturn = true by default.
 

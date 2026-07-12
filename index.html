@@ -1817,7 +1817,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">UX: undo-toast for repertoire study removal. The tiny ✕ in the studies config removed a study with no confirm; now shows a 6s Undo toast. Restore re-reads the config at undo time (guards against manual re-add mid-toast), re-inserts at the original index clamped to the current length, and re-runs renderRepertoireConfig + refreshRepertoire — the same pipeline the removal ran.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">UX: settings modal — scope Save & Sync + Disconnect to the Cloud Sync section, two-tap Disconnect confirm, footer becomes Change user / Close. Training settings persist instantly onchange, so the old Cancel / Save & Sync footer implied a transactional modal it never was (and Save & Sync errored 'Token is required' for non-Gist users who only flipped a toggle). confirmDisconnectGist arms the button red for 3s; second tap executes, self-disarms otherwise.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2103,6 +2103,13 @@
     <label>Gist ID</label>
     <input type="text" id="settingsGistId" placeholder="Auto-created if empty">
     <div class="hint">The ID from your Gist URL. Leave empty to create a new one.</div>
+    <!-- UX audit #3: Save & Sync / Disconnect are Gist operations, so they live
+         in this section. Training settings below apply instantly on change; the
+         modal footer is just Close. -->
+    <div style="display:flex;gap:8px;margin-top:12px;">
+      <button class="btn btn-primary btn-sm" onclick="saveSettingsGist()">Save &amp; Sync</button>
+      <button class="btn btn-ghost btn-sm" id="btnDisconnectGist" onclick="confirmDisconnectGist(this)">Disconnect</button>
+    </div>
     <div id="settingsMsg" style="font-size:12px;margin-top:12px;min-height:18px;"></div>
     <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
       <label style="font-size:13px;font-weight:600;color:var(--text-primary);margin-top:0;margin-bottom:2px;">Training</label>
@@ -2178,9 +2185,7 @@
     <div class="modal-actions">
       <button class="btn btn-ghost btn-sm" onclick="closeSettings(); logout();"
               style="border-color:var(--red);color:var(--red);margin-right:auto;">Change user</button>
-      <button class="btn btn-ghost btn-sm" onclick="disconnectGist()">Disconnect</button>
-      <button class="btn btn-ghost btn-sm" onclick="closeSettings()">Cancel</button>
-      <button class="btn btn-primary btn-sm" onclick="saveSettingsGist()">Save & Sync</button>
+      <button class="btn btn-ghost btn-sm" onclick="closeSettings()">Close</button>
     </div>
   </div>
 </div>
@@ -5078,6 +5083,32 @@ async function saveSettingsGist() {
   }
   updateSessionProgress();
   renderQueue();
+}
+
+// UX audit #12: two-tap confirm for Disconnect — first tap arms the button
+// (red, 'Confirm disconnect?') for 3s, second tap executes. Cheaper than a
+// nested confirm dialog inside the settings modal, and self-disarms if the
+// modal is closed while armed.
+function confirmDisconnectGist(btn) {
+  if (btn.dataset.armed) {
+    delete btn.dataset.armed;
+    clearTimeout(btn._disarmTimer);
+    btn.textContent = 'Disconnect';
+    btn.style.borderColor = '';
+    btn.style.color = '';
+    disconnectGist();
+    return;
+  }
+  btn.dataset.armed = '1';
+  btn.textContent = 'Confirm disconnect?';
+  btn.style.borderColor = 'var(--red)';
+  btn.style.color = 'var(--red)';
+  btn._disarmTimer = setTimeout(() => {
+    delete btn.dataset.armed;
+    btn.textContent = 'Disconnect';
+    btn.style.borderColor = '';
+    btn.style.color = '';
+  }, 3000);
 }
 
 async function disconnectGist() {
