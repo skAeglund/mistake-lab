@@ -237,6 +237,8 @@ SRS grades (srsRecorded guards retry re-grading):
   Repertoire (time-based, currentAttempts ≤ 1 && !hintUsed):
     < 3s & correct → Easy (4); < 15s & correct → Good (3);
     ≥ 15s & correct → Hard (2); any wrong or hint → Again (1)
+  Skip → Again (1) unless already graded or synthetic (_practice/_resumed);
+    surfaced via toast (feedback container is cleared by the navigation).
 
 isExactBest: move.san === bestMoveSan OR userUci === bestMoveUci OR wpDrop < 0.5.
 

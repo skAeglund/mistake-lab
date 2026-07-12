@@ -1817,7 +1817,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">UX: undo-toast for note deletion. deleteNote snapshots the entry before writing the tombstone and offers a 6s Undo action; restore writes the snapshot back with a fresh `updated` timestamp so mergeGistData last-write-wins keeps the restore over the older tombstone on other devices. Undo is keyed by the captured positionKey, so it works even after navigating away.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">UX: surface the SRS grade on Skip. Skip silently recorded Again with no visible indication; now shows a toast with the grade and next-review date (toast rather than showFeedback because navigation immediately clears the feedback container). Skip button tooltip updated to state the grading behavior and the S shortcut.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1945,7 +1945,7 @@
         <span class="position-counter" id="posCounter">—</span>
         <button class="btn btn-ghost btn-sm" id="btnNextPuzzle" onclick="nextPosition()">Next →</button>
       </span>
-      <button class="btn btn-ghost btn-sm" onclick="skipPosition()" title="Skip this position">Skip</button>
+      <button class="btn btn-ghost btn-sm" onclick="skipPosition()" title="Skip this position — grades it Again so it returns soon (S)">Skip</button>
       <button class="btn btn-ghost btn-sm hidden" id="btnHint" onclick="showHint()" title="Show a hint for this position (H)">💡 Hint</button>
       <button class="btn btn-ghost btn-sm hidden" id="btnNote" onclick="toggleNotePanel()" title="Add or view a note for this position (N)">📝 Note</button>
       <button class="btn btn-ghost btn-sm hidden" id="btnRetry" onclick="retryPosition()" style="border-color:var(--accent);color:var(--accent)">↺ Retry</button>
@@ -21734,6 +21734,12 @@ function skipPosition() {
   if (!srsRecorded && !isSynthetic) {
     recordReview(posId(m), FSRS_GRADE.again);
     srsRecorded = true;
+    // UX audit #4: skip silently graded the card Again with no visible
+    // indication — surface it the way other grade events show srsTag.
+    // Toast (not showFeedback) because navigation below immediately clears
+    // the feedback container via clearBoard/loadPosition.
+    const card = getCardForPosition(posId(m));
+    showToast(`Skipped — graded Again · next review ${card && card.due ? card.due : 'today'}`, { duration: 3500 });
   }
   updateSessionProgress();
   if (reviewMode) {
