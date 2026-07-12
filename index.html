@@ -1817,7 +1817,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">UX: surface the SRS grade on Skip. Skip silently recorded Again with no visible indication; now shows a toast with the grade and next-review date (toast rather than showFeedback because navigation immediately clears the feedback container). Skip button tooltip updated to state the grading behavior and the S shortcut.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">UX: undo-toast for repertoire study removal. The tiny ✕ in the studies config removed a study with no confirm; now shows a 6s Undo toast. Restore re-reads the config at undo time (guards against manual re-add mid-toast), re-inserts at the original index clamped to the current length, and re-runs renderRepertoireConfig + refreshRepertoire — the same pipeline the removal ran.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -23662,6 +23662,23 @@ function removeRepertoireStudy(index) {
   const statusEl = document.getElementById('repertoireStatus');
   if (statusEl) statusEl.textContent = `Removed "${removed.name || removed.id}"`;
   refreshRepertoire();
+  // UX audit #12: the ✕ is a small tap target with no confirm — offer undo
+  // instead of blocking. Restore re-inserts at the original index (config is
+  // re-read at undo time in case other studies were added/removed meanwhile;
+  // clamp the index) and re-runs the same refresh pipeline as removal.
+  showToast(`Removed study "${removed.name || removed.id}"`, {
+    duration: 6000,
+    actionLabel: 'Undo',
+    onAction: () => {
+      const current = getRepertoireConfig();
+      if (current.some(s => s.id === removed.id)) return; // re-added manually meanwhile
+      current.splice(Math.min(index, current.length), 0, removed);
+      setRepertoireConfig(current);
+      renderRepertoireConfig();
+      if (statusEl) statusEl.textContent = `Restored "${removed.name || removed.id}"`;
+      refreshRepertoire();
+    },
+  });
 }
 
 async function refreshRepertoire() {
