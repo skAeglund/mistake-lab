@@ -714,6 +714,21 @@ isRepertoireMove(fenBefore, san, uci): applies 'book' classification + filters o
 Review queue: isDue() + startRepertoireReview (due badge via updateRepertoireBadge,
   updates continuously, not gated on drill mode).
 
+Deviations filter (`repDevFilter` = {color:Set, speed:Set}, session-local, not
+  persisted): color (White/Black) + time-control chips in the Deviations header
+  (renderRepertoirePanel), reusing the global .filter-chip styling and the
+  toggleFilter last-active semantics (2-option swaps, multi-option resets-all)
+  via toggleRepDevFilter, which re-renders the panel. `deviationPassesRepFilter(d)`
+  is the shared predicate: color checks d.playerColor; speed is "any of the
+  deviation's games was played at a selected speed" (per-game speed captured as
+  normalizeSpeed(game.speed) into each item.games[] entry during
+  detectRepertoireDeviations). Manual (game-less) deviations are never hidden by
+  the speed filter. The filter scopes the list, the header count, the Review Due
+  badge count, and both the startRepertoireReview and startRepertoireDrill
+  queues. Only speeds actually present among deviations get a chip; both color
+  chips always show. The tab badge (updateRepertoireBadge) stays GLOBAL —
+  independent of this in-panel filter.
+
 Repertoire continuation (repContActive, ungraded): repContMode 'random'|'all',
   repContPendingBranches, repContDepth, repContLine, repContBrowsing,
   repContFailedFens (Set), repContRetrying, repContRetryQueue.

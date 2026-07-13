@@ -1829,7 +1829,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Game Review polish: legacy checklist review cards in the Games list now show their study/opening name instead of the bare "Checklist" label — reviewHistTitle() recovers it at render time by matching the snapshot leaf position to a current checklist variation; corrected-deviation key moves in a Game Review are now directly playable — the card auto-arms the recall retry (board is already pre-move, answer hidden) so you just play your repertoire move on the board instead of pressing Retry first, with disarmReviewRecall() tearing the arming down on Prev/Next or Show repertoire move.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire Deviations filter: color (White/Black) and time-control chips in the Deviations header (repDevFilter, session-local) scope the deviation list, its count, the Review Due badge, and both the Review Due and Drill queues. Speed matches "any of the deviation's games was played at that time control" (per-game speed captured during deviation detection); manual deviations are never hidden by speed. Only present time controls get a chip; both color chips always show; the Repertoire tab badge stays global.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2522,6 +2522,12 @@ let savedFilterOrientation = null; // board orientation to restore when re-enter
 // ─── Repertoire state ───
 let repertoireTrie = null;       // Map<positionKey, {san, uci}> — one correct move per position
 let repertoireDeviations = [];   // [{gameId, movePly, fenBefore, playedMove:{san,uci}, repertoireMove:{san,uci}, positionKey, opening}]
+// Repertoire Deviations section filters (color + time control). Scope the
+// deviation list, its due-count badge, and both the Review Due and Drill
+// queues. Manual (game-less) deviations are never hidden by the speed filter.
+// Session-local (not persisted) — the drill is a focused workflow, not a saved
+// view. Speed uses the normalized five-bucket vocabulary (see normalizeSpeed).
+const repDevFilter = { color: new Set(['white','black']), speed: new Set(['bullet','blitz','rapid','classical','correspondence']) };
 let repertoireGaps = [];         // [{positionKey, opponentMove:{san,uci}, count, games:[], fen}]
 let repertoireMode = false;      // true when repertoire panel is active
 let repertoireDrillMode = false; // true when actively drilling repertoire deviations
@@ -23782,6 +23788,7 @@ function detectRepertoireDeviations() {
               positionKey: posKey,
               opening: game.opening?.name || '',
               playerColor,
+              speed: normalizeSpeed(game.speed || ''),
               createdAt: game.createdAt,
             });
             deviated = true;
@@ -23835,6 +23842,7 @@ function detectRepertoireDeviations() {
       gameId: d.gameId,
       movePly: d.movePly,
       playedMove: d.playedMove,
+      speed: d.speed,
       createdAt: d.createdAt,
     });
     // Use most common played move for display
@@ -24129,23 +24137,46 @@ function renderRepertoirePanel() {
 
   // Deviations list
   if (repertoireDeviations.length) {
-    const dueCountForBtn = repertoireDeviations.filter(d => isDue(posId(d))).length;
+    // Color / time-control filter (repDevFilter) scopes the list, the header
+    // counts, the Review Due badge, and both drill queues.
+    const visibleDevs = repertoireDeviations.filter(deviationPassesRepFilter);
+    const dueCountForBtn = visibleDevs.filter(d => isDue(posId(d))).length;
     const reviewDueBtnHtml = dueCountForBtn > 0
       ? `<button class="btn btn-primary btn-sm" onclick="startRepertoireReview()" style="font-size:11px;">⏰ Review Due (${dueCountForBtn})</button>`
       : '';
+    // Only offer speed chips for time controls actually present among the
+    // deviations (all-manual repertoires get color chips only).
+    const SPEED_ORDER = ['bullet', 'blitz', 'rapid', 'classical', 'correspondence'];
+    const SPEED_LABEL = { bullet: 'Bullet', blitz: 'Blitz', rapid: 'Rapid', classical: 'Classical', correspondence: 'Corr.' };
+    const presentSpeeds = new Set();
+    for (const d of repertoireDeviations) for (const g of (d.games || [])) if (g.speed) presentSpeeds.add(g.speed);
+    const colorChips = ['white', 'black'].map(v =>
+      `<button class="filter-chip${repDevFilter.color.has(v) ? ' active' : ''}" style="padding:2px 10px;font-size:10px;" onclick="toggleRepDevFilter('color','${v}')">${v === 'white' ? 'White' : 'Black'}</button>`
+    ).join('');
+    const speedChips = SPEED_ORDER.filter(v => presentSpeeds.has(v)).map(v =>
+      `<button class="filter-chip${repDevFilter.speed.has(v) ? ' active' : ''}" style="padding:2px 8px;font-size:10px;" onclick="toggleRepDevFilter('speed','${v}')" title="${SPEED_LABEL[v]}">${speedIcon(v)}${SPEED_LABEL[v]}</button>`
+    ).join('');
+    const filterRow = `<div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
+      ${colorChips}
+      ${speedChips ? `<span style="width:1px;height:14px;background:var(--border);margin:0 3px;"></span>${speedChips}` : ''}
+    </div>`;
     html += `<div style="padding:8px 12px;border-bottom:1px solid var(--border);">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:6px;flex-wrap:wrap;">
         <span style="font-size:12px;font-weight:600;color:var(--text-primary);">
-          Deviations (${(() => { const done = getCompletedSet(); const rem = repertoireDeviations.filter(d => !done.has(posId(d))).length; return rem < repertoireDeviations.length ? rem + '/' + repertoireDeviations.length : repertoireDeviations.length; })()})
+          Deviations (${(() => { const done = getCompletedSet(); const rem = visibleDevs.filter(d => !done.has(posId(d))).length; return rem < visibleDevs.length ? rem + '/' + visibleDevs.length : visibleDevs.length; })()})
         </span>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
           ${reviewDueBtnHtml}
           <button class="btn btn-primary btn-sm" onclick="startRepertoireDrill()" style="font-size:11px;">▶ Drill</button>
         </div>
-      </div>`;
+      </div>
+      ${filterRow}`;
+    if (!visibleDevs.length) {
+      html += `<div class="hint" style="font-size:11px;padding:2px 0;">No deviations match this filter.</div>`;
+    }
     // Group by opening
     const byOpening = new Map();
-    for (const d of repertoireDeviations) {
+    for (const d of visibleDevs) {
       const key = d.opening || 'Unknown opening';
       if (!byOpening.has(key)) byOpening.set(key, []);
       byOpening.get(key).push(d);
@@ -24618,6 +24649,42 @@ function lichessStudyBtn(m) {
 
 // ── Repertoire Drill Mode ──
 
+// Repertoire Deviations color / time-control filter (repDevFilter). Scopes the
+// deviation list, its due-count badge, and both drill queues. A deviation
+// aggregates one or more games (possibly of mixed speed), so the speed test is
+// "any of this deviation's games was played at a selected speed". Manual
+// (game-less) deviations carry no speed and are never hidden by it.
+function deviationPassesRepFilter(d) {
+  if (repDevFilter.color.size < 2 && !repDevFilter.color.has(d.playerColor)) return false;
+  if (repDevFilter.speed.size < 5) {
+    if (!d.games || !d.games.length) return true; // manual — no speed to test
+    if (!d.games.some(g => repDevFilter.speed.has(g.speed))) return false;
+  }
+  return true;
+}
+
+// Toggle a repDevFilter chip. Mirrors the global toggleFilter semantics
+// (2-option filters swap to the other on last-active click; multi-option ones
+// re-activate all), then re-renders the panel — which repaints chip active
+// states and the filtered list/badge from the Sets.
+function toggleRepDevFilter(dim, value) {
+  const set = repDevFilter[dim];
+  const all = dim === 'color'
+    ? ['white', 'black']
+    : ['bullet', 'blitz', 'rapid', 'classical', 'correspondence'];
+  if (set.has(value)) {
+    if (set.size <= 1) {
+      if (all.length === 2) { set.clear(); set.add(all.find(v => v !== value)); }
+      else { all.forEach(v => set.add(v)); }
+    } else {
+      set.delete(value);
+    }
+  } else {
+    set.add(value);
+  }
+  if (repertoireMode) renderRepertoirePanel();
+}
+
 function startRepertoireDrill() {
   if (!repertoireDeviations.length) return;
 
@@ -24628,7 +24695,8 @@ function startRepertoireDrill() {
   if (repertoireDrillMode) exitRepertoireDrill();
 
   // Build drill queue — deviations are already deduplicated with type:'repertoire'
-  repertoireDrillQueue = repertoireDeviations.map(d => ({ ...d }));
+  repertoireDrillQueue = repertoireDeviations.filter(deviationPassesRepFilter).map(d => ({ ...d }));
+  if (!repertoireDrillQueue.length) return;
 
   // Sort: due items first, then unseen, then by game count (more frequent = higher priority)
   const done = getCompletedSet();
@@ -24662,7 +24730,7 @@ function startRepertoireDrill() {
 function startRepertoireReview() {
   if (!repertoireDeviations.length) return;
 
-  const dueDeviations = repertoireDeviations.filter(d => isDue(posId(d)));
+  const dueDeviations = repertoireDeviations.filter(d => isDue(posId(d)) && deviationPassesRepFilter(d));
   if (!dueDeviations.length) return;
 
   // If a prior drill is still active, tear it down cleanly before starting a new one.
