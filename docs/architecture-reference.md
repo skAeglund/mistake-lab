@@ -837,6 +837,74 @@ UI: renderTodoChecklistSection(studies) / renderTodoStudyBlock(s). Mini-board
   / todoPreviewCells / todoLinePreview / todoHidePreview / formatTodoLineSanHoverable)
   — a persistent diff-updated grid, anchored on first show. startTodoFromList
   (studyId, vIdx, preset) launches a drill and stamps the touch timestamp.
+  The WEAK-SPOTS DASHBOARD (below) consumes these variations + the todo* helpers
+  read-only and routes back into startTodoFromList.
+
+─── WEAK-SPOTS DASHBOARD (Repertoire tab) ───
+
+READ-ONLY prioritized panel at the TOP of renderRepertoirePanel (above the config
+section), rendered by renderWeakSpotsPanel(). It derives weakness signals from
+data that already exists and routes each row to an EXISTING launcher. It is NOT a
+mode flag (all eight stay false), adds NO new gistData store, and builds NO new
+drill machinery. Fold state is SESSION-LOCAL: window._weakSpotsOpen (bool),
+mirroring window._repConfigOpen — collapsed by default. Only surfaces when there's
+data to analyze (a generated TODO list OR any deviation); otherwise renders ''.
+
+Three separate scoring systems bear on "weakness"; each category draws the RIGHT
+one. Thresholds live in one tunable const block WEAKSPOT_CFG. computeWeakSpots()
+returns {A,B,C,D,summary,pmiReady}, recomputed every render (cheap; no cache for v1).
+
+Categories (each a section; priority order A→C→B→D):
+  A. FAILING IN PRACTICE — TODO variations with a preset that has n ≥
+     PRACTICE_MIN_ATTEMPTS (2) and rate < PRACTICE_FAIL_RATE (0.5), from
+     todoPresetStats (win-rate WINDOWS, NOT FSRS — TODO variations have no cards).
+     Action → startTodoFromList at the weakest attempted preset. Rank: rate asc,
+     real-game freq desc.
+  B. OVERDUE IN YOUR BOOK — repertoireDeviations whose FSRS card posId(dev)=
+     `r_<positionKey>` is NON-new and card.due < today (localDateString). New cards
+     are excluded (not "overdue"; they surface via the existing Deviations Review
+     Due flow). Action → showRepertoireDeviation(positionKey). Rank: due asc,
+     gameCount desc. NOT filtered by repDevFilter — this panel surveys the whole book.
+  C. BOTCHING THE MIDDLEGAME — variations reached in ≥ MIDGAME_MIN_GAMES (3) real
+     games with a high downstream-mistake rate. downstream = allMistakes (type
+     'mistake', non-synthetic) whose gameId ∈ {games reaching leafKey, from PMI}
+     AND movePly ≥ leafPly − DOWNSTREAM_MARGIN (2); leafPly = v.lineUci.length
+     (array). Flag when downstream ≥ 1 AND rate ≥ MIDGAME_MIN_RATE (0.5/game).
+     allMistakes inverted to Map<gameId,mistakes[]> once per compute. Action →
+     startTodoFromList at the lowest not-yet-won preset (fallback 'hard'). Rank:
+     per-game rate desc.
+  D. NEVER PRACTICED BUT COMMON — variations with NO scoreboard entries at all,
+     surfaced only when real-game freq (PMI leaf game count) ≥ UNPRACTICED_MIN_FREQ
+     (2). Action → startTodoFromList at 'easy'. Rank: freq desc.
+  (E. LOSING THE OPENING EMPIRICALLY — deferred to a follow-up; independent.)
+
+GLOBAL SUMMARY: top SUMMARY_TOP_N (6) merging categories by a fixed legible order
+  A>C>B>D (fail > botch > overdue > unpracticed), deduped by leafKey so a variation
+  can't appear twice. Ordering is defined in one place (SUMMARY_ORDER) and commented.
+
+DATA HELPERS: weakSpotLeafRecord(leafKey) flattens PMI[leafKey].values()→.games to
+  {w,l,d,total,gameIds:Set} — one entry per game (a game reaches a position once and
+  plays one move; NO dedupe). weakSpotRecordBadgeText(rec) → "W-L-D".
+
+LAZY-INDEX WAIT: A/B need no PMI and compute immediately. weakSpotsIndexReady() =
+  positionMoveIndex && pmiGameCount === allGames.length && allGames.length > 0
+  (mirrors buildOpeningIndex). On EXPAND (not while collapsed — don't force an
+  expensive build for a folded panel), if not ready, ensureWeakSpotsIndex() calls
+  buildOpeningIndex() (self-guards; internally awaits fenDataPreloadPromise — never
+  raced) and polls pmiGameCount every POLL_MS (200) up to POLL_MAX (60 ≈ 12s),
+  re-rendering the panel when ready (only if still repertoireMode && _weakSpotsOpen).
+  Never nulls/rebuilds the indices itself — openingBuildSession and the readiness
+  checks stay authoritative. C/D sections show an "analyzing your games…" placeholder
+  until ready.
+
+RECOMPUTE: on panel open and (implicitly) after finishTodoDrill / recordReview —
+  the no-cache recompute runs on every renderRepertoirePanel, which fires whenever
+  the user re-enters the Repertoire tab, so no explicit post-drill hook is needed.
+
+MUST-NOT-BREAK: TODO variations have NO FSRS cards — never getCardForPosition on a
+  leafKey. Only deviations (r_) and plan cards (p_) are FSRS-scheduled. No new
+  persistence — every signal derives from practiceScoreboard + todoLists +
+  positionMoveIndex + allMistakes + repertoireDeviations + FSRS cards.
 
 ─── FILTER PRACTICE (type: 'practice') ───
 
@@ -1063,6 +1131,11 @@ H key respects .hidden/.disabled. In continuation, hints use currentSolveFen.
 
 gameFenIndex: Map<gameId, Set<positionKey>> — transposition-aware filter.
 positionMoveIndex: Map<posKey, Map<moveSAN, MoveStats>>.
+  MoveStats = {san, uci, count, whiteWins, blackWins, draws, games:[{gameId,
+  userColor, opponentName, opponentRating, userRating, result:'win'|'loss'|'draw',
+  source}]}. The WEAK-SPOTS DASHBOARD reads PMI[leafKey] read-only for real-game
+  frequency/score (weakSpotLeafRecord) — see WEAK-SPOTS DASHBOARD; it may call
+  buildOpeningIndex() and poll pmiGameCount but never nulls/rebuilds the indices.
 Both built LAZILY (ensurePMI/buildFenIndex → buildOpeningIndex) — 30 games per
   frame, progressive render as batches complete.
 fenIndexGameCount set after allGames is fully finalized to prevent spurious rebuilds.
