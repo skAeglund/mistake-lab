@@ -627,6 +627,16 @@
     padding: 5px 10px; border-bottom: 1px solid var(--border);
   }
   .analysis-maia-row input[type=range] { flex: 1; max-width: 160px; }
+  .analysis-fen-row { padding: 6px 10px; border-bottom: 1px solid var(--border); }
+  .analysis-panel .fen-input {
+    width: 100%; padding: 6px 8px; font-size: 11px;
+    font-family: var(--font-mono, monospace);
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text-primary);
+    outline: none;
+  }
+  .analysis-panel .fen-input:focus { border-color: var(--accent); }
+  #btnAnalysisNote.has-note { color: var(--accent); border-color: var(--accent); }
   /* 📊 Lichess Database annotations (blue, parallel to the violet Maia set) */
   .analysis-pv-row .db-prob {
     font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600;
@@ -1830,7 +1840,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire Weak-Spots Dashboard: read-only prioritized panel at the top of the Repertoire tab (collapsible, session-local fold via window._weakSpotsOpen). Derives weakness from three existing scoring systems and routes each row to an existing launcher — no new store, no drill machinery, no ninth mode flag. Categories: (A) FAILING IN PRACTICE — TODO variations with an attempted preset below 50% win-rate (todoPresetStats windows) → Drill weakest preset; (B) OVERDUE IN YOUR BOOK — deviations whose FSRS card (r_) is non-new and past due → Review; (C) BOTCHING THE MIDDLEGAME — variations reached in ≥3 real games with a high downstream-mistake rate (allMistakes at/after leaf ply-depth, MARGIN 2) → Drill lowest not-yet-won preset; (D) NEVER PRACTICED BUT COMMON — variations with no scoreboard entries weighted by real-game frequency (positionMoveIndex) → Drill Easy. Global summary merges by fixed legible priority A>C>B>D (deduped by leaf), thresholds in WEAKSPOT_CFG. Lazy-index wait: A/B need no PMI; on expand, C/D kick buildOpeningIndex() and poll pmiGameCount (200ms, 12s cap), re-rendering when ready — never races the IDB preload, never nulls the indices. Category E (empirically-losing in-book lines) deferred to a follow-up. Earlier — Plan-Recall Flashcards + explorer note authoring: (1) New type:'plan' items — thin enrollment records in gistData.planCards (tombstoned removal, merged by id/newer-updated) with FSRS riding positions[p_<positionKey>].srs; card content is read live from position notes at review. Enroll/remove via 🧠 buttons in the note panel (undo toast); recall UI reveals the note (text + arrows) and self-grades Again/Hard/Good/Easy; engine off and board input blocked during plan review; only the color filter applies; missing-note cards surface as a count on the Repertoire tab. (2) Notes are now authorable in opening-filter mode (pasted FEN or browsed position): getCurrentNoteFen filterChess branch, 📝 #btnFilterNote in the filter bar (has-note mirrored, N key), note state tracks every filter move/paste/undo/redo/reset, unsaved edits survive board moves and get an Escape-exit confirm — the primary flashcard path for Chessable lines with no Lichess study export.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Analysis Mode note / 🧠 flashcard authoring + paste-FEN + scratch entry: (1) 📝 #btnAnalysisNote in the analysis-panel header (N key now targets it, not the display:none #positionNav btnNote) opens the note panel on the live analysis position — getCurrentNoteFen's analysisMode branch already resolved analysisEngine.fen(), so note edit/save and 🧠 Make/Remove flashcard work unchanged; updateNoteButton mirrors .has-note onto it. This is the recommended way to confirm/find a plan with the engine/Maia/DB before enrolling it. (2) Paste-FEN (#analysisFenInput / setAnalysisFromFen): validates, no-ops on an exact re-paste, confirms an unsaved note edit, then re-roots the tree at the pasted position; syncAnalysisFenInput (called from renderAnalysisTree) keeps the field showing the current FEN so it doubles as copy-current-FEN. (3) 'Analyze a position' (#btnAnalyzeScratch in #emptyMsg / enterAnalysisBlank): enter Analysis Mode from the empty board with no loaded mistake — no ninth mode flag (rides analysisMode with analysisSavedState={blank:true}); exit restores the empty state.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1972,6 +1982,7 @@
         <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
       </svg>
       Select a game to begin
+      <button class="btn btn-ghost btn-sm" id="btnAnalyzeScratch" onclick="enterAnalysisBlank()" style="margin-top:14px;pointer-events:auto;" title="Open Analysis Mode on any position — paste a FEN, explore with the engine / Maia / database, and save notes or 🧠 flashcards">🔍 Analyze a position</button>
     </div>
   </div>
 
@@ -1999,6 +2010,7 @@
       <div class="analysis-header">
         <span>SF 18 · <span class="analysis-depth" id="analysisDepthTag"><span class="depth-num">0</span></span></span>
         <span style="display:flex;gap:4px;align-items:center;">
+          <button class="btn btn-ghost btn-sm" id="btnAnalysisNote" style="font-size:11px;padding:2px 6px;" onclick="toggleNotePanel()" title="Add or view a note for this position (N) — notes here can be enrolled as 🧠 plan flashcards">📝</button>
           <button class="btn btn-ghost btn-sm" id="btnAnalysisMaia" style="font-size:11px;padding:2px 6px;" onclick="toggleAnalysisMaia()" title="Show Maia move predictions (what a human would play)">🧠</button>
           <button class="btn btn-ghost btn-sm" id="btnAnalysisDb" style="font-size:11px;padding:2px 6px;" onclick="toggleAnalysisDb()" title="Show Lichess database move frequencies">📊</button>
           <button class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 6px;" onclick="analysisFlipBoard()" title="Flip board">⇅</button>
@@ -2016,6 +2028,12 @@
         <button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 6px;" onclick="toggleAnalysisDbSettings()" title="Database rating / time-control settings">⚙</button>
       </div>
       <div class="analysis-db-settings hidden" id="analysisDbSettings"></div>
+      <div class="analysis-fen-row">
+        <input type="text" class="fen-input" id="analysisFenInput"
+               placeholder="Paste a FEN to jump here… (or copy the current one)"
+               onchange="setAnalysisFromFen(this.value)"
+               onkeydown="if(event.key==='Enter'){setAnalysisFromFen(this.value);event.preventDefault()}">
+      </div>
       <div class="analysis-pvs" id="analysisPvsContainer">
         <div class="analysis-pv-row" style="color:var(--text-muted);font-size:12px;">Starting analysis…</div>
       </div>
@@ -8794,6 +8812,22 @@ function exitAnalysisMode() {
         setTimeout(() => tacticAutoPlayOpponent(), 400);
       }
     }
+  } else if (analysisSavedState?.blank) {
+    // Scratch analysis entered from the empty board (enterAnalysisBlank) —
+    // there is no drill to restore, so return to the neutral empty state.
+    // positionNav (with the "—" counter) is already re-shown at the top of
+    // this function; emptyMsg sits below it, matching the app's cold start.
+    currentMistakeIdx = -1;
+    if (boardObj) boardObj.position('start', false);
+    clearBoardOverlays();
+    clearLastMoveHighlight();
+    clearCheckHighlight();
+    const emptyMsgEl = document.getElementById('emptyMsg');
+    if (emptyMsgEl) emptyMsgEl.classList.remove('hidden');
+    const posInfoEl = document.getElementById('posInfoCard');
+    if (posInfoEl) posInfoEl.style.display = 'none';
+    const fbEl = document.getElementById('feedbackContainer');
+    if (fbEl) fbEl.innerHTML = '';
   } else if (analysisSavedState) {
     const m = filteredMistakes[analysisSavedState.mistakeIdx];
     if (m) {
@@ -9934,6 +9968,9 @@ function renderAnalysisTree() {
     delBtn.disabled = !canDelete;
     delBtn.style.opacity = canDelete ? '' : '0.4';
   }
+
+  // Keep the paste-FEN input reflecting the current position (copy-current-FEN).
+  syncAnalysisFenInput();
 }
 
 function analysisGoToNode(nodeId) {
@@ -9996,6 +10033,129 @@ function analysisDeleteCurrent() {
   // analysisGoToNode re-renders the tree, refreshes the note indicator and
   // restarts/restores analysis for the parent position.
   analysisGoToNode(parent.id);
+}
+
+// Keep the analysis-panel FEN input showing the current board position, so it
+// doubles as a copy-current-FEN field. Called from renderAnalysisTree — the
+// single hook every analysis position change funnels through (go-to-node,
+// on-drop, delete, enter, re-root). Skipped while the input is focused so we
+// don't clobber a FEN the user is mid-paste on.
+function syncAnalysisFenInput() {
+  const input = document.getElementById('analysisFenInput');
+  if (!input || document.activeElement === input) return;
+  input.value = analysisEngine ? analysisEngine.fen() : (analysisTreeCurrent ? analysisTreeCurrent.fen : '');
+}
+
+// Paste-a-FEN in analysis mode: validate, then re-root the analysis tree at
+// the new position (mirrors setFilterFromFen's validation + the tree bootstrap
+// in enterAnalysisMode). An in-progress note edit is confirmed before the jump
+// — the same guard the filter-mode Escape exit uses — since re-rooting closes
+// the panel via updateNoteButton and would otherwise silently discard it.
+function setAnalysisFromFen(fenStr) {
+  if (!analysisMode) return;
+  if (!fenStr || !fenStr.trim()) return;
+  fenStr = fenStr.trim();
+  const testChess = new Chess();
+  if (!testChess.load(fenStr)) {
+    showToast('Invalid FEN — could not parse that position', { duration: 3000 });
+    syncAnalysisFenInput(); // restore the input to the current position
+    return;
+  }
+  const fen = testChess.fen();
+  // No-op on a re-paste of the exact position already loaded — avoids wiping
+  // the analysis tree and restarting the search for nothing (onchange fires on
+  // blur even when the user didn't really change the position).
+  if (analysisEngine && analysisEngine.fen() === fen) { syncAnalysisFenInput(); return; }
+  if (!confirmDiscardNote()) { syncAnalysisFenInput(); return; }
+  // Fresh single-node tree rooted at the pasted position (same reset the
+  // enter path does before makeTreeNode).
+  analysisNodeId = 0;
+  analysisNodes = {};
+  analysisPvs = [];
+  analysisDepth = 0;
+  analysisComplete = false;
+  analysisTree = makeTreeNode(fen, null, null, null);
+  analysisTreeCurrent = analysisTree;
+  analysisEngine = new Chess(fen);
+  boardObj.position(fen, false);
+  clearBoardOverlays();
+  try { showCheckHighlight(new Chess(fen)); } catch (_) { clearCheckHighlight(); }
+  clearLastMoveHighlight();
+  renderAnalysisTree();     // also re-syncs the FEN input
+  updateNoteButton();       // refresh 📝 has-note for the new position
+  startAnalysisSearch(fen);
+}
+
+// "🔍 Analyze a position" from the empty board: enter Analysis Mode on the
+// standard start position (or a passed FEN) with NO loaded mistake, so a
+// position can be explored — and notes / 🧠 flashcards authored — from
+// scratch. Not a new mode: rides the existing analysisMode flag with a
+// { blank:true } marker on analysisSavedState (transient-state pattern, not a
+// ninth mode flag). Deliberately entry-guarded to the neutral state (the
+// #emptyMsg button is only visible there, and the guard below is belt-and-
+// braces) so none of enterAnalysisMode's drill/review/tactic teardown is
+// needed. exitAnalysisMode's blank branch restores the empty state.
+function enterAnalysisBlank(startFen) {
+  if (analysisMode || detectedTacticSolveMode) return;
+  // Only from a truly neutral state — otherwise the caller should use the
+  // 🔍 Analysis button (enterAnalysisMode), which snapshots the live drill.
+  if (currentMistakeIdx >= 0 || openingFilterMode || continuationMode ||
+      tacticMode || repertoireMode || advantageMode || repTodoActive) return;
+
+  let fen;
+  if (startFen && new Chess().load(startFen)) fen = new Chess(startFen).fen();
+  else fen = new Chess().fen();
+
+  analysisMode = true;
+  // Perspective: honour a black-only color filter (studying black openings),
+  // else white — mirrors enterOpeningFilter's fresh-entry default.
+  analysisOrientation = (filters.color.size === 1 && filters.color.has('black')) ? 'black' : 'white';
+  analysisNodeId = 0;
+  analysisNodes = {};
+  analysisPvs = [];
+  analysisDepth = 0;
+  analysisComplete = false;
+  analysisTree = makeTreeNode(fen, null, null, null);
+  analysisTreeCurrent = analysisTree;
+  analysisEngine = new Chess(fen);
+
+  // No mistake to snapshot / convert. The blank marker drives exit restore.
+  analysisSavedState = { blank: true };
+  seqSaveEligible = false;
+  seqSaveContext = null;
+  const btnSeqEl = document.getElementById('btnSaveSequence');
+  if (btnSeqEl) btnSeqEl.classList.add('hidden');
+  const seqDlgEl = document.getElementById('seqSaveDialog');
+  if (seqDlgEl) seqDlgEl.innerHTML = '';
+
+  // Board must exist before we position it (cold start may not have built it).
+  closeDrawer();
+  enterMobileTrainingLayout();
+  if (!boardObj) { document.getElementById('board').offsetHeight; initBoard(); }
+
+  // Hide review UI, show analysis panel (mirrors enterAnalysisMode's swap).
+  document.getElementById('feedbackArea').classList.add('hidden');
+  document.getElementById('positionNav').style.display = 'none';
+  document.getElementById('emptyMsg').classList.add('hidden');
+  const qp = document.getElementById('queuePanel');
+  if (qp) qp.style.display = 'none';
+  document.getElementById('analysisPanel').classList.remove('hidden');
+  syncAnalysisMaiaUi();
+  syncAnalysisDbUi();
+
+  // Defensive: neutral state shouldn't have active pre-analysis, but if a
+  // prior drill left any running, tear it down (mirrors enterAnalysisMode).
+  stopPreAnalysis();
+
+  boardObj.orientation(analysisOrientation);
+  boardObj.position(fen, false);
+  clearBoardOverlays();
+  try { showCheckHighlight(new Chess(fen)); } catch (_) { clearCheckHighlight(); }
+  clearLastMoveHighlight();
+
+  renderAnalysisTree();
+  updateNoteButton();
+  startAnalysisSearch(fen);
 }
 
 // ─── Maia 3 Engine ───
@@ -27773,6 +27933,11 @@ function updateNoteButton() {
   // the has-note state needs mirroring here.
   const fbtn = document.getElementById('btnFilterNote');
   if (fbtn) fbtn.classList.toggle('has-note', !!note);
+  // Analysis-mode twin (#btnAnalysisNote lives in the analysis panel header;
+  // #positionNav — btnNote's home — is display:none in analysis mode). Always
+  // present while the panel is shown, so only the has-note state needs syncing.
+  const abtn = document.getElementById('btnAnalysisNote');
+  if (abtn) abtn.classList.toggle('has-note', !!note);
 }
 
 function showNoteArrows(note) {
@@ -28933,11 +29098,12 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'f' || e.key === 'F') analysisFlipBoard();
     // Issue #15: allow the note-panel toggle inside analysis mode; the
     // rest of the document-level shortcut block below this return is
-    // unreachable here, so 'n' has to be handled up top.
-    if (e.key === 'n' || e.key === 'N') {
-      const nb = document.getElementById('btnNote');
-      if (nb && !nb.classList.contains('hidden')) toggleNotePanel();
-    }
+    // unreachable here, so 'n' has to be handled up top. Targets
+    // #btnAnalysisNote (the analysis-panel header entry), not the display:none
+    // #positionNav btnNote — the analysis note button is always present while
+    // the panel is up, so the toggle no longer depends on prior drill context
+    // having unhidden btnNote.
+    if (e.key === 'n' || e.key === 'N') toggleNotePanel();
     return;
   }
   // Opening filter mode — arrow keys undo/redo, block other shortcuts

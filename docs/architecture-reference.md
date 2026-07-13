@@ -949,6 +949,42 @@ Auto-exits on loadPosition/enterOpeningFilter. Position Notes + Copy Line as PGN
   available. Notes track whatever position is on the board regardless of how it
   was reached. Divergent retry positions are preserved as sidelines in the tree.
 
+Note / 🧠 flashcard authoring: 📝 #btnAnalysisNote in the analysis-panel header
+  is the discoverable entry (toggleNotePanel). getCurrentNoteFen's analysisMode
+  branch already returns analysisEngine.fen(), so the whole note+plan-card path
+  (openNotePanel → edit → save → "🧠 Make flashcard") works unchanged — this is
+  the recommended way to confirm/find a plan with the engine/Maia/DB before
+  enrolling it (parallel to the opening-filter path for Chessable lines).
+  updateNoteButton mirrors .has-note onto #btnAnalysisNote (like #btnFilterNote);
+  #positionNav's btnNote is display:none in this mode so the N key now targets
+  #btnAnalysisNote unconditionally (no longer depends on prior drill context
+  having unhidden btnNote). The N/arrow/F/Delete analysis keybinds sit AFTER the
+  INPUT/TEXTAREA keydown guard, so typing in the FEN field (below) never fires
+  them.
+
+Paste FEN (#analysisFenInput, setAnalysisFromFen): validates like setFilterFromFen,
+  no-ops on an exact re-paste of the current position, confirmDiscardNote()s an
+  in-progress note edit, then re-roots the tree at the pasted FEN (fresh
+  analysisNodes / single root / new analysisEngine, then startAnalysisSearch).
+  syncAnalysisFenInput() keeps the field showing analysisEngine.fen() (doubles
+  as copy-current-FEN); it's called from renderAnalysisTree — the one hook every
+  position change funnels through — and is skipped while the input is focused.
+
+Blank entry (enterAnalysisBlank, "🔍 Analyze a position" #btnAnalyzeScratch in
+  #emptyMsg): enters analysis on the start position (or a passed FEN) with NO
+  loaded mistake, so a position can be explored + noted + enrolled from scratch.
+  NOT a ninth mode flag — rides analysisMode with analysisSavedState={blank:true}
+  as the transient marker; seqSaveEligible=false (nothing to convert). Entry is
+  guarded to the neutral state (currentMistakeIdx<0 and every other mode flag
+  false), so none of enterAnalysisMode's review/tactic/engine-line teardown is
+  needed; it builds the board if cold (initBoard) and defensively stopPreAnalysis().
+  exitAnalysisMode's `analysisSavedState?.blank` branch (before the mistake-
+  restore branch) returns to the empty state (board→start, emptyMsg shown,
+  posInfoCard hidden, feedbackContainer cleared, currentMistakeIdx=-1). The
+  #emptyMsg button needs pointer-events:auto (the container is pointer-events:none).
+  Discoverability caveat: showNeutralStartBoard only shows #emptyMsg on desktop,
+  so on mobile the button surfaces only via the other empty-state paths.
+
 Tree root selection — see SEQUENCE CONVERSION for the three-case logic.
 🗑 Delete current move (analysisDeleteCurrent, also Delete key): see SEQUENCE CONVERSION.
 "💾/🔍 Sequence" save flow — see SEQUENCE CONVERSION in full.
@@ -1003,10 +1039,12 @@ Creation/removal — MANUAL ONLY, from the note panel (showNoteViewMode footer):
   "🧠 Make flashcard" (enrollPlanCard) enrolls the panel's anchor position;
   requires a saved note (openNotePanel with no note already drops into edit
   mode, so the button only exists when one does). The note panel also opens
-  in OPENING-FILTER MODE (see POSITION NOTES / OPENING EXPLORER) — paste a
-  FEN in the explorer, write a note, enroll. That is the PRIMARY manual-
-  enrollment entry point for Chessable lines, which can't be exported to
-  Lichess studies and therefore have no source:'study' comments.
+  in OPENING-FILTER MODE and IN-APP ANALYSIS MODE (see POSITION NOTES /
+  OPENING EXPLORER / IN-APP ANALYSIS MODE) — paste a FEN, write a note, enroll.
+  Those are the manual-enrollment entry points for Chessable lines, which can't
+  be exported to Lichess studies and therefore have no source:'study' comments;
+  analysis mode additionally lets you confirm/find the plan with the engine /
+  Maia / DB before enrolling.
   Deliberately NO bulk /
   per-study generation — study comments are frequently explanations or
   tactical justifications rather than plans; auto-enrolling would flood the
@@ -1063,7 +1101,10 @@ gistData.notes[fenPositionKey] = { text, arrows, circles, updated } (updated dri
   mergeGistData newer-wins per note).
 Note view mode (showNoteViewMode) also hosts the plan-recall flashcard
   enrollment footer ("🧠 Make flashcard" / "🗑 Remove flashcard") — the SOLE
-  creation path for type:'plan' items; see PLAN-RECALL CARDS.
+  creation path for type:'plan' items; see PLAN-RECALL CARDS. The panel is
+  reachable from drill review (btnNote), opening-filter mode (#btnFilterNote),
+  and analysis mode (#btnAnalysisNote / N) — all key off noteAnchorFen so
+  save/enroll target the right position regardless of surface.
 Notes are authorable in OPENING-FILTER MODE: getCurrentNoteFen has an
   `openingFilterMode && filterChess` branch (before the gameEngine fallback,
   which holds the stale drill position in that mode), the 📝 entry point is
