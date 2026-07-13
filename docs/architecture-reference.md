@@ -573,6 +573,12 @@ Snapshot titles (`contLine._reviewTitle`): buildReviewSnapshot prefers
   the variation's openingName, falling back to the study name (studyId stamped
   onto the drill variation in startTodoFromList; pre-existing _lastTodoDrill
   replays from before the stamp fall through to null → old behavior).
+  Legacy checklist snapshots captured before _reviewTitle existed stored an
+  empty openingName; `reviewHistTitle(s)` (used by buildReviewHistCard) rescues
+  them at render time by matching the snapshot's leaf position
+  (fenPositionKey(baseFen)) to a current todoLists variation → its openingName or
+  the list's study name, falling through to the source label only if no
+  checklist variation still matches (regenerated leaves).
 
 Games-tab UI — review history entries are merged into the chronological games
   list (see ITEM TYPES), not segregated. The "Correspondence" (✉️) speed chip
@@ -593,6 +599,17 @@ Repertoire deviations as Game Review key moves: in-line deviations (an off-book
   The answer (repTried) is hidden until solved (`revealed` param on
   `showReviewKeyMoveInfo`); the "you first tried X" context appears only after a
   successful retry.
+  Because the board already sits pre-move and the answer is hidden, an
+  unrevealed corrected-deviation key-move card AUTO-ARMS the retry (the hideAnswer
+  branch of showReviewKeyMoveInfo sets contLineReviewRetryIdx=moveIdx, forces
+  contLineBrowsing, primes currentSolveFen/pre-analysis/hints) so the user plays
+  their repertoire move directly — no Retry press. The card drops its Retry
+  button for that case (keeps Prev/Next + Show repertoire move). Navigating to
+  another key move (reviewNext/PrevKeyMove) or revealing (Show repertoire move)
+  calls `disarmReviewRecall()` to clear the arming, stop pre-analysis, and hide
+  the hint before re-rendering. In-line (uncorrected) deviations land post-move
+  and still use the explicit Retry button — the played move is on the board, so
+  Retry meaningfully steps back.
 
 ─── ADVANTAGE MODE (type: 'advantage') ───
 

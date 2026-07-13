@@ -1829,7 +1829,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Review-history integration: mistakes/tactics/sequences saved from a Game Review carry _reviewSnapId and the toolbar button becomes 📋 View Review (openHistoricalReview) instead of a broken View Game link — the button now hides for synthetic practice/resumed items with no backing game; checklist review snapshots are titled after the variation's opening or its study (contLine._reviewTitle, studyId stamped in startTodoFromList) instead of the bare Checklist label; review list gets a Show all section listing not-yet-due items sorted by next due date (buildReviewItemEl shared card builder + renderReviewUpcomingSection, session-local expand state); a review retry that ends on a noted position auto-opens the note panel (post-move fen preferred, pre-move fallback).</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Game Review polish: legacy checklist review cards in the Games list now show their study/opening name instead of the bare "Checklist" label — reviewHistTitle() recovers it at render time by matching the snapshot leaf position to a current checklist variation; corrected-deviation key moves in a Game Review are now directly playable — the card auto-arms the recall retry (board is already pre-move, answer hidden) so you just play your repertoire move on the board instead of pressing Retry first, with disarmReviewRecall() tearing the arming down on Prev/Next or Show repertoire move.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -4340,6 +4340,28 @@ function reviewPassesGameFilters(s) {
   return true;
 }
 
+// Resolve the display title for a review-history card. New snapshots carry a
+// real openingName (contLine._reviewTitle → variation opening or study name).
+// Legacy checklist snapshots captured before that existed stored an empty
+// openingName and fell back to the bare "Checklist" source label; recover a
+// real title for those at render time by matching the snapshot's leaf position
+// to a current checklist variation → its opening or its study name. If the
+// checklist was since regenerated with different leaves (no match), it falls
+// through to the source label — unchanged behavior.
+function reviewHistTitle(s) {
+  if (s.openingName) return s.openingName;
+  if (s.source === 'todo' && s.baseFen) {
+    try {
+      const key = fenPositionKey(s.baseFen);
+      for (const list of (gistData?.repertoire?.todoLists || [])) {
+        const v = (list.variations || []).find(x => x.leafKey === key);
+        if (v) return v.openingName || list.name || null;
+      }
+    } catch (_) {}
+  }
+  return null;
+}
+
 // Builds one review-history card for the merged Games list. Reuses the
 // game-card layout classes (top row / opening / meta) so rows align with real
 // game cards; the .review-hist-card container (purple left bar + tint) keeps
@@ -4355,7 +4377,7 @@ function buildReviewHistCard(s) {
   const date = new Date(s.ts).toLocaleDateString();
   item.innerHTML = `
     <div class="game-card-top">
-      <div class="game-opening">📋 ${escHtml(s.openingName || src.label)}</div>
+      <div class="game-opening">📋 ${escHtml(reviewHistTitle(s) || src.label)}</div>
       <span style="font-size:11px;color:${oc.color};font-weight:600;white-space:nowrap;">${src.icon} ${oc.label}${accHtml}</span>
     </div>
     <div class="game-meta">
@@ -20324,6 +20346,10 @@ function reviewNextKeyMove() {
   if (engineLineBox) engineLineBox.remove();
   // Finding #5: drop the eval worker result tied to the previous line view.
   stopEvalWorkerSearch();
+  // Tear down any auto-armed corrected-deviation recall from the previous key
+  // move before landing on the next one (showReviewKeyMoveInfo re-arms if the
+  // new move is itself an unrevealed corrected deviation).
+  disarmReviewRecall();
   contLineReviewKeyIdx++;
   if (contLineReviewKeyIdx >= contLineReviewKeyMoves.length) {
     contLineReviewKeyIdx = contLineReviewKeyMoves.length; // past end
@@ -20352,6 +20378,8 @@ function reviewPrevKeyMove() {
   if (engineLineBox) engineLineBox.remove();
   // Finding #5: drop the eval worker result tied to the previous line view.
   stopEvalWorkerSearch();
+  // See reviewNextKeyMove — clear any auto-armed recall before re-rendering.
+  disarmReviewRecall();
   contLineReviewKeyIdx--;
   if (contLineReviewKeyIdx < 0) {
     contLineReviewKeyIdx = 0;
@@ -20361,6 +20389,18 @@ function reviewPrevKeyMove() {
   const kmv = contLine ? contLine.moves[moveIdx] : null;
   goToContLineMove((kmv && kmv._repDeviation && kmv._repDeviation.corrected) ? moveIdx - 1 : moveIdx);
   showReviewKeyMoveInfo(moveIdx);
+}
+
+// Tears down an auto-armed corrected-deviation recall (see the hideAnswer arm
+// block in showReviewKeyMoveInfo): clears the retry arming, stops pre-analysis,
+// and hides the hint button. Idempotent — safe to call when nothing is armed.
+// Does NOT navigate the board.
+function disarmReviewRecall() {
+  contLineReviewRetryIdx = -1;
+  stopPreAnalysis();
+  const hintBtn = document.getElementById('btnHint');
+  if (hintBtn) hintBtn.classList.add('hidden');
+  clearHintHighlights();
 }
 
 function showReviewKeyMoveInfo(moveIdx, revealed = false) {
@@ -20427,7 +20467,7 @@ function showReviewKeyMoveInfo(moveIdx, revealed = false) {
   const devLine = isDeviation
     ? (mv._repDeviation.corrected
       ? (hideAnswer
-        ? `<div style="color:${REP_PURPLE};font-size:12px;">📖 You needed help finding your repertoire move here — can you recall it now?</div>`
+        ? `<div style="color:${REP_PURPLE};font-size:12px;">📖 You needed help finding your repertoire move here — play it on the board.</div>`
         : `<div style="color:${REP_PURPLE};${isAlsoMistake ? 'margin-top:4px;' : ''}font-size:12px;">📖 You first tried <code>${escHtml(mv._repDeviation.tried.san)}</code> here before correcting to the repertoire move.</div>`)
       : `<div style="color:${REP_PURPLE};${isAlsoMistake ? 'margin-top:4px;' : ''}font-size:12px;">📖 Your repertoire plays a different move here${mv._repDeviation.sans.length > 1 ? ` (${mv._repDeviation.sans.length} options)` : ''}.</div>`)
     : '';
@@ -20438,7 +20478,7 @@ function showReviewKeyMoveInfo(moveIdx, revealed = false) {
     ? (hideAnswer
       // Opt-in reveal for corrected: flip the card to revealed FIRST (it clears
       // bestMoveArrow at render end), then draw the purple arrow.
-      ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;color:${REP_PURPLE};border-color:${REP_PURPLE};" onclick="showReviewKeyMoveInfo(${moveIdx}, true);showReviewRepMoveArrow(${moveIdx})">📖 Show repertoire move</button>`
+      ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;color:${REP_PURPLE};border-color:${REP_PURPLE};" onclick="disarmReviewRecall();showReviewKeyMoveInfo(${moveIdx}, true);showReviewRepMoveArrow(${moveIdx})">📖 Show repertoire move</button>`
       : `<button class="btn btn-ghost btn-sm" style="font-size:11px;color:${REP_PURPLE};border-color:${REP_PURPLE};" onclick="showReviewRepMoveArrow(${moveIdx})">📖 Show repertoire move</button>`)
     : '';
   // Refutation only makes sense when the move actually lost eval
@@ -20455,7 +20495,7 @@ function showReviewKeyMoveInfo(moveIdx, revealed = false) {
         ${evalLine}
         ${devLine}
         <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;">
-          <button class="btn btn-primary btn-sm" style="font-size:11px;" onclick="startReviewRetry(${moveIdx})">↺ Retry</button>
+          ${hideAnswer ? '' : `<button class="btn btn-primary btn-sm" style="font-size:11px;" onclick="startReviewRetry(${moveIdx})">↺ Retry</button>`}
           ${repMoveBtn}
           ${mv.bestMoveUci && !hideAnswer ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewBestArrow(${moveIdx})">Show best</button>` : ''}
           ${mv.bestMoveUci && !hideAnswer ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="showReviewBestLine(${moveIdx})">Show line</button>` : ''}
@@ -20467,6 +20507,27 @@ function showReviewKeyMoveInfo(moveIdx, revealed = false) {
       </div>
     </div>
   `;
+
+  // Auto-arm the recall retry for unrevealed corrected deviations. The board is
+  // already at the pre-move position (reviewNextKeyMove/reviewPrevKeyMove land
+  // corrected deviations at moveIdx-1) and the answer is hidden, so pressing
+  // Retry would just reload the position already shown — let the user play their
+  // repertoire move directly instead. Mirrors the state startReviewRetry sets,
+  // minus the board nav (already done) and its replacement card (we keep the
+  // key-move card with Prev/Next + Show repertoire move). Navigating away or
+  // revealing calls disarmReviewRecall() to tear this down.
+  if (hideAnswer) {
+    contLineReviewRetryIdx = moveIdx;
+    contLineBrowsing = true; // onDrop/click retry paths gate on this
+    window._reviewBestLine = null;
+    const preFen = moveIdx - 1 >= 0 ? contLine.moves[moveIdx - 1].fen : contLine.baseFen;
+    currentSolveFen = preFen;
+    currentAttempts = 0;
+    startPreAnalysis(preFen);
+    hintLevel = 0; hintUsed = false; hintMove = null; clearHintHighlights();
+    const hintBtn = document.getElementById('btnHint');
+    if (hintBtn) { hintBtn.classList.remove('hidden'); hintBtn.disabled = false; hintBtn.textContent = '💡 Hint'; hintBtn.style.borderColor = ''; hintBtn.style.color = ''; }
+  }
 
   // Clear any stale arrows
   bestMoveArrow = null;
