@@ -147,6 +147,7 @@
     cursor: default;
   }
   #btnNote.has-note { color: var(--accent); border-color: var(--accent); }
+  #btnFilterNote.has-note { color: var(--accent); border-color: var(--accent); }
   /* Note panel — floating card beside the board */
   .note-panel {
     position: absolute;
@@ -1829,7 +1830,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire Deviations filter: color (White/Black) and time-control chips in the Deviations header (repDevFilter, session-local) scope the deviation list, its count, the Review Due badge, and both the Review Due and Drill queues. Speed matches "any of the deviation's games was played at that time control" (per-game speed captured during deviation detection); manual deviations are never hidden by speed. Only present time controls get a chip; both color chips always show; the Repertoire tab badge stays global.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Plan-Recall Flashcards + explorer note authoring: (1) New type:'plan' items — thin enrollment records in gistData.planCards (tombstoned removal, merged by id/newer-updated) with FSRS riding positions[p_<positionKey>].srs; card content is read live from position notes at review. Enroll/remove via 🧠 buttons in the note panel (undo toast); recall UI reveals the note (text + arrows) and self-grades Again/Hard/Good/Easy; engine off and board input blocked during plan review; only the color filter applies; missing-note cards surface as a count on the Repertoire tab. (2) Notes are now authorable in opening-filter mode (pasted FEN or browsed position): getCurrentNoteFen filterChess branch, 📝 #btnFilterNote in the filter bar (has-note mirrored, N key), note state tracks every filter move/paste/undo/redo/reset, unsaved edits survive board moves and get an Escape-exit confirm — the primary flashcard path for Chessable lines with no Lichess study export.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -1950,6 +1951,7 @@
       <button class="btn btn-ghost btn-sm" onclick="filterUndoMove()" title="Undo move">← Undo</button>
       <button class="btn btn-ghost btn-sm" onclick="filterRedoMove()" title="Redo move">Redo →</button>
       <button class="btn btn-ghost btn-sm" onclick="filterReset()" title="Reset to starting position">↺ Reset</button>
+      <button class="btn btn-ghost btn-sm" id="btnFilterNote" onclick="toggleNotePanel()" title="Add or view a note for this position (N) — notes here can be enrolled as 🧠 plan flashcards">📝 Note</button>
     </div>
     <div class="position-nav" id="positionNav">
       <span class="position-nav-arrows">
@@ -3221,6 +3223,10 @@ function tacticHasValidLines(m) {
 
 function posId(m) {
   if (m.type === 'repertoire') return `r_${m.positionKey}`;
+  // Plan-recall flashcards are keyed by position, not game — the same
+  // position may ALSO hold a deviation card (r_...); intentional and
+  // independent (move vs idea). FSRS state rides gistData.positions[p_...].srs.
+  if (m.type === 'plan') return `p_${m.positionKey}`;
   const prefix = m.type === 'tactic' ? 't' : m.type === 'advantage' ? 'a' : '';
   return `${m.gameId}_${prefix}${m.movePly}`;
 }
@@ -3395,6 +3401,8 @@ async function gistCreate(seedContent) {
 //   savePracticeMistake dedup key at line 16083).
 // - practiceTactics: union dedupe by fenBefore + _chainSig (matches the
 //   savePracticeTactic dedup key at line 16164).
+// - planCards: union by id, newer 'updated' wins; tombstones carried (see
+//   the block's comment — un-enrollment must propagate cross-device).
 //
 // KNOWN LIMITATION: union semantics for dismissed / customDeviations /
 // studies arrays don't disambiguate "remote previously had X, local
@@ -3512,6 +3520,27 @@ function mergeGistData(local, remote) {
       const key = k(pt);
       if (!seen.has(key)) { merged.practiceTactics.push(pt); seen.add(key); }
     }
+  }
+
+  // ── planCards ── (plan-recall flashcard enrollments)
+  // Union by id; on id collision the newer `updated` wins. Tombstones
+  // ({deleted:true, updated}) are records like any other and MUST be carried:
+  // un-enrolling a card on one device has to beat an older live record from
+  // another device in this merge, or loadFromGist would resurrect it. Card
+  // CONTENT is never here (read live from gistData.notes at render), and FSRS
+  // state rides gistData.positions[`p_<positionKey>`].srs — both already
+  // merged above. Don't touch positions[] srs in this block.
+  if (local.planCards) {
+    if (!merged.planCards) merged.planCards = [];
+    const byId = new Map(merged.planCards.map(c => [c.id, c]));
+    for (const c of local.planCards) {
+      const r = byId.get(c.id);
+      if (!r) { byId.set(c.id, c); continue; }
+      const lu = new Date(c.updated || 0).getTime();
+      const ru = new Date(r.updated || 0).getTime();
+      if (lu > ru) byId.set(c.id, c);
+    }
+    merged.planCards = [...byId.values()];
   }
 
   return merged;
@@ -12165,6 +12194,29 @@ function extractAllMistakes() {
     }
   }
 
+  // Merge plan-recall flashcards from Gist. These are thin enrollment
+  // records — the card stores NO content; the plan text/arrows live in
+  // gistData.notes and are read live via getNoteForFen at render time
+  // (loadPosition's 'plan' branch), so study edits auto-propagate. Cards
+  // whose note is missing are SKIPPED (never render a blank flashcard):
+  // the note may have been deleted, or it's a study comment not yet
+  // imported because loadRepertoireTrie hasn't run — the trie .then()
+  // re-runs extractAllMistakes and picks those up. Skipped cards are
+  // surfaced as a "need content" count on the Repertoire tab
+  // (planCardStats). wpDrop:0 is REQUIRED: the trailing allMistakes.sort
+  // and buildReviewQueue's new-card tiebreak both read it. The repertoire
+  // trie-filter pass below only touches type==='mistake' — plan items pass
+  // through untouched.
+  if (gistData?.planCards?.length) {
+    for (const card of gistData.planCards) {
+      if (card.deleted) continue;
+      if (!getNoteForFen(card.fen)) continue;
+      const pid = `p_${card.positionKey}`;
+      if (allMistakes.some(m => posId(m) === pid)) continue;
+      allMistakes.push(planCardLiveItem(card));
+    }
+  }
+
   // Drop mistakes where the user's played move matches their repertoire
   // (they deliberately chose to play it — not a surprise to drill).
   // Runs after practice-mistake merging so user-saved mistakes are also checked.
@@ -12767,11 +12819,26 @@ function enterOpeningFilter() {
   else renderGameList();
   updateSessionProgress();
   updateOpeningFilterUI();
+  // Notes are authorable in filter mode (getCurrentNoteFen has a filterChess
+  // branch); the 📝 entry point is #btnFilterNote in #filterBoardBar, whose
+  // visibility rides updateOpeningFilterUI's bar toggle (btnNote's home,
+  // #positionNav, is display:none in this mode — unhiding it would do
+  // nothing). updateNoteButton syncs the has-note state for the entry
+  // position and closes any panel left open by the previous drill context
+  // (standard navigated-away behavior).
+  updateNoteButton();
 }
 
 function exitOpeningFilter(clearFilter) {
   closeFilterPromoPicker();
   openingFilterMode = false;
+
+  // A note panel open here is anchored at a filter position that's leaving
+  // the board — close it. The loadPosition restore path below would close it
+  // via checkForNote anyway, but the empty-board fallback branches wouldn't,
+  // stranding a filter-position panel over the start position. (#btnFilterNote
+  // hides with #filterBoardBar via updateOpeningFilterUI — no button work.)
+  if (notePanelOpen) closeNotePanel();
 
   // IMP-004: clear any overlays the filter board may have accumulated (user
   // annotations, hint arrows). The loadPosition branch below would re-clear
@@ -12884,6 +12951,15 @@ function applyOpeningFilterFromBoard() {
   else renderGameList();
   updateSessionProgress();
   updateOpeningFilterUI();
+  // 📝 has-note state tracks the explorer position (this runs after every
+  // filter move AND after setFilterFromFen). updateNoteButton also closes an
+  // open panel — the standard navigated-away behavior — EXCEPT while an
+  // unsaved edit is in progress: the edit stays pinned to its noteAnchorFen
+  // (saveNote writes to the anchor, so it still lands on the right position),
+  // which beats silently discarding hand-authored text on a board move.
+  // Guarded on openingFilterMode like the filter mutation above — the
+  // background index-rebuild caller must not touch note UI.
+  if (openingFilterMode && !hasUnsavedNoteChanges()) updateNoteButton();
 }
 
 function filterMakeMove(from, to, animate, promotion) {
@@ -13570,6 +13646,13 @@ function applyFilters() {
     const isPractice = m.gameId?.startsWith('_practice');
     // ── Item-level filters (apply to every mistake regardless of source) ──
     if (filters.color.size < 2 && !filters.color.has(m.playerColor)) return false;
+    // Plan-recall flashcards: only the color filter applies (playerColor is
+    // set at enrollment from board orientation). Severity would misfile them
+    // via their synthetic wpDrop:0, the type chips deliberately don't cover
+    // them (no 'plan' chip in v1 — plans always show in the daily queue,
+    // Anki mixed-deck style), and their synthetic .game must not go through
+    // game-level speed/platform/rated filters.
+    if (m.type === 'plan') return true;
     if (filters.severity.size < 2 && m.type !== 'tactic' && m.type !== 'advantage') {
       const isBlunder = m.wpDrop >= 15;
       if (isBlunder && !filters.severity.has('blunder')) return false;
@@ -14084,11 +14167,12 @@ function buildReviewItemEl(m, upcoming) {
     item.className = `review-item${isActive ? ' active' : ''}`;
     item.onclick = () => loadPosition(globalIdx);
 
-    const opening = m.game?.opening?.name || 'Unknown';
+    const isPlan = m.type === 'plan';
+    const opening = m.game?.opening?.name || (isPlan ? 'Plan flashcard' : 'Unknown');
     const isPracticeMistake = m.gameId?.startsWith('_practice');
     const isTactic = m.type === 'tactic';
     const isAdvantage = m.type === 'advantage';
-    const lossClass = (isTactic || isAdvantage) ? '' : (m.wpDrop >= 15 ? 'loss-blunder' : 'loss-mistake');
+    const lossClass = (isTactic || isAdvantage || isPlan) ? '' : (m.wpDrop >= 15 ? 'loss-blunder' : 'loss-mistake');
     const isNew = card.state === FSRS_STATE.new;
     const isOverdue = !isNew && card.due && card.due < today;
 
@@ -14158,7 +14242,9 @@ function buildReviewItemEl(m, upcoming) {
     const hasNote = (noteEntryBefore && !noteEntryBefore.deleted) ||
                     (noteEntryAfter && !noteEntryAfter.deleted);
 
-    const moveLabel = isAdvantage
+    const moveLabel = isPlan
+      ? `🧠 Recall the plan <span style="color:var(--text-muted);font-size:11px">(${m.playerColor === 'white' ? 'White' : 'Black'})</span>`
+      : isAdvantage
       ? `${ICON_ADVANTAGE} Move ${m.moveNumber}${m.playerColor==='white'?'.':'…'} <span style="color:#4caf50">+${(m.peakCp/100).toFixed(1)}</span>`
       : isTactic
       ? `${ICON_TACTIC} Move ${m.moveNumber}${m.playerColor==='white'?'.':'…'} <span style="color:var(--yellow)">+${Math.abs(m.wpSwing)}%</span>`
@@ -14530,6 +14616,9 @@ function onBoardClick(e) {
 
   const m = filteredMistakes[currentMistakeIdx];
   if (!m) return;
+  // Plan-recall flashcards: same block as onDragStart — tap-to-move on
+  // mobile would otherwise bypass the drag guard entirely.
+  if (m.type === 'plan') return;
 
   
 
@@ -15205,6 +15294,48 @@ function loadPosition(globalIdx, skipAnimation = false) {
     document.getElementById('contLineContainer').innerHTML = '';
     renderQueue();
     updateSessionProgress();
+  } else if (m.type === 'plan') {
+    // ── Plan-recall flashcard setup ──
+    // Anki-style recall: front = the bare position, back = the note at
+    // m.fenBefore (read live via getNoteForFen — the card stores no content),
+    // graded by self-report. ENGINE FULLY OFF: no pre-analysis, no Stockfish,
+    // no Maia, and no legal-move input (onDragStart / onBoardClick both gate
+    // on m.type === 'plan'). All EIGHT mode flags stay false — plan review is
+    // a queue item type, not a mode (loadPosition's reset block above already
+    // cleared them all).
+    stopPreAnalysis();
+    orphanPreAnalysisWaiters();  // M3: null out hint-button waiters from the prior mistake
+    if (sfSearchActive && sfWorker) {
+      drainSfPendingResolvers();  // H2: flush sfAnalyze Promises
+      sfWorker.terminate();
+      sfWorker = null;
+      sfReady = false;
+      sfSearchActive = false;
+      initStockfish();
+    }
+    // No hint (nothing to hint — reveal IS the answer), no Analysis entry
+    // (engine stays off; the A-key handler gates on type too), and no View
+    // Game (gameId `_plan_...` has no real game behind it — the generic
+    // vgBtn block above would build a broken URL).
+    document.getElementById('btnHint').classList.add('hidden');
+    document.getElementById('btnLichess').classList.add('hidden');
+    document.getElementById('btnViewGame').classList.add('hidden');
+    const planOpening = m._opening || m.game?.opening?.name || '';
+    document.getElementById('posInfoContent').innerHTML = `
+      <div style="font-size:13px;line-height:1.7">
+        <div>🧠 <strong>Recall the plan</strong></div>
+        ${planOpening ? `<div style="font-size:11px;color:var(--text-muted)">${escHtml(planOpening)}</div>` : ''}
+        <div style="font-size:12px;color:var(--text-secondary);margin-top:2px;">Think through the plan for this position, then reveal it and grade yourself.</div>
+      </div>
+    `;
+    document.getElementById('feedbackContainer').innerHTML = `
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-primary btn-sm" onclick="planRevealAnswer()">Show plan</button>
+      </div>
+    `;
+    document.getElementById('contLineContainer').innerHTML = '';
+    renderQueue();
+    updateSessionProgress();
   } else {
     // ── Mistake mode setup ──
     const clockInfo = m.clockRemaining != null
@@ -15324,6 +15455,10 @@ function onDragStart(source, piece) {
   if (!gameEngine || browsingLine) return false;
   const m = filteredMistakes[currentMistakeIdx];
   if (!m) return false;
+  // Plan-recall flashcards are display-only — there is no move to find or
+  // evaluate, and the engine is fully off. Grading is via the reveal/grade
+  // buttons. Gated per-item by type (NOT a ninth mode flag).
+  if (m.type === 'plan') return false;
   if (gameEngine.game_over()) return false;
 
   // Issue #22: continuation options showing (deferred engine line pending) —
@@ -24131,6 +24266,18 @@ function renderRepertoirePanel() {
     </div>
   </div>`;
 
+  // Plan-recall flashcards summary. `missing` cards (note deleted, or study
+  // comment not yet re-imported) are filtered out of the queue at extract
+  // time — this line is where they surface so they don't silently vanish.
+  const planStats = planCardStats();
+  if (planStats.total > 0) {
+    html += `<div style="padding:8px 12px;border-bottom:1px solid var(--border);font-size:11px;color:var(--text-secondary);">
+      🧠 Plan flashcards: <strong>${planStats.total}</strong>
+      ${planStats.missing > 0 ? ` · <span style="color:var(--yellow);" title="The note behind these cards is missing (deleted, or its study comment isn't imported). Re-create the note at those positions, or remove the cards from the note panel.">${planStats.missing} need content</span>` : ''}
+      <span style="color:var(--text-muted);"> · enroll via 🧠 in the note panel</span>
+    </div>`;
+  }
+
   // Variation checklist (generated lines ranked by opponent probability) —
   // placed high so it's reachable without scrolling past long Deviations/Gaps.
   html += renderTodoChecklistSection(studies);
@@ -27181,6 +27328,15 @@ function getCurrentNoteFen() {
     if (analysisEngine) return analysisEngine.fen();
     if (analysisTreeCurrent) return analysisTreeCurrent.fen;
   }
+  // Opening-filter mode: filterChess is the authoritative engine — the
+  // gameEngine.fen() fallback below still holds the stale loaded drill
+  // position in this mode, so a note authored here would key to the WRONG
+  // fen. Mutually exclusive with analysisMode above (enterOpeningFilter
+  // auto-exits analysis). This branch is what makes notes (and 🧠 plan-
+  // flashcard enrollment) authorable at any pasted/browsed explorer
+  // position — the primary path for Chessable lines, which can't be
+  // exported to Lichess studies and therefore have no source:'study' notes.
+  if (openingFilterMode && filterChess) return filterChess.fen();
   if (engineLine) {
     if (engineLine.currentIdx === -1) return engineLine.baseFen;
     const fen = typeof getEngineLineFen === 'function' ? getEngineLineFen() : null;
@@ -27269,6 +27425,12 @@ function updateNoteButton() {
     btn.classList.remove('has-note');
     btn.textContent = '📝 Note';
   }
+  // Filter-mode twin (#btnFilterNote lives in #filterBoardBar, since
+  // #positionNav — btnNote's home — is display:none in filter mode). Its
+  // visibility rides the bar's mode toggle in updateOpeningFilterUI; only
+  // the has-note state needs mirroring here.
+  const fbtn = document.getElementById('btnFilterNote');
+  if (fbtn) fbtn.classList.toggle('has-note', !!note);
 }
 
 function showNoteArrows(note) {
@@ -27717,6 +27879,14 @@ function showNoteViewMode(panel, note) {
 
   const hasText = note.text && note.text.trim();
 
+  // Plan-recall flashcard enrollment state at the panel's anchor position.
+  // Sole creation path for plan cards — always a deliberate per-position
+  // choice (no bulk generation; see the Plan-Recall Flashcards section).
+  const planKey = noteAnchorFen ? fenPositionKey(noteAnchorFen) : null;
+  const planEnrolled = planKey
+    ? (gistData?.planCards || []).some(c => c.positionKey === planKey && !c.deleted)
+    : false;
+
   panel.style.display = 'block';
   panel.innerHTML = `
     <h4>📝 Note <span style="display:flex;gap:6px;">
@@ -27724,6 +27894,9 @@ function showNoteViewMode(panel, note) {
       <button class="btn btn-ghost btn-sm" onclick="closeNotePanel()" style="font-size:10px;padding:2px 8px;">✕</button>
     </span></h4>
     ${hasText ? `<div class="note-view-text">${renderNoteBody(note.text, noteAnchorFen)}</div>` : ''}
+    ${planKey ? `<div style="margin-top:8px;">${planEnrolled
+      ? '<button class="btn btn-ghost btn-sm" onclick="removePlanCard()" style="font-size:10px;" title="Stop drilling this plan (undoable)">🗑 Remove flashcard</button>'
+      : '<button class="btn btn-ghost btn-sm" onclick="enrollPlanCard()" style="font-size:10px;" title="Drill this plan via spaced repetition in the review queue">🧠 Make flashcard</button>'}</div>` : ''}
   `;
 }
 
@@ -28103,6 +28276,246 @@ function deleteNote() {
   });
 }
 
+// ─── Plan-Recall Flashcards ───
+//
+// Anki-style SRS on repertoire ideas. A plan card is a THIN enrollment record
+// in gistData.planCards[] — { id:`plan_<positionKey>`, positionKey, fen,
+// color, source:'user', createdAt, updated, deleted? } — plus an FSRS card
+// riding the existing gistData.positions[`p_<positionKey>`].srs (via posId's
+// 'plan' branch). The card stores NO content: the plan text/arrows/circles
+// live in gistData.notes and are read live via getNoteForFen at review time,
+// so study-comment edits auto-propagate to the card. One card per position
+// (transpositions collapse via fenPositionKey — correct). Enrollment is
+// ALWAYS a deliberate per-position choice from the note panel ("🧠 Make
+// flashcard"); there is deliberately no bulk/per-study generation — study
+// comments are frequently explanations or tactical justifications rather
+// than plans, and auto-enrolling would flood the deck with non-plan cards.
+// Un-enroll writes a tombstone (mirrors deleteNote) so removal propagates
+// cross-device through the planCards merge in mergeGistData.
+//
+// Review flow: loadPosition's 'plan' branch renders the front (bare board,
+// input blocked, engine off) → planRevealAnswer opens the note panel at
+// m.fenBefore (text + [%cal]/[%csl] arrows via the standard note render) and
+// shows Again/Hard/Good/Easy → planGrade records pure self-report FSRS (no
+// move eval, no hintUsed, no firstAttemptFailed) and advances.
+
+// Builds the live allMistakes[] item for a planCard. Shared by
+// extractAllMistakes (Gist-load path) and enroll/undo (live-inject path).
+// wpDrop:0 is required — the extraction sort and buildReviewQueue's new-card
+// tiebreak both read it. The synthetic .game never reaches the game-level
+// filters (applyFilters early-returns plan items after the color check) and
+// its `_plan_...` id never matches a real fetched game, so the Games tab is
+// unaffected.
+function planCardLiveItem(card) {
+  const opening = lookupOpeningName(card.fen) || '';
+  const gameId = `_plan_${card.positionKey}`;
+  return {
+    type: 'plan',
+    positionKey: card.positionKey,
+    fenBefore: card.fen,
+    playerColor: card.color,
+    wpDrop: 0,
+    moveNumber: 0,
+    gameId,
+    _opening: opening,
+    game: {
+      id: gameId,
+      speed: 'practice',
+      opening: { name: opening || 'Plan flashcard' },
+      createdAt: card.createdAt,
+      _source: 'plan',
+      rated: false,
+      players: {},
+    },
+  };
+}
+
+// Counts for the Repertoire-tab summary line. `missing` = enrolled cards
+// whose note has been deleted (or whose study comment hasn't been imported
+// yet) — those are filtered out at extract time and never rendered as blank
+// flashcards, so this count is the only place they surface.
+function planCardStats() {
+  const cards = (gistData?.planCards || []).filter(c => !c.deleted);
+  let missing = 0;
+  for (const c of cards) {
+    if (!getNoteForFen(c.fen)) missing++;
+  }
+  return { total: cards.length, missing };
+}
+
+// "Show plan" — the flashcard back. Reuses the note panel's view mode so the
+// plan text renders with clickable variation lines and the note's
+// arrows/circles appear on the board for free.
+function planRevealAnswer() {
+  const m = filteredMistakes[currentMistakeIdx];
+  if (!m || m.type !== 'plan') return;
+  const note = getNoteForFen(m.fenBefore);
+  if (!note) {
+    // Extract-time filtering makes this near-unreachable (note deleted
+    // mid-session on another device is the only path). Never show a blank back.
+    showFeedback('info', 'No plan saved', 'The note behind this flashcard is gone. Write a new one via 📝, or remove the flashcard from the note panel.');
+    return;
+  }
+  openNotePanel(m.fenBefore);
+  document.getElementById('feedbackContainer').innerHTML = `
+    <div id="planGradeRow" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+      <span style="font-size:11px;color:var(--text-muted);flex-basis:100%;">How well did you recall it?</span>
+      <button class="btn btn-ghost btn-sm" style="border-color:var(--red);color:var(--red);" onclick="planGrade(1)">Again</button>
+      <button class="btn btn-ghost btn-sm" style="border-color:var(--yellow);color:var(--yellow);" onclick="planGrade(2)">Hard</button>
+      <button class="btn btn-ghost btn-sm" style="border-color:var(--green);color:var(--green);" onclick="planGrade(3)">Good</button>
+      <button class="btn btn-ghost btn-sm" style="border-color:var(--blue);color:var(--blue);" onclick="planGrade(4)">Easy</button>
+    </div>
+  `;
+}
+
+// Pure self-report FSRS grade — no move eval, no hintUsed, no
+// firstAttemptFailed, no verification of the user's recall against the note.
+function planGrade(grade) {
+  const m = filteredMistakes[currentMistakeIdx];
+  if (!m || m.type !== 'plan') return;
+  if (!srsRecorded) {
+    const card = recordReview(posId(m), grade);
+    srsRecorded = true;
+    const labels = { 1: 'Again', 2: 'Hard', 3: 'Good', 4: 'Easy' };
+    showToast(`${labels[grade]} · next review ${card && card.due ? card.due : 'today'}`, { duration: 2500 });
+  }
+  updateSessionProgress();
+  // showFeedback prepends without clearing — drop the grade row explicitly so
+  // it can't linger next to advanceReviewQueue's "Review complete" card (a
+  // stale re-click is harmless — srsRecorded gates re-recording — but ugly).
+  const gradeRow = document.getElementById('planGradeRow');
+  if (gradeRow) gradeRow.remove();
+  if (reviewMode) {
+    advanceReviewQueue();
+  } else {
+    // Loaded outside the review flow (e.g. from the upcoming section with the
+    // review tab left) — nothing to advance to; the plan's synthetic gameId
+    // has no sibling positions. Close the answer and confirm.
+    if (notePanelOpen) closeNotePanel();
+    document.getElementById('feedbackContainer').innerHTML = '';
+    renderQueue();
+    showFeedback('info', 'Plan reviewed', 'Grade recorded.');
+  }
+}
+
+// "🧠 Make flashcard" in the note panel: enrolls the CURRENT position.
+// Requires a saved note here; with none, drop into note edit mode first
+// (write the plan, then enroll). The note may be the user's own OR an
+// imported study comment (source:'study') judged plan-worthy — getNoteForFen
+// reveals either at review. planCard.source is always 'user' (enrollment is
+// user-initiated); the CONTENT's source is independent and lives on the note.
+function enrollPlanCard() {
+  const fen = noteAnchorFen || getCurrentNoteFen();
+  if (!fen) return;
+  const note = getNoteForFen(fen);
+  if (!note) { enterNoteEditMode(); return; }
+  ensureGistData();
+  if (!gistData.planCards) gistData.planCards = [];
+  const positionKey = fenPositionKey(fen);
+  const id = `plan_${positionKey}`;
+  const existingIdx = gistData.planCards.findIndex(c => c.id === id);
+  if (existingIdx >= 0 && !gistData.planCards[existingIdx].deleted) {
+    showToast('This position is already a plan flashcard', { duration: 2500 });
+    return;
+  }
+  // card.color = board orientation at enrollment = the perspective the recall
+  // board will use, and what the color filter checks. Fallback to the FEN's
+  // side to move if the board somehow isn't up.
+  const color = (typeof boardObj !== 'undefined' && boardObj)
+    ? boardObj.orientation()
+    : (fen.split(' ')[1] === 'b' ? 'black' : 'white');
+  const card = {
+    id, positionKey, fen, color,
+    source: 'user',
+    createdAt: Date.now(),
+    updated: new Date().toISOString(),
+  };
+  // Revive over a tombstone by replacing the record — the fresh `updated`
+  // beats the tombstone in the planCards merge on other devices.
+  if (existingIdx >= 0) gistData.planCards[existingIdx] = card;
+  else gistData.planCards.push(card);
+  debounceSyncToGist();
+  // Live-inject so it appears in the SRS queue immediately (mirrors
+  // savePracticeTactic — no applyFilters() here, it would wipe an active
+  // practiceContItem).
+  const pid = `p_${positionKey}`;
+  if (!allMistakes.some(x => posId(x) === pid)) {
+    const liveEntry = planCardLiveItem(card);
+    allMistakes.push(liveEntry);
+    filteredMistakes.push(liveEntry);
+  }
+  updateSessionProgress(); // refreshes the review-due badge via buildReviewQueue
+  // Flip the panel button to "Remove flashcard" if still showing this note.
+  const panel = document.getElementById('notePanel');
+  if (panel && notePanelOpen && !noteEditMode) showNoteViewMode(panel, note);
+  showToast('🧠 Plan flashcard created — it joins your review queue', { duration: 3000 });
+}
+
+// "Remove flashcard": tombstone the enrollment (6s undo, mirrors deleteNote).
+// SRS state at positions[`p_...`].srs is deliberately left intact — undo (or
+// later re-enrollment) resumes the card's scheduling history instead of
+// resetting it, and a live srs record on a tombstoned card is inert (the item
+// is filtered out at extract time, so isDue never sees it).
+function removePlanCard() {
+  const fen = noteAnchorFen || getCurrentNoteFen();
+  if (!fen || !gistData?.planCards) return;
+  const positionKey = fenPositionKey(fen);
+  const id = `plan_${positionKey}`;
+  const idx = gistData.planCards.findIndex(c => c.id === id && !c.deleted);
+  if (idx < 0) return;
+  const undoSnapshot = JSON.parse(JSON.stringify(gistData.planCards[idx]));
+  gistData.planCards[idx] = { id, positionKey, deleted: true, updated: new Date().toISOString() };
+  debounceSyncToGist();
+  // Drop the live queue item. If it's the currently loaded item, keep the
+  // board as-is but detach nav (currentMistakeIdx = -1) — same end state as
+  // loadPosition's practice-item splice.
+  const pid = `p_${positionKey}`;
+  const ai = allMistakes.findIndex(x => posId(x) === pid);
+  if (ai >= 0) allMistakes.splice(ai, 1);
+  const fi = filteredMistakes.findIndex(x => posId(x) === pid);
+  if (fi >= 0) {
+    filteredMistakes.splice(fi, 1);
+    if (fi < currentMistakeIdx) currentMistakeIdx--;
+    else if (fi === currentMistakeIdx) {
+      currentMistakeIdx = -1;
+      // The reveal/grade buttons belong to the item we just removed — with
+      // currentMistakeIdx detached they'd be dead controls (planGrade /
+      // planRevealAnswer no-op on the missing item).
+      document.getElementById('feedbackContainer').innerHTML = '';
+    }
+  }
+  updateSessionProgress();
+  // Flip the panel button back to "Make flashcard" if still open here.
+  const panel = document.getElementById('notePanel');
+  const liveNote = getNoteForFen(fen);
+  if (panel && notePanelOpen && !noteEditMode && liveNote) showNoteViewMode(panel, liveNote);
+  showToast('Plan flashcard removed', {
+    duration: 6000,
+    actionLabel: 'Undo',
+    onAction: () => {
+      if (!gistData) return;
+      if (!gistData.planCards) gistData.planCards = [];
+      const restored = { ...undoSnapshot, updated: new Date().toISOString() };
+      const i2 = gistData.planCards.findIndex(c => c.id === id);
+      if (i2 >= 0) gistData.planCards[i2] = restored;
+      else gistData.planCards.push(restored);
+      debounceSyncToGist();
+      if (!allMistakes.some(x => posId(x) === pid)) {
+        const liveEntry = planCardLiveItem(restored);
+        allMistakes.push(liveEntry);
+        filteredMistakes.push(liveEntry);
+      }
+      updateSessionProgress();
+      const p2 = document.getElementById('notePanel');
+      const n2 = getNoteForFen(fen);
+      if (p2 && notePanelOpen && !noteEditMode && n2 &&
+          noteAnchorFen && fenPositionKey(noteAnchorFen) === positionKey) {
+        showNoteViewMode(p2, n2);
+      }
+    },
+  });
+}
+
 // Finding 6: `checkForNote` previously accepted a `fen` argument that was
 // never read — every call site happens to pass a fen that matches whatever
 // `getCurrentNoteFen()` (used inside `updateNoteButton`) would return at
@@ -28125,7 +28538,11 @@ document.addEventListener('keydown', (e) => {
     // If the detected-tactics modal is open (but not yet solving), close it
     const dtModal = document.getElementById('detectedTacticsModal');
     if (dtModal && !dtModal.classList.contains('hidden')) { closeDetectedTacticsModal(); return; }
-    if (openingFilterMode) { exitOpeningFilter(false); return; }
+    // Filter-mode notes: exitOpeningFilter closes the note panel, which would
+    // silently discard an in-progress edit. Guard at this call site (like
+    // prev/next/skip) rather than inside exitOpeningFilter — the tab-switch
+    // callers there ignore its return and would desync mode state on abort.
+    if (openingFilterMode) { if (!confirmDiscardNote()) return; exitOpeningFilter(false); return; }
     if (document.body.classList.contains('drawer-open')) { closeDrawer(); return; }
     // Issue #9: review line view (Show Line / Show Refutation) exits cleanly
     // via exitReviewBestLine — restores the key-move card (or retry result
@@ -28185,6 +28602,14 @@ document.addEventListener('keydown', (e) => {
   if (openingFilterMode) {
     if (e.key === 'ArrowLeft') { filterUndoMove(); e.preventDefault(); }
     if (e.key === 'ArrowRight') { filterRedoMove(); e.preventDefault(); }
+    // Notes are authorable in filter mode — same up-top 'n' handling as the
+    // analysis-mode branch (Issue #15): the shared shortcut block below this
+    // return is unreachable here. Checks #btnFilterNote (the filter-bar
+    // entry point), not btnNote — btnNote sits in the hidden #positionNav.
+    if (e.key === 'n' || e.key === 'N') {
+      const nb = document.getElementById('btnFilterNote');
+      if (nb && !nb.classList.contains('hidden')) toggleNotePanel();
+    }
     return;
   }
   // Arrow keys: repertoire lead-up takes priority when active
@@ -28230,7 +28655,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'r' || e.key === 'R') { if (!document.getElementById('btnRetry').classList.contains('hidden')) retryPosition(); }
   if (e.key === 'h' || e.key === 'H') { const hb = document.getElementById('btnHint'); if (hb && !hb.classList.contains('hidden') && !hb.disabled) showHint(); }
   if (e.key === 'e' || e.key === 'E') toggleEvalBar();
-  if (e.key === 'a' || e.key === 'A') { if (currentMistakeIdx >= 0 && !analysisMode) enterAnalysisMode(); }
+  if (e.key === 'a' || e.key === 'A') { if (currentMistakeIdx >= 0 && !analysisMode && filteredMistakes[currentMistakeIdx]?.type !== 'plan') enterAnalysisMode(); }
   if (e.key === 'n' || e.key === 'N') { const nb = document.getElementById('btnNote'); if (nb && !nb.classList.contains('hidden')) toggleNotePanel(); }
   if ((e.key === ' ' || e.key === 'Enter') && repertoireDrillMode) {
     const nextBtn = document.getElementById('btnRepNext');

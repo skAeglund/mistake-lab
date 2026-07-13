@@ -83,7 +83,7 @@ Claude can draft text for a new issue but cannot file it — say so and wait for
 
 ─── ITEM TYPES ───
 
-allMistakes[] holds five item types, processed by the same SRS system:
+allMistakes[] holds six item types, processed by the same SRS system:
   type: 'mistake'     — single-move, win% drop > 10%
   type: 'tactic'      — multi-move from game.tactics OR saved practice tactics
                          (includes analyzer/scanner-detected tactics AND user-authored
@@ -92,9 +92,14 @@ allMistakes[] holds five item types, processed by the same SRS system:
   type: 'advantage'   — blown winning edge (silent continuation drill)
   type: 'repertoire'  — deviation from loaded Lichess study
   type: 'practice'    — synthetic item for filter continuation practice (NOT in SRS queue)
+  type: 'plan'        — plan-recall flashcard (Anki-style self-graded recall of a
+                         position note — see PLAN-RECALL CARDS; content lives in
+                         gistData.notes, not on the item)
 
 posId(m):
   type='repertoire' → `r_${m.positionKey}`
+  type='plan'       → `p_${m.positionKey}`  (same position may hold BOTH an r_ and
+                        a p_ card — intentional and independent: move vs idea)
   type='tactic'     → `${m.gameId}_t${m.movePly}`
   type='advantage'  → `${m.gameId}_a${m.movePly}`
   type='mistake'    → `${m.gameId}_${m.movePly}`  (NO prefix between id and ply)
@@ -908,11 +913,103 @@ Lichess DB overlay (📊 toggle): parallel to the Maia overlay, from actual DB p
   - Layout: DB badges render right of Maia badges on PV rows; DB extra rows render
     above Maia's extra row.
 
+─── PLAN-RECALL CARDS (type: 'plan') ───
+
+Anki-style SRS on repertoire ideas. A plan card is a THIN ENROLLMENT RECORD —
+it stores NO content. The plan text/arrows/circles live in gistData.notes
+(user notes or auto-imported study comments, source:'study') and are read
+LIVE via getNoteForFen(m.fenBefore) at review time, so study/note edits
+auto-propagate to the card. FSRS state rides the existing
+gistData.positions[`p_<positionKey>`].srs (posId 'plan' branch); getCardFor-
+Position / recordReview / isDue / fsrs_review all work unchanged.
+
+Enrollment store: gistData.planCards[] = { id:`plan_<positionKey>`,
+  positionKey, fen, color:'white'|'black', source:'user', createdAt,
+  updated, deleted? }. One card per position (transpositions collapse via
+  fenPositionKey). card.color = board orientation at enrollment (drives the
+  recall board orientation AND the color filter). card.source is always
+  'user' (enrollment is user-initiated); the CONTENT's source (study vs user
+  note) is independent and lives on the note.
+
+Creation/removal — MANUAL ONLY, from the note panel (showNoteViewMode footer):
+  "🧠 Make flashcard" (enrollPlanCard) enrolls the panel's anchor position;
+  requires a saved note (openNotePanel with no note already drops into edit
+  mode, so the button only exists when one does). The note panel also opens
+  in OPENING-FILTER MODE (see POSITION NOTES / OPENING EXPLORER) — paste a
+  FEN in the explorer, write a note, enroll. That is the PRIMARY manual-
+  enrollment entry point for Chessable lines, which can't be exported to
+  Lichess studies and therefore have no source:'study' comments.
+  Deliberately NO bulk /
+  per-study generation — study comments are frequently explanations or
+  tactical justifications rather than plans; auto-enrolling would flood the
+  deck. "🗑 Remove flashcard" (removePlanCard) tombstones the record
+  ({id, positionKey, deleted:true, updated} — mirrors deleteNote) with a 6s
+  undo toast; the fresh `updated` on a tombstone/revival wins the merge so
+  un-enrollment propagates cross-device. SRS state is left intact on removal
+  (inert while tombstoned; resumes on re-enroll/undo). Both paths live-inject/
+  splice allMistakes+filteredMistakes without applyFilters() (which would
+  wipe an active practiceContItem) — mirrors savePracticeTactic.
+
+Extraction (extractAllMistakes, after the practiceTactics merge): one item per
+  non-deleted planCard whose getNoteForFen(fen) is non-null, built by
+  planCardLiveItem(card): { type:'plan', positionKey, fenBefore:fen,
+  playerColor:color, wpDrop:0 (REQUIRED — extraction sort + buildReviewQueue
+  new-card tiebreak read it), moveNumber:0, gameId:`_plan_<positionKey>`,
+  synthetic .game }. Missing-note cards (note deleted, or study comment not
+  yet imported because loadRepertoireTrie hasn't run) are SKIPPED — never
+  render a blank flashcard; the post-trie re-extraction picks study-note
+  cards up, and the count surfaces on the Repertoire tab via planCardStats()
+  ("N need content"). The repertoire trie-filter pass only touches
+  type==='mistake'; plan items pass through untouched.
+
+Filters (applyFilters): plan items early-return true immediately after the
+  color check — only the color filter applies. Severity would misfile them
+  via wpDrop:0, there is deliberately NO 'plan' type chip in v1 (plans always
+  show in the daily queue, Anki mixed-deck style), and the synthetic .game
+  must not hit game-level speed/platform/rated filters. buildReviewQueue
+  needs no change (plan items don't match isInFlightSynthetic).
+
+Review flow (loadPosition 'plan' branch): board at m.fenBefore, orientation =
+  card color, ENGINE FULLY OFF (stopPreAnalysis + main-worker teardown, no
+  Maia, no eval). NOT a mode — all eight mode flags stay false; input is
+  blocked per-item by `m.type === 'plan'` gates in onDragStart AND
+  onBoardClick (tap-to-move), and the A-key skips enterAnalysisMode for plan
+  items. btnHint / btnLichess / btnViewGame hidden. Front: "🧠 Recall the
+  plan" + opening + a "Show plan" button. Back (planRevealAnswer): opens the
+  note panel at m.fenBefore — standard note render gives text, clickable
+  variations, and [%cal]/[%csl] arrows for free — then Again/Hard/Good/Easy
+  buttons (#planGradeRow). planGrade(g): pure self-report — recordReview
+  (`p_...`, g), NO move eval / hintUsed / firstAttemptFailed, no text
+  verification — then advanceReviewQueue (or, outside reviewMode, close +
+  confirm in place). Skip keeps the standard semantics (grades Again — plan
+  items are not synthetic). Grade row is removed explicitly before advancing
+  because showFeedback prepends without clearing.
+
+V1 scope exclusions (future): cloze / hide-the-key-move, a 'plan' type chip,
+  plans-only sessions, per-day new-card limits.
+
 ─── POSITION NOTES ───
 
 📝 btnNote in header; hidden when no position loaded.
 gistData.notes[fenPositionKey] = { text, arrows, circles, updated } (updated drives
   mergeGistData newer-wins per note).
+Note view mode (showNoteViewMode) also hosts the plan-recall flashcard
+  enrollment footer ("🧠 Make flashcard" / "🗑 Remove flashcard") — the SOLE
+  creation path for type:'plan' items; see PLAN-RECALL CARDS.
+Notes are authorable in OPENING-FILTER MODE: getCurrentNoteFen has an
+  `openingFilterMode && filterChess` branch (before the gameEngine fallback,
+  which holds the stale drill position in that mode), the 📝 entry point is
+  #btnFilterNote in #filterBoardBar (btnNote's home #positionNav is
+  display:none there; visibility rides updateOpeningFilterUI's bar toggle;
+  updateNoteButton mirrors .has-note onto it; N key handled in the filter
+  branch of the key handler, mirroring the analysis-mode Issue #15 pattern),
+  and applyOpeningFilterFromBoard calls updateNoteButton after every filter
+  move / paste / undo / redo / reset — EXCEPT while an unsaved edit is in
+  progress (the edit stays pinned to noteAnchorFen instead of being silently
+  discarded by updateNoteButton's panel close). exitOpeningFilter closes a
+  filter-anchored panel; the Escape exit path confirms via confirmDiscardNote
+  at the CALL SITE (tab-switch callers ignore exitOpeningFilter's return, so
+  an in-function abort would desync mode state).
 noteArrows/noteCircles rendered by renderArrows() only when note panel is OPEN —
   never auto-render on position load.
 checkForNote / updateNoteButton / .has-note CSS class on btnNote.
@@ -975,6 +1072,11 @@ Result bars chess-absolute (white-wins left). filterArrows frequency arrows
   (green); hover filter arrow (blue 0.8).
 Opening filter: openingFilterMode, openingFilterFen, savedFilterOrientation.
 "Done" opens left panel. Exits on Review/Repertoire tab entry.
+Position notes are authorable at any filter position (pasted FEN or browsed) —
+  📝 #btnFilterNote in #filterBoardBar + the getCurrentNoteFen filterChess
+  branch; see POSITION NOTES for the full mechanics and PLAN-RECALL CARDS for
+  why (Chessable-line flashcard enrollment). Board annotations already worked
+  in filter mode, so visual plans save with the note.
 Orientation syncs with color filter only when an actual position filter is active
   — see START VIEW for syncColorFilterToOrientation / restorePersistedColorFilter.
 Entry point governed by enterStartView() / persisted startView — see START VIEW.
@@ -1037,6 +1139,10 @@ gistData schema:
   practiceTactics[]               // tactic objects (DETECTED TACTICS + SEQUENCE
                                    //   CONVERSION both write here — see those
                                    //   sections for the shape distinction)
+  planCards[]                     // plan-recall flashcard enrollments (thin
+                                   //   records + tombstones — see PLAN-RECALL
+                                   //   CARDS; content stays in notes[], FSRS
+                                   //   in positions[`p_...`].srs)
 
 syncToGist(): reads fresh remote (gistRead), deep-copies in-memory gistData as a
   snapshot, calls mergeGistData(localSnapshot, remote), replaces gistData with the
@@ -1052,6 +1158,8 @@ mergeGistData(local, remote) field semantics:
   - practiceScoreboard: per-posKey merge, dedup by ts, sorted by ts
   - practiceMistakes: dedup by fenBefore|sanPlayed
   - practiceTactics: dedup by fenBefore|_chainSig
+  - planCards: union by id; on collision newer `updated` wins; tombstones
+    CARRIED (un-enrollment must beat an older live record cross-device)
 debounceSyncToGist: sets _gistProgressDirtyLocal, writes gistData + dirty sentinel
   to LS UNCONDITIONALLY (so an OS-kill mid-debounce doesn't lose the mutation),
   then 3s debounce → syncToGist.
