@@ -1840,7 +1840,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Analysis Mode note / 🧠 flashcard authoring + paste-FEN + scratch entry: (1) 📝 #btnAnalysisNote in the analysis-panel header (N key now targets it, not the display:none #positionNav btnNote) opens the note panel on the live analysis position — getCurrentNoteFen's analysisMode branch already resolved analysisEngine.fen(), so note edit/save and 🧠 Make/Remove flashcard work unchanged; updateNoteButton mirrors .has-note onto it. This is the recommended way to confirm/find a plan with the engine/Maia/DB before enrolling it. (2) Paste-FEN (#analysisFenInput / setAnalysisFromFen): validates, no-ops on an exact re-paste, confirms an unsaved note edit, then re-roots the tree at the pasted position; syncAnalysisFenInput (called from renderAnalysisTree) keeps the field showing the current FEN so it doubles as copy-current-FEN. (3) 'Analyze a position' (#btnAnalyzeScratch in #emptyMsg / enterAnalysisBlank): enter Analysis Mode from the empty board with no loaded mistake — no ninth mode flag (rides analysisMode with analysisSavedState={blank:true}); exit restores the empty state.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Weak-Spots Dashboard is now MOVE-CONDITIONAL: the unit is a move edge, not a position — at a recurring position, the specific move that leads to a bad win-rate (e.g. "They play Bb4 → you score 19% over 8 games", vs a fine score against their other replies). Each positionMoveIndex (posKey → move) entry is an edge with its own user-perspective W-L-D; the ≥5-game gate is per-edge (that move needs 5 games for its rate to mean anything). Score = (W+½D)/N; below 50% = weak. Moves are opponent replies you handle badly ("They play X"); your own move choices are excluded. Session-local Human/Bot toggle (window._weakSpotsMode): HUMAN scans PMI edges (grouped by opening, near-universal edges >50% of games gated out on ≥20-game libraries, memoized by pmiGameCount, lazy PMI build via ensureWeakSpotsIndex poll 200ms/12s), Study → opening explorer at the position so the per-move result bars show the full split; BOT stays position+preset from practiceScoreboard (practice records no per-move split), Drill → startTodoFromList else Study. Rows show a winRateColor score pill, move + whose-move, W-L-D over N, hover board preview; worst-first, cap 15, thresholds in WEAKSPOT_CFG. Read-only (no store, no drill machinery, no mode flag). Replaces the position-aggregate "branching point" version. Earlier — Analysis Mode note / 🧠 flashcard authoring + paste-FEN + scratch entry: (1) 📝 #btnAnalysisNote in the analysis-panel header (N key now targets it, not the display:none #positionNav btnNote) opens the note panel on the live analysis position — getCurrentNoteFen's analysisMode branch already resolved analysisEngine.fen(), so note edit/save and 🧠 Make/Remove flashcard work unchanged; updateNoteButton mirrors .has-note onto it. This is the recommended way to confirm/find a plan with the engine/Maia/DB before enrolling it. (2) Paste-FEN (#analysisFenInput / setAnalysisFromFen): validates, no-ops on an exact re-paste, confirms an unsaved note edit, then re-roots the tree at the pasted position; syncAnalysisFenInput (called from renderAnalysisTree) keeps the field showing the current FEN so it doubles as copy-current-FEN. (3) 'Analyze a position' (#btnAnalyzeScratch in #emptyMsg / enterAnalysisBlank): enter Analysis Mode from the empty board with no loaded mistake — no ninth mode flag (rides analysisMode with analysisSavedState={blank:true}); exit restores the empty state.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -26359,67 +26359,43 @@ function todoStudyProgress(studyId) {
 }
 
 // ─── Weak-Spots Dashboard (Repertoire tab) ───────────────────────────────────
-// READ-ONLY prioritized view over data that already exists. It derives weakness
-// signals from three separate scoring systems — practiceScoreboard win-rate
-// WINDOWS (via the todo* helpers), repertoireDeviations FSRS cards, and
-// real-game frequency/score from positionMoveIndex + allMistakes — then routes
-// each row to an EXISTING launcher. NO new gistData store, NO drill machinery,
-// and NOT a mode flag: all eight mode flags stay false. Fold state is
-// session-local (window._weakSpotsOpen), mirroring window._repConfigOpen.
+// READ-ONLY view of MOVE-CONDITIONAL weak spots: at a recurring position, an
+// OPPONENT REPLY that leads to a bad win-rate. The unit is a MOVE EDGE, not a
+// position — e.g. "after they play …Bb4 you score 20% over 8 games" (vs a fine
+// score against their other replies). positionMoveIndex already stores per-move
+// user-perspective results, so each PMI (posKey → move) entry IS an edge with its
+// own record. Only edges where it's the OPPONENT to move are surfaced (your own
+// move choices are excluded).
+// Two lenses, switched by a session-local toggle (window._weakSpotsMode):
+//   • HUMAN — real-game edges from positionMoveIndex (Lichess/Chess.com).
+//   • BOT   — practice-drill score from practiceScoreboard (Maia), per preset.
+//     (Practice records no per-opponent-move split, so bot stays position+preset.)
+// Score = (W + ½D)/N; below SCORE_THRESH (50% break-even) = weak. The MIN_GAMES
+// gate is on the EDGE (that move needs ≥5 games for its win-rate to mean
+// anything). Read-only: NO new gistData store, NO drill machinery, NOT a mode
+// flag (all eight stay false). Fold state session-local (window._weakSpotsOpen),
+// mirroring window._repConfigOpen; collapsed by default.
 
-// All tunable thresholds in one place.
 const WEAKSPOT_CFG = {
-  // A. Failing in practice
-  PRACTICE_MIN_ATTEMPTS: 2,     // min attempts (n) at a preset before we judge it
-  PRACTICE_FAIL_RATE:    0.5,   // preset win-rate below this = failing
-  // C. Botching the middlegame
-  MIDGAME_MIN_GAMES:     3,     // min real games reaching the leaf
-  DOWNSTREAM_MARGIN:     2,     // plies before leaf-depth still counted as downstream
-  MIDGAME_MIN_RATE:      0.5,   // downstream mistakes / game reaching leaf to flag
-  // D. Never practiced but common
-  UNPRACTICED_MIN_FREQ:  2,     // min real games reaching the leaf to surface it
-  // Global summary
-  SUMMARY_TOP_N:         6,
-  // Lazy-index poll
-  POLL_MS:               200,
-  POLL_MAX:              60,     // 60 × 200ms = 12s cap
+  MIN_GAMES:    5,      // an edge needs ≥ this many games/attempts to count
+  MAX_SHARE:    0.5,    // skip near-universal edges (a whole opening, not a specific spot)…
+  SHARE_GUARD:  20,     // …but only once the library is at least this many games
+  SCORE_THRESH: 0.50,   // score below this (break-even) = weak
+  MAX_ROWS:     15,     // cap the list
+  POLL_MS:      200,
+  POLL_MAX:     60,     // 60 × 200ms = 12s cap for the lazy PMI build
 };
 
-// PMI covers the real-game frequency/score signals (categories C, D, and the
-// A/C tie-breaks). Categories A and B are computable without it. Readiness
-// mirrors buildOpeningIndex's own check.
 function weakSpotsIndexReady() {
   return !!(positionMoveIndex && pmiGameCount === allGames.length && allGames.length > 0);
 }
 
-// Real-game record from a leaf: flatten PMI[leafKey].values() → .games. A game
-// reaches a position once and plays exactly one move from it, so this yields one
-// entry per game — no dedupe. Returns {w,l,d,total, gameIds:Set}.
-function weakSpotLeafRecord(leafKey) {
-  const rec = { w: 0, l: 0, d: 0, total: 0, gameIds: new Set() };
-  const posMap = positionMoveIndex && positionMoveIndex.get(leafKey);
-  if (!posMap) return rec;
-  for (const ms of posMap.values()) {
-    for (const g of ms.games) {
-      rec.gameIds.add(g.gameId);
-      if (g.result === 'win') rec.w++;
-      else if (g.result === 'loss') rec.l++;
-      else rec.d++;
-    }
-  }
-  rec.total = rec.w + rec.l + rec.d;
-  return rec;
-}
-
-// Ensure the lazy opening index is (being) built so C/D can compute. Idempotent:
-// only one poll runs at a time. buildOpeningIndex self-guards (pmiBuilding /
-// fenIndexBuilding) and internally waits on fenDataPreloadPromise — we never
-// null or rebuild the indices ourselves, and we never race the IDB preload.
-// There is no exposed completion promise, so we poll pmiGameCount and re-render
-// the panel in place when ready.
+// buildOpeningIndex is idempotent / self-guarding and awaits fenDataPreloadPromise
+// internally (never raced). No completion promise exists, so poll pmiGameCount and
+// re-render when the index is ready.
 function ensureWeakSpotsIndex() {
   if (weakSpotsIndexReady()) return;
-  if (window._weakSpotsPollTimer) return; // already waiting
+  if (window._weakSpotsPollTimer) return;
   buildOpeningIndex();
   window._weakSpotsPollCount = 0;
   window._weakSpotsPollTimer = setInterval(() => {
@@ -26427,129 +26403,111 @@ function ensureWeakSpotsIndex() {
     if (weakSpotsIndexReady() || window._weakSpotsPollCount >= WEAKSPOT_CFG.POLL_MAX) {
       clearInterval(window._weakSpotsPollTimer);
       window._weakSpotsPollTimer = null;
-      // Only re-render if still on the Repertoire tab with the panel expanded.
+      window._weakSpotsHumanCache = null; // recompute against the finished index
       if (repertoireMode && window._weakSpotsOpen) renderRepertoirePanel();
     }
   }, WEAKSPOT_CFG.POLL_MS);
 }
 
-// Compute all categories. A/B need no PMI; C/D require weakSpotsIndexReady().
-// Recomputed on every render (cheap; no caching for v1).
-function computeWeakSpots() {
-  const pmiReady = weakSpotsIndexReady();
-  const A = [], B = [], C = [], D = [];
-  const studies = getRepertoireConfig();
+// score = (wins + ½ draws) / total — 50% is break-even.
+function weakSpotScore(w, l, d) {
+  const n = w + l + d;
+  return n ? (w + 0.5 * d) / n : 0;
+}
 
-  // Invert allMistakes → Map<gameId, mistakes[]> once, for O(1) per-game
-  // downstream lookup (C). Genuine post-book errors only — the trie-filter pass
-  // already removed book-move mistakes (those became deviations), so what
-  // remains at/after a leaf is a real middlegame error. Skip synthetic/test ids.
-  let mistakesByGame = null;
-  if (pmiReady) {
-    mistakesByGame = new Map();
-    for (const m of allMistakes) {
-      if (m.type !== 'mistake') continue;
-      if (!m.gameId || m.gameId.startsWith('_')) continue;
-      if (!mistakesByGame.has(m.gameId)) mistakesByGame.set(m.gameId, []);
-      mistakesByGame.get(m.gameId).push(m);
+// Colored score pill (winRateColor maps 0..1 red→green; a weak <50% reads red/orange).
+function weakSpotScoreBadge(score) {
+  return `<span style="display:inline-block;padding:1px 6px;border-radius:8px;font-size:11px;font-weight:600;color:#fff;background:${winRateColor(score)};font-variant-numeric:tabular-nums;">${Math.round(score * 100)}%</span>`;
+}
+
+// ── HUMAN lens: scan positionMoveIndex for MOVE EDGES with a bad real-game score.
+// Each (posKey → move) entry is one edge: the games that played that move from
+// that position, with user-perspective results. One pass over PMI, memoized by
+// pmiGameCount so unrelated re-renders (toggles, folds) don't rescan. Returns
+// null when the index isn't ready yet. ──
+function computeHumanWeakSpots() {
+  if (!weakSpotsIndexReady()) return null;
+  const cache = window._weakSpotsHumanCache;
+  if (cache && cache.count === pmiGameCount) return cache.rows;
+
+  const applyShare = allGames.length >= WEAKSPOT_CFG.SHARE_GUARD;
+  const shareCap = Math.floor(allGames.length * WEAKSPOT_CFG.MAX_SHARE);
+  const sideToMove = (posKey) => posKey.split(' ')[1] === 'b' ? 'black' : 'white';
+  const rows = [];
+  for (const [posKey, moveMap] of positionMoveIndex) {
+    const toMove = sideToMove(posKey);
+    for (const ms of moveMap.values()) {
+      // ms.games = the games that played this exact move from this position.
+      let w = 0, l = 0, d = 0, white = 0, black = 0;
+      for (const g of ms.games) {
+        if (g.result === 'win') w++;
+        else if (g.result === 'loss') l++;
+        else d++;
+        if (g.userColor === 'black') black++; else white++;
+      }
+      const total = w + l + d;
+      if (total < WEAKSPOT_CFG.MIN_GAMES) continue;               // edge too rare
+      if (applyShare && total > shareCap) continue;              // ~whole opening, not specific
+      const score = weakSpotScore(w, l, d);
+      if (score >= WEAKSPOT_CFG.SCORE_THRESH) continue;
+      const userColor = black > white ? 'black' : 'white';
+      if (toMove === userColor) continue; // only opponent replies you handle badly, not your own moves
+      rows.push({ posKey, san: ms.san, uci: ms.uci, w, l, d, total, score, userColor });
     }
   }
+  rows.sort((a, b) => (a.score - b.score) || (b.total - a.total)); // worst first, then volume
+  const capped = rows.slice(0, WEAKSPOT_CFG.MAX_ROWS);
+  // Name only the few we show (lookupOpeningName scans allGames per call).
+  for (const r of capped) r.opening = lookupOpeningName(r.posKey) || 'Unknown opening';
+  window._weakSpotsHumanCache = { count: pmiGameCount, rows: capped };
+  return capped;
+}
 
-  // ── Variation-derived categories (A, C, D) — only studies with a TODO list ──
-  for (const s of studies) {
+// ── BOT lens: practice-drill weak spots from practiceScoreboard, bucketed per
+// preset. A (position, preset) with ≥ MIN_GAMES attempts and a bad score.
+// Preset-tagged positions are TODO leaves (that's how they're created), so we can
+// resolve (studyId, vIdx) to launch a drill; untagged filter-practice entries
+// bucket as 'practice' and route to the explorer instead. ──
+function computeBotWeakSpots() {
+  const sb = gistData?.practiceScoreboard;
+  if (!sb) return [];
+  const leafIndex = new Map(); // leafKey → {studyId, vIdx, lineSan, openingName}
+  for (const s of getRepertoireConfig()) {
     const list = getTodoList(s.id);
     if (!list || !list.variations) continue;
     list.variations.forEach((v, vIdx) => {
-      const leafKey = v.leafKey;
-      const stats = todoPresetStats(leafKey);
-      const rec = pmiReady ? weakSpotLeafRecord(leafKey)
-                           : { w: 0, l: 0, d: 0, total: 0, gameIds: new Set() };
-      const label = formatTodoLineSan(v.lineSan) || v.openingName || 'line';
-
-      // A. FAILING IN PRACTICE — any preset with enough attempts and low win-rate.
-      // Action targets the weakest attempted preset (lowest rate).
-      let worstPreset = null, worstRate = 1;
-      for (const pk of REP_TODO_PRESET_ORDER) {
-        const st = stats[pk];
-        if (st.n >= WEAKSPOT_CFG.PRACTICE_MIN_ATTEMPTS && st.rate < WEAKSPOT_CFG.PRACTICE_FAIL_RATE) {
-          if (st.rate < worstRate) { worstRate = st.rate; worstPreset = pk; }
-        }
-      }
-      if (worstPreset) {
-        A.push({ cat: 'A', studyId: s.id, vIdx, leafKey, label, studyName: s.name,
-          preset: worstPreset, rate: worstRate, presetStats: stats[worstPreset],
-          rec, freq: rec.total });
-      }
-
-      // C. BOTCHING THE MIDDLEGAME — reach the leaf fine but blunder after.
-      if (pmiReady && rec.gameIds.size >= WEAKSPOT_CFG.MIDGAME_MIN_GAMES) {
-        const leafPly = Array.isArray(v.lineUci) ? v.lineUci.length : 0;
-        const boundary = leafPly - WEAKSPOT_CFG.DOWNSTREAM_MARGIN;
-        let downstream = 0;
-        for (const gid of rec.gameIds) {
-          const ms = mistakesByGame.get(gid);
-          if (!ms) continue;
-          for (const m of ms) if (m.movePly >= boundary) downstream++;
-        }
-        const rate = downstream / rec.gameIds.size;
-        if (downstream >= 1 && rate >= WEAKSPOT_CFG.MIDGAME_MIN_RATE) {
-          // Drill the lowest not-yet-won preset (fall back to hard).
-          const done = todoCompletedPresets(leafKey);
-          const preset = REP_TODO_PRESET_ORDER.find(pk => !done.has(pk)) || 'hard';
-          C.push({ cat: 'C', studyId: s.id, vIdx, leafKey, label, studyName: s.name,
-            preset, downstream, rate, rec, freq: rec.total });
-        }
-      }
-
-      // D. NEVER PRACTICED BUT COMMON — no scoreboard entries at all, weighted by
-      // how often the leaf actually appears in your games.
-      const sb = gistData?.practiceScoreboard?.[leafKey];
-      const neverPracticed = !sb || !sb.length;
-      if (pmiReady && neverPracticed && rec.total >= WEAKSPOT_CFG.UNPRACTICED_MIN_FREQ) {
-        D.push({ cat: 'D', studyId: s.id, vIdx, leafKey, label, studyName: s.name,
-          preset: 'easy', rec, freq: rec.total });
-      }
+      if (!leafIndex.has(v.leafKey)) leafIndex.set(v.leafKey, { studyId: s.id, vIdx, lineSan: v.lineSan, openingName: v.openingName });
     });
   }
-
-  // ── B. OVERDUE IN YOUR BOOK — deviations with a non-new, past-due FSRS card.
-  // New (never-reviewed) cards aren't "overdue"; they already surface via the
-  // existing Deviations "Review Due" flow, so they're excluded here.
-  const today = localDateString();
-  for (const dev of repertoireDeviations) {
-    const pid = posId(dev); // r_<positionKey>
-    const card = getCardForPosition(pid);
-    if (card.state === FSRS_STATE.new) continue;
-    if (!card.due || card.due >= today) continue;
-    B.push({ cat: 'B', positionKey: dev.positionKey, due: card.due,
-      gameCount: dev.gameCount || 0, label: dev.opening || 'Deviation',
-      move: dev.repertoireMove?.san || '', dev });
-  }
-
-  // ── Ranking within each category ──
-  A.sort((x, y) => (x.rate - y.rate) || (y.freq - x.freq));   // rate asc, freq desc
-  C.sort((x, y) => (y.rate - x.rate) || (y.downstream - x.downstream)); // per-game desc
-  B.sort((x, y) => (x.due < y.due ? -1 : x.due > y.due ? 1 : 0) || (y.gameCount - x.gameCount));
-  D.sort((x, y) => (y.freq - x.freq));                        // frequency desc
-
-  // ── GLOBAL SUMMARY — legible fixed priority (tunable in one place):
-  //   A (fail-in-practice) > C (botch-middlegame) > B (overdue) > D (unpracticed).
-  // Dedup variation rows by leafKey so one line doesn't appear twice (keeps the
-  // higher-priority reason). Deviations (B) have no leafKey and are never deduped
-  // against variations.
-  const SUMMARY_ORDER = [...A, ...C, ...B, ...D];
-  const seenLeaf = new Set();
-  const summary = [];
-  for (const row of SUMMARY_ORDER) {
-    if (row.leafKey) {
-      if (seenLeaf.has(row.leafKey)) continue;
-      seenLeaf.add(row.leafKey);
+  const rows = [];
+  for (const posKey of Object.keys(sb)) {
+    const entries = sb[posKey];
+    if (!entries || !entries.length) continue;
+    const byPreset = {};
+    for (const e of entries) {
+      const pk = (e.preset && REP_TODO_PRESETS[e.preset]) ? e.preset : 'practice';
+      (byPreset[pk] = byPreset[pk] || []).push(e);
     }
-    summary.push(row);
-    if (summary.length >= WEAKSPOT_CFG.SUMMARY_TOP_N) break;
+    const meta = leafIndex.get(posKey);
+    for (const pk of Object.keys(byPreset)) {
+      const bucket = byPreset[pk];
+      if (bucket.length < WEAKSPOT_CFG.MIN_GAMES) continue;
+      let w = 0, l = 0, d = 0;
+      for (const e of bucket) {
+        if (e.result === 'win') w++;
+        else if (e.result === 'loss') l++;
+        else d++;
+      }
+      const score = weakSpotScore(w, l, d);
+      if (score >= WEAKSPOT_CFG.SCORE_THRESH) continue;
+      const label = meta ? (formatTodoLineSan(meta.lineSan) || meta.openingName || 'line')
+                         : (lookupOpeningName(posKey) || 'Practiced position');
+      rows.push({ posKey, preset: pk, w, l, d, total: bucket.length, score, label,
+        studyId: meta ? meta.studyId : null, vIdx: meta ? meta.vIdx : null });
+    }
   }
-
-  return { A, B, C, D, summary, pmiReady };
+  rows.sort((a, b) => (a.score - b.score) || (b.total - a.total));
+  return rows.slice(0, WEAKSPOT_CFG.MAX_ROWS);
 }
 
 function toggleWeakSpots() {
@@ -26557,143 +26515,119 @@ function toggleWeakSpots() {
   if (repertoireMode) renderRepertoirePanel();
 }
 
-// One summary/section row. `action` is the inline onclick; `reason` the HTML
-// explaining the weakness + the numbers behind it.
-function renderWeakSpotRow(label, reason, btnLabel, action, accent) {
-  return `<div style="display:flex;align-items:flex-start;gap:6px;padding:5px 0;border-top:1px solid var(--border);">
+function setWeakSpotsMode(mode) {
+  window._weakSpotsMode = (mode === 'bot') ? 'bot' : 'human';
+  if (repertoireMode) renderRepertoirePanel();
+}
+
+// Open a weak-spot position in the opening explorer (mirrors exploreTodoGap).
+// posKey has counters stripped; reconstruct a full FEN. Orient to the user's side.
+function openWeakSpotPosition(posKey, userColor) {
+  const fullFen = posKey + ' 0 1';
+  let chess;
+  try { chess = new Chess(fullFen); } catch (_) { return; }
+  if (repertoireDrillMode) exitRepertoireDrill();
+  if (repertoireMode) toggleRepertoireMode();
+  openingFilterFen = posKey;
+  filterChess = chess;
+  filterMoveHistory = [filterChess.fen()];
+  filterMoveIdx = 0;
+  savedFilterOrientation = userColor === 'black' ? 'black' : 'white';
+  enterOpeningFilter();
+}
+
+// One weak-spot row with a hover board preview (fullFen). action = button onclick.
+function weakSpotRowHtml(fullFen, title, reason, btnLabel, action, accent) {
+  const fen = fullFen.replace(/'/g, "\\'");
+  return `<div style="padding:6px 8px;margin:2px 0;border:1px solid var(--border);border-radius:6px;font-size:12px;display:flex;align-items:flex-start;gap:6px;" onmouseenter="showPositionPreview('${fen}',event)" onmouseleave="hidePositionPreview()">
     <div style="flex:1;min-width:0;">
-      <div style="font-size:12px;font-weight:600;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${label}</div>
-      <div style="font-size:10px;color:var(--text-muted);margin-top:1px;">${reason}</div>
+      <div style="display:flex;align-items:center;gap:6px;overflow:hidden;">${title}</div>
+      <div style="font-size:10px;color:var(--text-muted);margin-top:2px;">${reason}</div>
     </div>
-    <button class="btn btn-ghost btn-sm" onclick="${action}" style="font-size:10px;padding:2px 8px;flex-shrink:0;${accent ? `color:${accent};` : ''}">${btnLabel}</button>
+    <button class="btn btn-ghost btn-sm" onclick="${action}" style="font-size:10px;padding:2px 8px;flex-shrink:0;color:${accent};">${btnLabel}</button>
   </div>`;
 }
 
 function renderWeakSpotsPanel() {
-  const studies = getRepertoireConfig();
-  // Only surface the panel when there's something to analyze: a generated TODO
-  // list (variation signals) or any deviation (FSRS signals).
-  const hasData = studies.some(s => getTodoList(s.id)) || repertoireDeviations.length > 0;
-  if (!hasData) return '';
+  // Human lens needs real games; Bot lens needs practice data. Surface if either.
+  const hasScoreboard = gistData?.practiceScoreboard && Object.keys(gistData.practiceScoreboard).length > 0;
+  if (!(allGames.length > 0 || hasScoreboard)) return '';
 
   const open = !!window._weakSpotsOpen;
-  const ws = computeWeakSpots();
-  const { A, B, C, D, summary, pmiReady } = ws;
+  const mode = (window._weakSpotsMode === 'bot') ? 'bot' : 'human';
+  const rows = mode === 'human' ? computeHumanWeakSpots() : computeBotWeakSpots();
+  const analyzing = mode === 'human' && rows === null;
+  const count = rows ? rows.length : 0;
 
-  // One-line header summary. A/B are always available; C/D depend on the index.
-  const parts = [];
-  if (A.length) parts.push(`${A.length} failing`);
-  if (B.length) parts.push(`${B.length} overdue`);
-  if (C.length) parts.push(`${C.length} middlegame`);
-  if (D.length) parts.push(`${D.length} unpracticed`);
   let summaryText;
-  if (parts.length) summaryText = parts.join(' · ');
-  else if (pmiReady) summaryText = 'no weak spots — nice';
-  else summaryText = 'analyzing your games…';
-  if (!pmiReady && parts.length) summaryText += ' · analyzing…';
-
-  const anyIssues = A.length || B.length || C.length || D.length;
-  // Only claim "all clear" (green ✓) once the index is ready and truly nothing
-  // is flagged; while still analyzing, stay neutral so we don't imply clean.
-  const allClear = pmiReady && !anyIssues;
-  const headerIcon = allClear ? '✓' : '⚠';
-  const headerColor = allClear ? 'var(--green)' : (anyIssues ? 'var(--yellow)' : 'var(--text-muted)');
+  if (analyzing) summaryText = 'analyzing your games…';
+  else if (count === 0) summaryText = 'none found';
+  else summaryText = `${count} weak ${count === 1 ? 'spot' : 'spots'}`;
+  const headerColor = count > 0 ? 'var(--yellow)' : (analyzing ? 'var(--text-muted)' : 'var(--green)');
+  const headerIcon = count > 0 ? '⚠' : (analyzing ? '⚠' : '✓');
 
   let html = `<div style="padding:8px 12px;border-bottom:1px solid var(--border);">`;
   html += `<div onclick="toggleWeakSpots()" title="${open ? 'Fold' : 'Unfold'} weak spots" style="display:flex;align-items:center;gap:6px;cursor:pointer;min-height:24px;">
     <span style="font-size:10px;color:var(--text-muted);width:10px;flex-shrink:0;">${open ? '▾' : '▸'}</span>
     <span style="flex-shrink:0;color:${headerColor};">${headerIcon}</span>
     <span style="flex:1;min-width:0;font-size:12px;font-weight:600;color:var(--text-primary);">Weak spots</span>
-    <span style="font-size:10px;color:var(--text-muted);flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60%;">${summaryText}</span>
+    <span style="font-size:10px;color:var(--text-muted);flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:55%;">${mode === 'bot' ? '🤖 ' : '👤 '}${summaryText}</span>
   </div>`;
 
   if (!open) { html += `</div>`; return html; }
 
-  // Expanded — kick off the lazy index build (idempotent) so C/D can populate.
-  if (!pmiReady) ensureWeakSpotsIndex();
+  // Human/Bot lens toggle (reuses .filter-chip).
+  html += `<div style="display:flex;gap:4px;margin:8px 0 4px;">
+    <button class="filter-chip${mode === 'human' ? ' active' : ''}" style="padding:2px 12px;font-size:10px;" onclick="setWeakSpotsMode('human')" title="Score vs human opponents in your real games">👤 Human</button>
+    <button class="filter-chip${mode === 'bot' ? ' active' : ''}" style="padding:2px 12px;font-size:10px;" onclick="setWeakSpotsMode('bot')" title="Score vs the bot in practice drills">🤖 Bot</button>
+  </div>`;
+  html += `<div style="font-size:10px;color:var(--text-muted);margin-bottom:6px;">${mode === 'human'
+    ? `Opponent replies at recurring positions (≥${WEAKSPOT_CFG.MIN_GAMES} games) that you score below 50% against.`
+    : `Positions you've practiced ≥${WEAKSPOT_CFG.MIN_GAMES} times and score below 50% against the bot.`}</div>`;
 
-  html += `<div style="margin-top:8px;">`;
-
-  // ── GLOBAL SUMMARY: top priorities merging all categories by fixed order. ──
-  if (summary.length) {
-    html += `<div style="font-size:10px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;margin-bottom:2px;">Top priorities</div>`;
-    for (const r of summary) {
-      if (r.cat === 'B') {
-        const reason = `Overdue in your book · due ${r.due}${r.gameCount ? ` · seen ${r.gameCount}×` : ''}`;
-        const label = `${escHtml(r.label)}${r.move ? ` — ${escHtml(r.move)}` : ''}`;
-        html += renderWeakSpotRow(label, reason,
-          'Review', `showRepertoireDeviation('${r.positionKey.replace(/'/g, "\\'")}')`, 'var(--accent)');
-      } else {
-        let reason;
-        if (r.cat === 'A') reason = `Failing at ${REP_TODO_PRESETS[r.preset].label} (${r.presetStats.wins}/${r.presetStats.n})${r.freq ? ` · ${r.rec.w}-${r.rec.l}-${r.rec.d} real` : ''}`;
-        else if (r.cat === 'C') reason = `Botching the middlegame · ${r.downstream} mistakes over ${r.rec.gameIds.size} games`;
-        else reason = `Never practiced · appears in ${r.freq} games`;
-        html += renderWeakSpotRow(escHtml(r.label), reason,
-          'Drill', `startTodoFromList('${r.studyId}', ${r.vIdx}, '${r.preset}')`, 'var(--green)');
+  if (mode === 'human') {
+    if (analyzing) {
+      ensureWeakSpotsIndex();
+      html += `<div class="hint" style="font-size:11px;padding:2px 0;">Analyzing your games…</div>`;
+    } else if (!rows.length) {
+      html += `<div class="hint" style="font-size:11px;padding:2px 0;">No moves below 50% — nice.</div>`;
+    } else {
+      // Group by opening (mirrors the Deviations list).
+      const byOpening = new Map();
+      for (const r of rows) { if (!byOpening.has(r.opening)) byOpening.set(r.opening, []); byOpening.get(r.opening).push(r); }
+      for (const [opening, rs] of byOpening) {
+        html += `<div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin:6px 0 2px;">${escHtml(opening)} (${rs.length})</div>`;
+        for (const r of rs) {
+          // Edge = an opponent reply you score badly against. Study opens the
+          // position so the explorer's per-move result bars show the full split.
+          const title = `${weakSpotScoreBadge(r.score)}<span style="font-size:12px;color:var(--text-primary);">They play <strong>${escHtml(r.san)}</strong></span>`;
+          const reason = `${r.w}-${r.l}-${r.d} over ${r.total} games`;
+          html += weakSpotRowHtml(r.posKey + ' 0 1', title, reason, 'Study',
+            `openWeakSpotPosition('${r.posKey.replace(/'/g, "\\'")}','${r.userColor}')`, 'var(--accent)');
+        }
+      }
+    }
+  } else {
+    if (!rows.length) {
+      html += `<div class="hint" style="font-size:11px;padding:2px 0;">No practiced positions below 50% yet.</div>`;
+    } else {
+      for (const r of rows) {
+        const presetLabel = (r.preset === 'practice') ? 'Practice' : REP_TODO_PRESETS[r.preset].label;
+        const title = `${weakSpotScoreBadge(r.score)}<span style="font-size:12px;font-weight:600;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(r.label)}</span>`;
+        const reason = `${presetLabel} · ${r.w}-${r.l}-${r.d} over ${r.total} attempts`;
+        const canDrill = r.studyId && r.preset !== 'practice';
+        const action = canDrill
+          ? `startTodoFromList('${r.studyId}', ${r.vIdx}, '${r.preset}')`
+          : `openWeakSpotPosition('${r.posKey.replace(/'/g, "\\'")}','${r.posKey.split(' ')[1] === 'b' ? 'black' : 'white'}')`;
+        html += weakSpotRowHtml(r.posKey + ' 0 1', title, reason, canDrill ? `Drill ${presetLabel}` : 'Study', action, 'var(--green)');
       }
     }
   }
 
-  // ── Per-category sections (priority order A → C → B → D). ──
-
-  // A. Failing in practice
-  if (A.length) {
-    html += `<div style="margin-top:10px;"><div style="font-size:10px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Failing in practice</div>`;
-    for (const r of A) {
-      const reason = `${REP_TODO_PRESETS[r.preset].label}: ${r.presetStats.wins}/${r.presetStats.n} wins (${Math.round(r.rate * 100)}%)${r.freq ? ` · ${weakSpotRecordBadgeText(r.rec)} real` : ''}`;
-      html += renderWeakSpotRow(escHtml(r.label), reason,
-        `Drill ${REP_TODO_PRESETS[r.preset].label}`, `startTodoFromList('${r.studyId}', ${r.vIdx}, '${r.preset}')`, 'var(--green)');
-    }
-    html += `</div>`;
-  }
-
-  // C. Botching the middlegame
-  if (C.length) {
-    html += `<div style="margin-top:10px;"><div style="font-size:10px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Botching the middlegame</div>`;
-    for (const r of C) {
-      const reason = `${r.downstream} downstream mistakes over ${r.rec.gameIds.size} games (${r.rate.toFixed(1)}/game) · ${weakSpotRecordBadgeText(r.rec)} real`;
-      html += renderWeakSpotRow(escHtml(r.label), reason,
-        `Drill ${REP_TODO_PRESETS[r.preset].label}`, `startTodoFromList('${r.studyId}', ${r.vIdx}, '${r.preset}')`, 'var(--green)');
-    }
-    html += `</div>`;
-  } else if (!pmiReady) {
-    html += `<div style="margin-top:10px;font-size:11px;color:var(--text-muted);">Analyzing your games for middlegame weaknesses…</div>`;
-  }
-
-  // B. Overdue in your book
-  if (B.length) {
-    html += `<div style="margin-top:10px;"><div style="font-size:10px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Overdue in your book</div>`;
-    for (const r of B) {
-      const label = `${escHtml(r.label)}${r.move ? ` — ${escHtml(r.move)}` : ''}`;
-      const reason = `Due ${r.due}${r.gameCount ? ` · seen ${r.gameCount}×` : ''}`;
-      html += renderWeakSpotRow(label, reason,
-        'Review', `showRepertoireDeviation('${r.positionKey.replace(/'/g, "\\'")}')`, 'var(--accent)');
-    }
-    html += `</div>`;
-  }
-
-  // D. Never practiced but common
-  if (D.length) {
-    html += `<div style="margin-top:10px;"><div style="font-size:10px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Never practiced but common</div>`;
-    for (const r of D) {
-      const reason = `Appears in ${r.freq} of your games · never drilled`;
-      html += renderWeakSpotRow(escHtml(r.label), reason,
-        'Drill Easy', `startTodoFromList('${r.studyId}', ${r.vIdx}, 'easy')`, 'var(--green)');
-    }
-    html += `</div>`;
-  } else if (!pmiReady) {
-    html += `<div style="margin-top:6px;font-size:11px;color:var(--text-muted);">Analyzing your games for common unpracticed lines…</div>`;
-  }
-
-  html += `</div></div>`;
+  html += `</div>`;
   return html;
 }
 
-// Text form of a leaf W-L-D record for inline reasons.
-function weakSpotRecordBadgeText(rec) {
-  if (!rec || !rec.total) return '0-0-0';
-  return `${rec.w}-${rec.l}-${rec.d}`;
-}
 
 function toggleRepConfigSection() {
   const configFoldable = !!(lichessToken && getRepertoireConfig().length);
