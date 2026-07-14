@@ -153,21 +153,21 @@
     position: absolute;
     top: 50%; left: calc(100% + 12px); transform: translateY(-50%);
     z-index: 60;
-    width: 240px;
+    width: 264px;
     background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px;
     padding: 12px 14px;
     box-shadow: 0 4px 20px rgba(0,0,0,0.35);
     pointer-events: auto;
   }
-  .note-panel h4 { font-size: 12px; font-weight: 700; color: var(--text-secondary); margin: 0 0 8px; display: flex; align-items: center; justify-content: space-between; }
+  .note-panel h4 { font-size: 13px; font-weight: 700; color: var(--text-secondary); margin: 0 0 8px; display: flex; align-items: center; justify-content: space-between; }
   .note-panel .note-view-text {
-    font-size: 12px; color: var(--text-primary); line-height: 1.5;
+    font-size: 13px; color: var(--text-primary); line-height: 1.55;
     white-space: pre-wrap; word-break: break-word;
   }
   .note-panel textarea {
     width: 100%; min-height: 60px; max-height: 150px; resize: vertical;
     background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border);
-    border-radius: 6px; padding: 8px; font-family: 'DM Sans', sans-serif; font-size: 12px;
+    border-radius: 6px; padding: 8px; font-family: 'DM Sans', sans-serif; font-size: 13px;
     box-sizing: border-box;
   }
   .note-panel textarea:focus { outline: none; border-color: var(--accent); }
@@ -175,11 +175,39 @@
   .note-panel .note-hint { font-size: 10px; color: var(--text-muted); margin-top: 6px; }
   .note-panel .note-toolbar { display: flex; gap: 4px; margin-top: 6px; }
   .note-panel .note-toolbar .btn-inline { margin-left: 0; font-size: 10px; }
+  /* Per-note "draw arrow interval" setting row in the edit panel */
+  .note-setting-row {
+    display: flex; align-items: center; gap: 8px; justify-content: space-between;
+    margin-top: 8px; padding: 6px 8px;
+    background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px;
+    font-size: 11px; color: var(--text-secondary);
+  }
+  .note-setting-row label { flex: 1; line-height: 1.3; cursor: default; }
+  .note-setting-row input[type="number"] {
+    width: 68px; flex: none; background: var(--bg-card); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: 5px; padding: 4px 6px;
+    font-family: 'DM Sans', sans-serif; font-size: 12px; box-sizing: border-box;
+  }
+  .note-setting-row input[type="number"]:focus { outline: none; border-color: var(--accent); }
+  /* Staggered reveal: only the newest note arrow/circle fades in each step.
+     `from` at opacity 0; the unspecified `to` frame falls back to the element's
+     own opacity attribute (0.85), so the fade settles at the right value. */
+  @keyframes noteAnnotAppear { from { opacity: 0; } }
+  #arrowSvg .note-annot-appear { animation: noteAnnotAppear 0.28s ease-out; }
+  /* Task 3: on wide viewports there's slack between the board and the right
+     panel, so let the note panel grow a little wider with a larger reading
+     font. Narrow layouts keep the compact base sizes above. */
+  @media (min-width: 1400px) {
+    .note-panel { width: 320px; }
+    .note-panel .note-view-text { font-size: 14px; }
+    .note-panel .note-variation { font-size: 13px; }
+    .note-panel textarea { max-height: 220px; }
+  }
   /* IMP-007: clickable variation lines inside rendered note view */
   .note-variation {
     display: inline;
     font-family: 'JetBrains Mono', monospace;
-    font-size: 12px;
+    font-size: 13px;
     line-height: 1.6;
   }
   .note-move-num {
@@ -1422,8 +1450,9 @@
     .feedback-text { font-size: 12px; }
     .info-card { padding: 10px 12px; }
     .note-panel { width: auto; left: 8px; right: 8px; top: auto; bottom: 8px; transform: none; }
-    .note-panel textarea { min-height: 50px; font-size: 13px; }
-    .note-panel h4 { font-size: 11px; }
+    .note-panel textarea { min-height: 50px; font-size: 14px; }
+    .note-panel h4 { font-size: 12px; }
+    .note-panel .note-view-text { font-size: 14px; }
     .info-card h4 { margin-bottom: 6px; }
     .engine-line { padding: 10px; }
 
@@ -1840,7 +1869,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Weak-Spots Dashboard is now MOVE-CONDITIONAL: the unit is a move edge, not a position — at a recurring position, the specific move that leads to a bad win-rate (e.g. "They play Bb4 → you score 19% over 8 games", vs a fine score against their other replies). Each positionMoveIndex (posKey → move) entry is an edge with its own user-perspective W-L-D; the ≥5-game gate is per-edge (that move needs 5 games for its rate to mean anything). Score = (W+½D)/N; below 50% = weak. Moves are opponent replies you handle badly ("They play X"); your own move choices are excluded. Session-local Human/Bot toggle (window._weakSpotsMode): HUMAN scans PMI edges (grouped by opening, near-universal edges >50% of games gated out on ≥20-game libraries, memoized by pmiGameCount, lazy PMI build via ensureWeakSpotsIndex poll 200ms/12s), Study → opening explorer at the position so the per-move result bars show the full split; BOT stays position+preset from practiceScoreboard (practice records no per-move split), Drill → startTodoFromList else Study. Rows show a winRateColor score pill, move + whose-move, W-L-D over N, hover board preview; worst-first, cap 15, thresholds in WEAKSPOT_CFG. Read-only (no store, no drill machinery, no mode flag). Replaces the position-aggregate "branching point" version. Earlier — Analysis Mode note / 🧠 flashcard authoring + paste-FEN + scratch entry: (1) 📝 #btnAnalysisNote in the analysis-panel header (N key now targets it, not the display:none #positionNav btnNote) opens the note panel on the live analysis position — getCurrentNoteFen's analysisMode branch already resolved analysisEngine.fen(), so note edit/save and 🧠 Make/Remove flashcard work unchanged; updateNoteButton mirrors .has-note onto it. This is the recommended way to confirm/find a plan with the engine/Maia/DB before enrolling it. (2) Paste-FEN (#analysisFenInput / setAnalysisFromFen): validates, no-ops on an exact re-paste, confirms an unsaved note edit, then re-roots the tree at the pasted position; syncAnalysisFenInput (called from renderAnalysisTree) keeps the field showing the current FEN so it doubles as copy-current-FEN. (3) 'Analyze a position' (#btnAnalyzeScratch in #emptyMsg / enterAnalysisBlank): enter Analysis Mode from the empty board with no loaded mistake — no ninth mode flag (rides analysisMode with analysisSavedState={blank:true}); exit restores the empty state.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Notes polish: (1) per-note "reveal arrows in draw order" interval (#noteDrawInterval, ms, 0=off, authoring default 750ms via NOTE_DEFAULT_DRAW_INTERVAL — new/legacy notes pre-fill it, explicit saved value incl. 0 wins, reveal reads the saved value literally so legacy notes don't animate until re-saved) — when >0 and a note has >1 arrow, note-view reveals arrows one per interval in stored draw order (first immediate, rest staggered), each connected same-color circle (arrow destination sits on it) fading in with its arrow; unconnected circles show immediately; ↻ Replay in view mode; state via noteReveal/noteRevealTimer + cancelNoteReveal() at every noteArrows-reset site; .note-annot-appear fades only the newest element each step. (2) note arrow/circle opacity 0.55 → 0.85. (3) bigger note panel + reading font (base width 240→264, fonts 12→13; ≥1400px width→320 / text→14 / textarea max-height→220; mobile view-text→14). Earlier — Weak-Spots Dashboard is now MOVE-CONDITIONAL: the unit is a move edge, not a position — at a recurring position, the specific move that leads to a bad win-rate (e.g. "They play Bb4 → you score 19% over 8 games", vs a fine score against their other replies). Each positionMoveIndex (posKey → move) entry is an edge with its own user-perspective W-L-D; the ≥5-game gate is per-edge (that move needs 5 games for its rate to mean anything). Score = (W+½D)/N; below 50% = weak. Moves are opponent replies you handle badly ("They play X"); your own move choices are excluded. Session-local Human/Bot toggle (window._weakSpotsMode): HUMAN scans PMI edges (grouped by opening, near-universal edges >50% of games gated out on ≥20-game libraries, memoized by pmiGameCount, lazy PMI build via ensureWeakSpotsIndex poll 200ms/12s), Study → opening explorer at the position so the per-move result bars show the full split; BOT stays position+preset from practiceScoreboard (practice records no per-move split), Drill → startTodoFromList else Study. Rows show a winRateColor score pill, move + whose-move, W-L-D over N, hover board preview; worst-first, cap 15, thresholds in WEAKSPOT_CFG. Read-only (no store, no drill machinery, no mode flag). Replaces the position-aggregate "branching point" version. Earlier — Analysis Mode note / 🧠 flashcard authoring + paste-FEN + scratch entry: (1) 📝 #btnAnalysisNote in the analysis-panel header (N key now targets it, not the display:none #positionNav btnNote) opens the note panel on the live analysis position — getCurrentNoteFen's analysisMode branch already resolved analysisEngine.fen(), so note edit/save and 🧠 Make/Remove flashcard work unchanged; updateNoteButton mirrors .has-note onto it. This is the recommended way to confirm/find a plan with the engine/Maia/DB before enrolling it. (2) Paste-FEN (#analysisFenInput / setAnalysisFromFen): validates, no-ops on an exact re-paste, confirms an unsaved note edit, then re-roots the tree at the pasted position; syncAnalysisFenInput (called from renderAnalysisTree) keeps the field showing the current FEN so it doubles as copy-current-FEN. (3) 'Analyze a position' (#btnAnalyzeScratch in #emptyMsg / enterAnalysisBlank): enter Analysis Mode from the empty board with no loaded mistake — no ninth mode flag (rides analysisMode with analysisSavedState={blank:true}); exit restores the empty state.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2363,6 +2392,23 @@ let hintMove = null;             // frozen UCI string of the best move when hint
 let hintArrow = null;            // { from, to } for hint arrow drawn on second press
 let noteArrows = [];             // [{from, to, color}] arrows from saved note
 let noteCircles = [];            // [{square, color}] circles from saved note
+// Staggered reveal for the per-note "draw arrow interval" setting. null = show
+// all note annotations at once (default). While a reveal is in progress:
+//   noteReveal = { arrowsShown:int, circleStep:number[], justArrow:int }
+//   noteRevealTimer holds the pending setTimeout handle (module-level).
+// - noteArrows[0 .. arrowsShown-1] are visible (draw order).
+// - circleStep[i] is the arrow index a note circle waits for, or -1 to show
+//   immediately (a circle is "connected" to the first same-color arrow whose
+//   destination sits on it). Circle i shows when circleStep[i]===-1 or
+//   arrowsShown > circleStep[i] — i.e. together with its arrow.
+// - justArrow is the arrow index revealed on the latest step (fades in);
+//   its connected circle fades with it. -1 → nothing to fade this pass.
+let noteReveal = null;
+let noteRevealTimer = null;
+// Authoring default for a note's draw-arrow interval (ms) when none is saved
+// yet — so staggered reveal is on out of the box for new notes. A note where
+// the user explicitly set an interval (including 0 = off) keeps that value.
+const NOTE_DEFAULT_DRAW_INTERVAL = 750;
 let notePanelOpen = false;       // true when note panel is visible
 let noteEditMode = false;        // true when note panel is in edit mode (vs read-only view)
 // IMP-007: snapshot of the FEN the note belongs to. Captured when the panel
@@ -23072,6 +23118,7 @@ function clearArrows() {
   bestMoveArrow = null;
   analysisArrow = null;
   moveClassBadge = null;
+  cancelNoteReveal();
   noteArrows = [];
   noteCircles = [];
   analysisPvArrows = [];
@@ -23127,7 +23174,7 @@ function renderArrows() {
     const headWidth = shaftWidth * 3.5;
     const headLength = headWidth * 0.75;
 
-    const drawOne = (from, to, color, opacity, scale) => {
+    const drawOne = (from, to, color, opacity, scale, extraClass) => {
       const start = sqCenter(from);
       const end = sqCenter(to);
       if (!start || !end) return;
@@ -23148,8 +23195,9 @@ function renderArrows() {
       const p3x = end.x - hl * Math.cos(angle) - (hw / 2) * Math.sin(angle);
       const p3y = end.y - hl * Math.sin(angle) + (hw / 2) * Math.cos(angle);
 
+      const clsAttr = extraClass ? ` class="${extraClass}"` : '';
       html += `
-        <g opacity="${opacity}">
+        <g opacity="${opacity}"${clsAttr}>
           <line x1="${start.x}" y1="${start.y}" x2="${shaftEndX}" y2="${shaftEndY}"
                 stroke="${color}" stroke-width="${sw}" stroke-linecap="butt" />
           <polygon points="${p1x},${p1y} ${p2x},${p2y} ${p3x},${p3y}" fill="${color}" />
@@ -23195,9 +23243,14 @@ function renderArrows() {
     // would otherwise leak stale annotations onto the board until the next
     // explicit clear. The flag-based check makes the policy explicit.
     if (notePanelOpen) {
-      for (const na of noteArrows) {
+      // During a staggered reveal only the first `arrowsShown` arrows are
+      // painted, and the one revealed this step fades in (note-annot-appear).
+      const arrowLimit = noteReveal ? noteReveal.arrowsShown : noteArrows.length;
+      for (let i = 0; i < noteArrows.length && i < arrowLimit; i++) {
+        const na = noteArrows[i];
         const c = DRAW_COLOR_MAP[na.color] || DRAW_COLOR_MAP.green;
-        drawOne(na.from, na.to, c.arrow, 0.55);
+        const cls = (noteReveal && noteReveal.justArrow === i) ? 'note-annot-appear' : '';
+        drawOne(na.from, na.to, c.arrow, 0.85, 1, cls);
       }
     }
     // Hint arrow
@@ -23231,12 +23284,21 @@ function renderArrows() {
     // Note circles (semi-transparent)
     // Finding 11: same notePanelOpen gate as note arrows above.
     if (notePanelOpen) {
-      for (const nc of noteCircles) {
+      for (let i = 0; i < noteCircles.length; i++) {
+        const nc = noteCircles[i];
+        // Reveal gate: unconnected (step -1) show immediately; a connected
+        // circle appears with its arrow (once arrowsShown passes that index).
+        if (noteReveal) {
+          const step = noteReveal.circleStep[i];
+          if (step >= 0 && noteReveal.arrowsShown <= step) continue;
+        }
         const center = sqCenter(nc.square);
         if (!center) continue;
         const r = sqSize * 0.46;
         const c = DRAW_COLOR_MAP[nc.color] || DRAW_COLOR_MAP.green;
-        html += `<circle cx="${center.x}" cy="${center.y}" r="${r}" fill="none" stroke="${c.circle}" stroke-width="${circleStroke}" opacity="0.55" />`;
+        // Fade the circle in on the same step as its connected arrow.
+        const fade = (noteReveal && noteReveal.circleStep[i] === noteReveal.justArrow) ? ' class="note-annot-appear"' : '';
+        html += `<circle${fade} cx="${center.x}" cy="${center.y}" r="${r}" fill="none" stroke="${c.circle}" stroke-width="${circleStroke}" opacity="0.85" />`;
       }
     }
     // Ghost circle (preview while right-click held, before drag)
@@ -27874,13 +27936,57 @@ function updateNoteButton() {
   if (abtn) abtn.classList.toggle('has-note', !!note);
 }
 
+// Stop any in-progress staggered note reveal and drop back to "show all".
+// Called from every site that clears or replaces noteArrows so a running
+// timer can't paint stale annotations after the panel state has moved on.
+function cancelNoteReveal() {
+  if (noteRevealTimer) { clearTimeout(noteRevealTimer); noteRevealTimer = null; }
+  noteReveal = null;
+}
+
 function showNoteArrows(note) {
+  cancelNoteReveal();
   noteArrows = (note.arrows || []).slice();
   noteCircles = (note.circles || []).slice();
+
+  // Per-note "draw arrow interval": when >0 and there are arrows, reveal the
+  // arrows in stored draw order, one per interval, each pulling in its
+  // connected same-color circle. With 0/1 arrows there's nothing to stagger.
+  const interval = Math.max(0, parseInt(note.drawInterval, 10) || 0);
+  if (interval > 0 && noteArrows.length > 1) {
+    // circleStep[i]: the arrow index that reveals note circle i, or -1 for
+    // "show immediately". Connected = first same-color arrow ending on it.
+    const circleStep = noteCircles.map(nc => {
+      const k = noteArrows.findIndex(na => na.to === nc.square && (na.color || 'green') === (nc.color || 'green'));
+      return k; // -1 when unconnected → shown immediately
+    });
+    // First arrow (and anything connected to it) appears immediately; the
+    // rest stagger, so `interval` is the gap between consecutive arrows.
+    noteReveal = { arrowsShown: 1, circleStep, justArrow: 0 };
+    renderArrows();
+    const total = noteArrows.length;
+    const tick = () => {
+      if (!noteReveal) return;                 // cancelled meanwhile
+      noteReveal.arrowsShown++;
+      noteReveal.justArrow = noteReveal.arrowsShown - 1;
+      renderArrows();
+      if (noteReveal.arrowsShown >= total) {
+        // Fully revealed → settle to plain "show all" state.
+        noteRevealTimer = null;
+        noteReveal = null;
+        return;
+      }
+      noteRevealTimer = setTimeout(tick, interval);
+    };
+    noteRevealTimer = setTimeout(tick, interval);
+    return;
+  }
+
   renderArrows();
 }
 
 function hideNoteArrows() {
+  cancelNoteReveal();
   noteArrows = [];
   noteCircles = [];
   renderArrows();
@@ -28328,9 +28434,11 @@ function showNoteViewMode(panel, note) {
     ? (gistData?.planCards || []).some(c => c.positionKey === planKey && !c.deleted)
     : false;
 
+  const hasStaggeredArrows = (parseInt(note.drawInterval, 10) || 0) > 0 && (note.arrows || []).length > 1;
   panel.style.display = 'block';
   panel.innerHTML = `
     <h4>📝 Note <span style="display:flex;gap:6px;">
+      ${hasStaggeredArrows ? '<button class="btn btn-ghost btn-sm" onclick="replayNoteArrows()" style="font-size:10px;padding:2px 8px;" title="Replay the arrow sequence">↻ Replay</button>' : ''}
       <button class="btn btn-ghost btn-sm" onclick="enterNoteEditMode()" style="font-size:10px;padding:2px 8px;">✏ Edit</button>
       <button class="btn btn-ghost btn-sm" onclick="closeNotePanel()" style="font-size:10px;padding:2px 8px;">✕</button>
     </span></h4>
@@ -28339,6 +28447,14 @@ function showNoteViewMode(panel, note) {
       ? '<button class="btn btn-ghost btn-sm" onclick="removePlanCard()" style="font-size:10px;" title="Stop drilling this plan (undoable)">🗑 Remove flashcard</button>'
       : '<button class="btn btn-ghost btn-sm" onclick="enrollPlanCard()" style="font-size:10px;" title="Drill this plan via spaced repetition in the review queue">🧠 Make flashcard</button>'}</div>` : ''}
   `;
+}
+
+// Re-run the staggered arrow reveal for the note currently shown in view mode
+// (bound to the ↻ Replay control). Re-reads the note at the panel anchor so it
+// reflects the saved drawInterval.
+function replayNoteArrows() {
+  const note = noteAnchorFen ? getNoteForFen(noteAnchorFen) : null;
+  if (note) showNoteArrows(note);
 }
 
 function enterNoteEditMode() {
@@ -28373,6 +28489,7 @@ function enterNoteEditMode() {
     }
   }
   // Clear note overlay (user arrows are now live)
+  cancelNoteReveal();
   noteArrows = [];
   noteCircles = [];
   renderArrows();
@@ -28395,6 +28512,12 @@ function enterNoteEditMode() {
     </div>
   ` : '';
 
+  // Pre-fill the interval: an explicitly-saved value (incl. 0=off) wins;
+  // otherwise fall back to the authoring default so new notes stagger.
+  const savedInterval = (note && Number.isFinite(note.drawInterval))
+    ? note.drawInterval : NOTE_DEFAULT_DRAW_INTERVAL;
+  const drawIntervalValue = Math.min(10000, Math.max(0, savedInterval));
+
   panel.style.display = 'block';
   panel.innerHTML = `
     <h4>${note ? '📝 Edit Note' : '📝 New Note'} <button class="btn btn-ghost btn-sm" onclick="closeNotePanel()" style="font-size:10px;padding:2px 8px;">✕</button></h4>
@@ -28403,6 +28526,11 @@ function enterNoteEditMode() {
       <button type="button" class="btn-inline" onclick="insertVariationMarkers()" title="Insert a clickable move line">+ Insert line</button>
     </div>
     <div class="note-hint">Arrows and circles drawn on the board will be saved with this note.</div>
+    <div class="note-setting-row">
+      <label for="noteDrawInterval">Reveal arrows in draw order — interval (ms, 0 = all at once)</label>
+      <input type="number" id="noteDrawInterval" min="0" max="10000" step="100"
+             value="${drawIntervalValue}">
+    </div>
     ${drawToggleHtml}
     <div class="note-actions">
       ${note ? '<button class="btn btn-ghost btn-sm" onclick="deleteNote()" style="color:var(--red);border-color:var(--red)">🗑 Delete</button>' : ''}
@@ -28602,12 +28730,18 @@ function saveNote() {
   if (!gistData) return;
   if (!gistData.notes) gistData.notes = {};
 
+  // Per-note "draw arrow interval" (ms). 0/absent = reveal all at once.
+  // Clamped to the input's own [0,10000] range as a defensive measure.
+  const rawInterval = parseInt(document.getElementById('noteDrawInterval')?.value, 10) || 0;
+  const drawInterval = Math.min(10000, Math.max(0, rawInterval));
+
   const now = new Date().toISOString();
   const existing = gistData.notes[key];
   gistData.notes[key] = {
     text: text || '',
     arrows,
     circles,
+    drawInterval,
     created: existing?.created || now,
     updated: now
   };

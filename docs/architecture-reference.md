@@ -1102,8 +1102,28 @@ V1 scope exclusions (future): cloze / hide-the-key-move, a 'plan' type chip,
 ─── POSITION NOTES ───
 
 📝 btnNote in header; hidden when no position loaded.
-gistData.notes[fenPositionKey] = { text, arrows, circles, updated } (updated drives
-  mergeGistData newer-wins per note).
+gistData.notes[fenPositionKey] = { text, arrows, circles, drawInterval, updated }
+  (updated drives mergeGistData newer-wins per note; the whole note object is the
+  merge unit, so drawInterval rides along with no merge-logic change).
+drawInterval (ms, 0/absent = off): when >0 AND the note has >1 arrow, note-view
+  reveals arrows in stored draw order, one per interval (showNoteArrows starts the
+  stagger). First arrow shows immediately; arrows 2..N stagger, so the interval is
+  the gap BETWEEN arrows. A note circle is "connected" to the first same-color
+  arrow whose destination sits on it and reveals in that arrow's step; unconnected
+  circles show immediately. State: noteReveal = { arrowsShown, circleStep[],
+  justArrow } + noteRevealTimer (the pending setTimeout handle); null = show all. cancelNoteReveal() clears
+  the timer and is called from every noteArrows-reset site (showNoteArrows restart,
+  hideNoteArrows, enterNoteEditMode, clearArrows). renderArrows consults noteReveal
+  to gate which arrows/circles paint; the element revealed this step gets the
+  .note-annot-appear one-shot fade (keyframe #arrowSvg .note-annot-appear, `from`
+  opacity 0 → falls back to the element's 0.85). View mode shows a ↻ Replay control
+  (replayNoteArrows re-reads the anchor note and re-runs showNoteArrows) when
+  drawInterval>0 and >1 arrow. Editor exposes #noteDrawInterval (number, 0–10000,
+  step 100); saveNote reads+clamps it. Authoring default NOTE_DEFAULT_DRAW_INTERVAL
+  (750ms) pre-fills the editor when a note has no saved interval (new + legacy
+  notes) so stagger is on out of the box; an explicit saved value (incl. 0=off)
+  wins. The reveal logic reads the SAVED value literally (0/absent → off), so
+  legacy notes don't animate until re-saved.
 Note view mode (showNoteViewMode) also hosts the plan-recall flashcard
   enrollment footer ("🧠 Make flashcard" / "🗑 Remove flashcard") — the SOLE
   creation path for type:'plan' items; see PLAN-RECALL CARDS. The panel is
@@ -1249,7 +1269,7 @@ Files:
 
 gistData schema:
   positions[pid].{completed, lastSeen, srs, invalidated, invalidatedLines[]}
-  notes[fenKey].{text, arrows, circles, updated}
+  notes[fenKey].{text, arrows, circles, drawInterval, updated}
   repertoire.studies[]            // [{id, color, name}]
   repertoire.customDeviations[]   // [{positionKey, ...}]
   repertoire.dismissed[]          // position keys
@@ -1445,12 +1465,13 @@ renderArrows() = unified SVG overlay draw, z-order back-to-front:
   3. analysisArrow (light-blue 0.5; SUPPRESSED when continuationMode)
   4. analysisPvArrows OR bestMoveArrow (mutually exclusive; bestMoveArrow gated
      on !suppressEngineArrows = !(advantageMode && continuationMode))
-  5. noteArrows (semi-transparent 0.55; only when note panel OPEN)
+  5. noteArrows (0.85; only when note panel OPEN; staggered subset + .note-annot-
+     appear fade on the newest when a drawInterval reveal is active — see NOTES)
   6. hintArrow (blue 0.7)
   7. activeArrows (user-drawn)
   8. ghostArrow (during drag, 0.6)
   9. activeCircles
- 10. noteCircles (0.55)
+ 10. noteCircles (0.85; connected circle reveals with its arrow under drawInterval)
  11. ghostCircle
  12. moveClassBadge (foreignObject + flexbox; 'book' uses emoji font stack)
 
