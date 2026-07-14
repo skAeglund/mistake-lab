@@ -1205,8 +1205,10 @@ positionMoveIndex: Map<posKey, Map<moveSAN, MoveStats>>.
   branching points (computeHumanWeakSpots, HUMAN lens) — see WEAK-SPOTS DASHBOARD;
   it may call buildOpeningIndex() and poll pmiGameCount but never nulls/rebuilds
   the indices.
-Both built LAZILY (ensurePMI/buildFenIndex → buildOpeningIndex) — 30 games per
-  frame, progressive render as batches complete.
+Both built LAZILY (ensurePMI/buildFenIndex → buildOpeningIndex) — batched with an
+  adaptive ~8ms-per-tick work budget (BATCH starts at 20, resized each tick from
+  measured per-game cost so cold/replay ticks shrink and warm ticks grow; keeps
+  the main thread from freezing on mobile), progressive render as batches complete.
 fenIndexGameCount set after allGames is fully finalized to prevent spurious rebuilds.
 openingBuildSession: bumped on logout and in invalidateOpeningIndices() (called
   when allGames is replaced) — late builds with a stale snapshot get dropped.
