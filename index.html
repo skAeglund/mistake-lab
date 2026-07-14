@@ -1873,7 +1873,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Empty-state overlay fix: the "Select a game to begin" placeholder + "Analyze a position" button used position:absolute; inset:0 but sat in .panel-center (the whole board+nav+padding column), so they centred low over the board. Moved #emptyMsg inside #boardContainer (the position:relative, board-sized wrapper) so inset:0 now centres the overlay on the board square. Earlier — Analysis eval badges now colour by side: a small edge (+0.1–0.2) reads clearly white and (−0.1–0.2) clearly black instead of the old dark "equal" gray (which looked black for small white evals). Sign-based classifier with a slight tier (0<|cp|≤50, softened but clearly white/black), strong tier at |cp|>50, and a neutral mid-gray reserved for a dead-level 0.00; eval bar unchanged (already proportional). Earlier — Notes polish: (1) per-note "reveal arrows in draw order" interval (#noteDrawInterval, ms, 0=off, authoring default 750ms via NOTE_DEFAULT_DRAW_INTERVAL — new/legacy notes pre-fill it, explicit saved value incl. 0 wins, reveal reads the saved value literally so legacy notes don't animate until re-saved) — when >0 and a note has >1 arrow, note-view reveals arrows one per interval in stored draw order (first immediate, rest staggered), each connected same-color circle (arrow destination sits on it) fading in with its arrow; unconnected circles show immediately; ↻ Replay in view mode; state via noteReveal/noteRevealTimer + cancelNoteReveal() at every noteArrows-reset site; .note-annot-appear fades only the newest element each step. (2) note arrow/circle opacity 0.55 → 0.85. (3) bigger note panel + reading font (base width 240→264, fonts 12→13; ≥1400px width→320 / text→14 / textarea max-height→220; mobile view-text→14). Earlier — Weak-Spots Dashboard is now MOVE-CONDITIONAL: the unit is a move edge, not a position — at a recurring position, the specific move that leads to a bad win-rate (e.g. "They play Bb4 → you score 19% over 8 games", vs a fine score against their other replies). Each positionMoveIndex (posKey → move) entry is an edge with its own user-perspective W-L-D; the ≥5-game gate is per-edge (that move needs 5 games for its rate to mean anything). Score = (W+½D)/N; below 50% = weak. Moves are opponent replies you handle badly ("They play X"); your own move choices are excluded. Session-local Human/Bot toggle (window._weakSpotsMode): HUMAN scans PMI edges (grouped by opening, near-universal edges >50% of games gated out on ≥20-game libraries, memoized by pmiGameCount, lazy PMI build via ensureWeakSpotsIndex poll 200ms/12s), Study → opening explorer at the position so the per-move result bars show the full split; BOT stays position+preset from practiceScoreboard (practice records no per-move split), Drill → startTodoFromList else Study. Rows show a winRateColor score pill, move + whose-move, W-L-D over N, hover board preview; worst-first, cap 15, thresholds in WEAKSPOT_CFG. Read-only (no store, no drill machinery, no mode flag). Replaces the position-aggregate "branching point" version. Earlier — Analysis Mode note / 🧠 flashcard authoring + paste-FEN + scratch entry: (1) 📝 #btnAnalysisNote in the analysis-panel header (N key now targets it, not the display:none #positionNav btnNote) opens the note panel on the live analysis position — getCurrentNoteFen's analysisMode branch already resolved analysisEngine.fen(), so note edit/save and 🧠 Make/Remove flashcard work unchanged; updateNoteButton mirrors .has-note onto it. This is the recommended way to confirm/find a plan with the engine/Maia/DB before enrolling it. (2) Paste-FEN (#analysisFenInput / setAnalysisFromFen): validates, no-ops on an exact re-paste, confirms an unsaved note edit, then re-roots the tree at the pasted position; syncAnalysisFenInput (called from renderAnalysisTree) keeps the field showing the current FEN so it doubles as copy-current-FEN. (3) 'Analyze a position' (#btnAnalyzeScratch in #emptyMsg / enterAnalysisBlank): enter Analysis Mode from the empty board with no loaded mistake — no ninth mode flag (rides analysisMode with analysisSavedState={blank:true}); exit restores the empty state.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Weak-spots preview arrow: HUMAN-lens rows now overlay an orange arrow for the opponent's reply (the edge's uci) on the hover board preview, and the preview is oriented to the user's side (was hardcoded white, so black-perspective spots rendered flipped). showPositionPreview gains an optional moveUci param (SVG arrow with orientation-aware square→viewBox mapping); weakSpotRowHtml gains orientation + moveUci params threaded through onmouseenter. BOT-lens rows orient to the user but draw no arrow (position+preset has no single opponent move). Backward-compatible — the 2-arg deviation-row preview is unchanged. Earlier — Empty-state overlay fix: the "Select a game to begin" placeholder + "Analyze a position" button used position:absolute; inset:0 but sat in .panel-center (the whole board+nav+padding column), so they centred low over the board. Moved #emptyMsg inside #boardContainer (the position:relative, board-sized wrapper) so inset:0 now centres the overlay on the board square. Earlier — Analysis eval badges now colour by side: a small edge (+0.1–0.2) reads clearly white and (−0.1–0.2) clearly black instead of the old dark "equal" gray (which looked black for small white evals). Sign-based classifier with a slight tier (0<|cp|≤50, softened but clearly white/black), strong tier at |cp|>50, and a neutral mid-gray reserved for a dead-level 0.00; eval bar unchanged (already proportional). Earlier — Notes polish: (1) per-note "reveal arrows in draw order" interval (#noteDrawInterval, ms, 0=off, authoring default 750ms via NOTE_DEFAULT_DRAW_INTERVAL — new/legacy notes pre-fill it, explicit saved value incl. 0 wins, reveal reads the saved value literally so legacy notes don't animate until re-saved) — when >0 and a note has >1 arrow, note-view reveals arrows one per interval in stored draw order (first immediate, rest staggered), each connected same-color circle (arrow destination sits on it) fading in with its arrow; unconnected circles show immediately; ↻ Replay in view mode; state via noteReveal/noteRevealTimer + cancelNoteReveal() at every noteArrows-reset site; .note-annot-appear fades only the newest element each step. (2) note arrow/circle opacity 0.55 → 0.85. (3) bigger note panel + reading font (base width 240→264, fonts 12→13; ≥1400px width→320 / text→14 / textarea max-height→220; mobile view-text→14). Earlier — Weak-Spots Dashboard is now MOVE-CONDITIONAL: the unit is a move edge, not a position — at a recurring position, the specific move that leads to a bad win-rate (e.g. "They play Bb4 → you score 19% over 8 games", vs a fine score against their other replies). Each positionMoveIndex (posKey → move) entry is an edge with its own user-perspective W-L-D; the ≥5-game gate is per-edge (that move needs 5 games for its rate to mean anything). Score = (W+½D)/N; below 50% = weak. Moves are opponent replies you handle badly ("They play X"); your own move choices are excluded. Session-local Human/Bot toggle (window._weakSpotsMode): HUMAN scans PMI edges (grouped by opening, near-universal edges >50% of games gated out on ≥20-game libraries, memoized by pmiGameCount, lazy PMI build via ensureWeakSpotsIndex poll 200ms/12s), Study → opening explorer at the position so the per-move result bars show the full split; BOT stays position+preset from practiceScoreboard (practice records no per-move split), Drill → startTodoFromList else Study. Rows show a winRateColor score pill, move + whose-move, W-L-D over N, hover board preview; worst-first, cap 15, thresholds in WEAKSPOT_CFG. Read-only (no store, no drill machinery, no mode flag). Replaces the position-aggregate "branching point" version. Earlier — Analysis Mode note / 🧠 flashcard authoring + paste-FEN + scratch entry: (1) 📝 #btnAnalysisNote in the analysis-panel header (N key now targets it, not the display:none #positionNav btnNote) opens the note panel on the live analysis position — getCurrentNoteFen's analysisMode branch already resolved analysisEngine.fen(), so note edit/save and 🧠 Make/Remove flashcard work unchanged; updateNoteButton mirrors .has-note onto it. This is the recommended way to confirm/find a plan with the engine/Maia/DB before enrolling it. (2) Paste-FEN (#analysisFenInput / setAnalysisFromFen): validates, no-ops on an exact re-paste, confirms an unsaved note edit, then re-roots the tree at the pasted position; syncAnalysisFenInput (called from renderAnalysisTree) keeps the field showing the current FEN so it doubles as copy-current-FEN. (3) 'Analyze a position' (#btnAnalyzeScratch in #emptyMsg / enterAnalysisBlank): enter Analysis Mode from the empty board with no loaded mistake — no ninth mode flag (rides analysisMode with analysisSavedState={blank:true}); exit restores the empty state.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -24704,7 +24704,7 @@ function getOpponentName(game, playerColor) {
 // ── Position preview tooltip ──
 let posPreviewEl = null;
 
-function showPositionPreview(fen, event, playerColor) {
+function showPositionPreview(fen, event, playerColor, moveUci) {
   if (!posPreviewEl) {
     posPreviewEl = document.createElement('div');
     posPreviewEl.className = 'pos-preview';
@@ -24743,6 +24743,32 @@ function showPositionPreview(fen, event, playerColor) {
       }
     }
   }
+  // Optional move arrow (e.g. the opponent reply in a weak-spot row). moveUci is
+  // like 'e7e5'; draw from→to on the same grid, honouring orientation. Absolutely
+  // positioned so it overlays the grid without becoming a 65th grid cell.
+  if (moveUci && /^[a-h][1-8][a-h][1-8]/.test(moveUci)) {
+    const sqCenter = (sq) => {
+      const fileIdx = sq.charCodeAt(0) - 97;      // a→0 … h→7
+      const rank = parseInt(sq[1], 10);           // 1..8
+      const dispCol = flipBoard ? 7 - fileIdx : fileIdx;
+      const dispRow = flipBoard ? rank - 1 : 8 - rank;
+      return { x: dispCol + 0.5, y: dispRow + 0.5 }; // viewBox units (0..8)
+    };
+    const a = sqCenter(moveUci.slice(0, 2));
+    const b = sqCenter(moveUci.slice(2, 4));
+    // Pull the tip back so the arrowhead lands on (not past) the target centre.
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const tipX = b.x - (dx / len) * 0.28, tipY = b.y - (dy / len) * 0.28;
+    const C = 'rgba(255,140,0,0.9)';
+    html += `<svg viewBox="0 0 8 8" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;">
+      <defs><marker id="wsArrowHead" markerWidth="3.2" markerHeight="3.2" refX="1.4" refY="1.6" orient="auto">
+        <path d="M0,0 L3.2,1.6 L0,3.2 z" fill="${C}"/></marker></defs>
+      <line x1="${a.x.toFixed(3)}" y1="${a.y.toFixed(3)}" x2="${tipX.toFixed(3)}" y2="${tipY.toFixed(3)}"
+        stroke="${C}" stroke-width="0.28" stroke-linecap="round" marker-end="url(#wsArrowHead)"/>
+    </svg>`;
+  }
+
   posPreviewEl.innerHTML = html;
   posPreviewEl.style.display = 'grid';
 
@@ -26612,9 +26638,11 @@ function openWeakSpotPosition(posKey, userColor) {
 }
 
 // One weak-spot row with a hover board preview (fullFen). action = button onclick.
-function weakSpotRowHtml(fullFen, title, reason, btnLabel, action, accent) {
+function weakSpotRowHtml(fullFen, title, reason, btnLabel, action, accent, orientation, moveUci) {
   const fen = fullFen.replace(/'/g, "\\'");
-  return `<div style="padding:6px 8px;margin:2px 0;border:1px solid var(--border);border-radius:6px;font-size:12px;display:flex;align-items:flex-start;gap:6px;" onmouseenter="showPositionPreview('${fen}',event)" onmouseleave="hidePositionPreview()">
+  const orient = orientation === 'black' ? 'black' : 'white';
+  const uciArg = /^[a-h][1-8][a-h][1-8]/.test(moveUci || '') ? `'${moveUci}'` : 'null';
+  return `<div style="padding:6px 8px;margin:2px 0;border:1px solid var(--border);border-radius:6px;font-size:12px;display:flex;align-items:flex-start;gap:6px;" onmouseenter="showPositionPreview('${fen}',event,'${orient}',${uciArg})" onmouseleave="hidePositionPreview()">
     <div style="flex:1;min-width:0;">
       <div style="display:flex;align-items:center;gap:6px;overflow:hidden;">${title}</div>
       <div style="font-size:10px;color:var(--text-muted);margin-top:2px;">${reason}</div>
@@ -26678,7 +26706,8 @@ function renderWeakSpotsPanel() {
           const title = `${weakSpotScoreBadge(r.score)}<span style="font-size:12px;color:var(--text-primary);">They play <strong>${escHtml(r.san)}</strong></span>`;
           const reason = `${r.w}-${r.l}-${r.d} over ${r.total} games`;
           html += weakSpotRowHtml(r.posKey + ' 0 1', title, reason, 'Study',
-            `openWeakSpotPosition('${r.posKey.replace(/'/g, "\\'")}','${r.userColor}')`, 'var(--accent)');
+            `openWeakSpotPosition('${r.posKey.replace(/'/g, "\\'")}','${r.userColor}')`, 'var(--accent)',
+            r.userColor, r.uci);
         }
       }
     }
@@ -26694,7 +26723,8 @@ function renderWeakSpotsPanel() {
         const action = canDrill
           ? `startTodoFromList('${r.studyId}', ${r.vIdx}, '${r.preset}')`
           : `openWeakSpotPosition('${r.posKey.replace(/'/g, "\\'")}','${r.posKey.split(' ')[1] === 'b' ? 'black' : 'white'}')`;
-        html += weakSpotRowHtml(r.posKey + ' 0 1', title, reason, canDrill ? `Drill ${presetLabel}` : 'Study', action, 'var(--green)');
+        html += weakSpotRowHtml(r.posKey + ' 0 1', title, reason, canDrill ? `Drill ${presetLabel}` : 'Study', action, 'var(--green)',
+          r.posKey.split(' ')[1] === 'b' ? 'black' : 'white');
       }
     }
   }

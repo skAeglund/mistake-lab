@@ -891,7 +891,9 @@ BOT lens — computeBotWeakSpots(): iterate practiceScoreboard[posKey], bucket
 
 Each row (weakSpotRowHtml) shows a winRateColor score pill (weakSpotScoreBadge),
   side-to-move / whose-move, W-L-D over N, and a hover board preview
-  (showPositionPreview on posKey + ' 0 1'). Header shows a lens icon + count
+  (showPositionPreview on posKey + ' 0 1', oriented to the user; HUMAN rows also
+  pass the opponent-reply uci so the preview overlays an arrow for that move).
+  Header shows a lens icon + count
   ("3 weak spots" / "none found" / "analyzing your games…").
 
 LAZY-INDEX WAIT: only the HUMAN lens needs PMI. weakSpotsIndexReady() =
