@@ -1873,7 +1873,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Opening-index build is now non-blocking: doBuildOpeningIndex batched with a fixed 50-game tick (one long main-thread task on mobile with hundreds of games). Now each tick self-sizes to a ~8ms work budget — BATCH starts at 20 and is resized every tick from measured per-game cost (cold/chess.js-replay ticks shrink toward 4, warm ticks grow toward 120), so the setTimeout(0) yields land often enough that taps/scroll stay responsive during the build. Total work and all index semantics are unchanged — no ply cap (the shared gameFenIndex/PMI feed opening-explorer per-move stats, game-position filtering, and weak spots, so capping would silently shorten filtering/explorer depth). Earlier — Weak-spots preview arrow: HUMAN-lens rows now overlay an orange arrow for the opponent's reply (the edge's uci) on the hover board preview, and the preview is oriented to the user's side (was hardcoded white, so black-perspective spots rendered flipped). showPositionPreview gains an optional moveUci param (SVG arrow with orientation-aware square→viewBox mapping); weakSpotRowHtml gains orientation + moveUci params threaded through onmouseenter. BOT-lens rows orient to the user but draw no arrow (position+preset has no single opponent move). Backward-compatible — the 2-arg deviation-row preview is unchanged. Earlier — Empty-state overlay fix: the "Select a game to begin" placeholder + "Analyze a position" button used position:absolute; inset:0 but sat in .panel-center (the whole board+nav+padding column), so they centred low over the board. Moved #emptyMsg inside #boardContainer (the position:relative, board-sized wrapper) so inset:0 now centres the overlay on the board square. Earlier — Analysis eval badges now colour by side: a small edge (+0.1–0.2) reads clearly white and (−0.1–0.2) clearly black instead of the old dark "equal" gray (which looked black for small white evals). Sign-based classifier with a slight tier (0<|cp|≤50, softened but clearly white/black), strong tier at |cp|>50, and a neutral mid-gray reserved for a dead-level 0.00; eval bar unchanged (already proportional). Earlier — Notes polish: (1) per-note "reveal arrows in draw order" interval (#noteDrawInterval, ms, 0=off, authoring default 750ms via NOTE_DEFAULT_DRAW_INTERVAL — new/legacy notes pre-fill it, explicit saved value incl. 0 wins, reveal reads the saved value literally so legacy notes don't animate until re-saved) — when >0 and a note has >1 arrow, note-view reveals arrows one per interval in stored draw order (first immediate, rest staggered), each connected same-color circle (arrow destination sits on it) fading in with its arrow; unconnected circles show immediately; ↻ Replay in view mode; state via noteReveal/noteRevealTimer + cancelNoteReveal() at every noteArrows-reset site; .note-annot-appear fades only the newest element each step. (2) note arrow/circle opacity 0.55 → 0.85. (3) bigger note panel + reading font (base width 240→264, fonts 12→13; ≥1400px width→320 / text→14 / textarea max-height→220; mobile view-text→14). Earlier — Weak-Spots Dashboard is now MOVE-CONDITIONAL: the unit is a move edge, not a position — at a recurring position, the specific move that leads to a bad win-rate (e.g. "They play Bb4 → you score 19% over 8 games", vs a fine score against their other replies). Each positionMoveIndex (posKey → move) entry is an edge with its own user-perspective W-L-D; the ≥5-game gate is per-edge (that move needs 5 games for its rate to mean anything). Score = (W+½D)/N; below 50% = weak. Moves are opponent replies you handle badly ("They play X"); your own move choices are excluded. Session-local Human/Bot toggle (window._weakSpotsMode): HUMAN scans PMI edges (grouped by opening, near-universal edges >50% of games gated out on ≥20-game libraries, memoized by pmiGameCount, lazy PMI build via ensureWeakSpotsIndex poll 200ms/12s), Study → opening explorer at the position so the per-move result bars show the full split; BOT stays position+preset from practiceScoreboard (practice records no per-move split), Drill → startTodoFromList else Study. Rows show a winRateColor score pill, move + whose-move, W-L-D over N, hover board preview; worst-first, cap 15, thresholds in WEAKSPOT_CFG. Read-only (no store, no drill machinery, no mode flag). Replaces the position-aggregate "branching point" version. Earlier — Analysis Mode note / 🧠 flashcard authoring + paste-FEN + scratch entry: (1) 📝 #btnAnalysisNote in the analysis-panel header (N key now targets it, not the display:none #positionNav btnNote) opens the note panel on the live analysis position — getCurrentNoteFen's analysisMode branch already resolved analysisEngine.fen(), so note edit/save and 🧠 Make/Remove flashcard work unchanged; updateNoteButton mirrors .has-note onto it. This is the recommended way to confirm/find a plan with the engine/Maia/DB before enrolling it. (2) Paste-FEN (#analysisFenInput / setAnalysisFromFen): validates, no-ops on an exact re-paste, confirms an unsaved note edit, then re-roots the tree at the pasted position; syncAnalysisFenInput (called from renderAnalysisTree) keeps the field showing the current FEN so it doubles as copy-current-FEN. (3) 'Analyze a position' (#btnAnalyzeScratch in #emptyMsg / enterAnalysisBlank): enter Analysis Mode from the empty board with no loaded mistake — no ninth mode flag (rides analysisMode with analysisSavedState={blank:true}); exit restores the empty state.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire deviation detection now reuses cached moveStats: detectRepertoireDeviations previously replayed EVERY game through chess.js (sloppy SAN + fen() per ply, synchronous, main thread, uncached) on every launch and every dismiss/refresh — the dominant per-launch cost at 300+ games. It now walks fenDataCache[gameId].moveStats (posKey/san/uci per ply; next entry's posKey or finalFen as the post-move position), with chess.js replay only for uncached or initialFen games. Deviation fenBefore / gap fen are reconstructed as posKey + ' 0 ' + real fullmove from ply index (halfmove clock is irrelevant downstream; the fullmove counter must be real — openGapInExplorer→launchFilterPractice reads it for move numbering; initialFen games skip the fast path since the derivation assumes a standard start). Legacy EP-inclusive cache posKeys are healed in-place on read (same idempotent pattern as doBuildOpeningIndex). The startup call site (showMainApp's loadRepertoireTrie().then) now awaits fenDataPreloadPromise first so the first run doesn't race the IDB preload and fall back to full replay; the promise always settles (its .catch installs an empty cache). Completion log now includes ms + cached/replayed game counts. Earlier — Opening-index build is now non-blocking: doBuildOpeningIndex batched with a fixed 50-game tick (one long main-thread task on mobile with hundreds of games). Now each tick self-sizes to a ~8ms work budget — BATCH starts at 20 and is resized every tick from measured per-game cost (cold/chess.js-replay ticks shrink toward 4, warm ticks grow toward 120), so the setTimeout(0) yields land often enough that taps/scroll stay responsive during the build. Total work and all index semantics are unchanged — no ply cap (the shared gameFenIndex/PMI feed opening-explorer per-move stats, game-position filtering, and weak spots, so capping would silently shorten filtering/explorer depth). Earlier — Weak-spots preview arrow: HUMAN-lens rows now overlay an orange arrow for the opponent's reply (the edge's uci) on the hover board preview, and the preview is oriented to the user's side (was hardcoded white, so black-perspective spots rendered flipped). showPositionPreview gains an optional moveUci param (SVG arrow with orientation-aware square→viewBox mapping); weakSpotRowHtml gains orientation + moveUci params threaded through onmouseenter. BOT-lens rows orient to the user but draw no arrow (position+preset has no single opponent move). Backward-compatible — the 2-arg deviation-row preview is unchanged. Earlier — Empty-state overlay fix: the "Select a game to begin" placeholder + "Analyze a position" button used position:absolute; inset:0 but sat in .panel-center (the whole board+nav+padding column), so they centred low over the board. Moved #emptyMsg inside #boardContainer (the position:relative, board-sized wrapper) so inset:0 now centres the overlay on the board square. Earlier — Analysis eval badges now colour by side: a small edge (+0.1–0.2) reads clearly white and (−0.1–0.2) clearly black instead of the old dark "equal" gray (which looked black for small white evals). Sign-based classifier with a slight tier (0<|cp|≤50, softened but clearly white/black), strong tier at |cp|>50, and a neutral mid-gray reserved for a dead-level 0.00; eval bar unchanged (already proportional). Earlier — Notes polish: (1) per-note "reveal arrows in draw order" interval (#noteDrawInterval, ms, 0=off, authoring default 750ms via NOTE_DEFAULT_DRAW_INTERVAL — new/legacy notes pre-fill it, explicit saved value incl. 0 wins, reveal reads the saved value literally so legacy notes don't animate until re-saved) — when >0 and a note has >1 arrow, note-view reveals arrows one per interval in stored draw order (first immediate, rest staggered), each connected same-color circle (arrow destination sits on it) fading in with its arrow; unconnected circles show immediately; ↻ Replay in view mode; state via noteReveal/noteRevealTimer + cancelNoteReveal() at every noteArrows-reset site; .note-annot-appear fades only the newest element each step. (2) note arrow/circle opacity 0.55 → 0.85. (3) bigger note panel + reading font (base width 240→264, fonts 12→13; ≥1400px width→320 / text→14 / textarea max-height→220; mobile view-text→14). Earlier — Weak-Spots Dashboard is now MOVE-CONDITIONAL: the unit is a move edge, not a position — at a recurring position, the specific move that leads to a bad win-rate (e.g. "They play Bb4 → you score 19% over 8 games", vs a fine score against their other replies). Each positionMoveIndex (posKey → move) entry is an edge with its own user-perspective W-L-D; the ≥5-game gate is per-edge (that move needs 5 games for its rate to mean anything). Score = (W+½D)/N; below 50% = weak. Moves are opponent replies you handle badly ("They play X"); your own move choices are excluded. Session-local Human/Bot toggle (window._weakSpotsMode): HUMAN scans PMI edges (grouped by opening, near-universal edges >50% of games gated out on ≥20-game libraries, memoized by pmiGameCount, lazy PMI build via ensureWeakSpotsIndex poll 200ms/12s), Study → opening explorer at the position so the per-move result bars show the full split; BOT stays position+preset from practiceScoreboard (practice records no per-move split), Drill → startTodoFromList else Study. Rows show a winRateColor score pill, move + whose-move, W-L-D over N, hover board preview; worst-first, cap 15, thresholds in WEAKSPOT_CFG. Read-only (no store, no drill machinery, no mode flag). Replaces the position-aggregate "branching point" version. Earlier — Analysis Mode note / 🧠 flashcard authoring + paste-FEN + scratch entry: (1) 📝 #btnAnalysisNote in the analysis-panel header (N key now targets it, not the display:none #positionNav btnNote) opens the note panel on the live analysis position — getCurrentNoteFen's analysisMode branch already resolved analysisEngine.fen(), so note edit/save and 🧠 Make/Remove flashcard work unchanged; updateNoteButton mirrors .has-note onto it. This is the recommended way to confirm/find a plan with the engine/Maia/DB before enrolling it. (2) Paste-FEN (#analysisFenInput / setAnalysisFromFen): validates, no-ops on an exact re-paste, confirms an unsaved note edit, then re-roots the tree at the pasted position; syncAnalysisFenInput (called from renderAnalysisTree) keeps the field showing the current FEN so it doubles as copy-current-FEN. (3) 'Analyze a position' (#btnAnalyzeScratch in #emptyMsg / enterAnalysisBlank): enter Analysis Mode from the empty board with no loaded mistake — no ninth mode flag (rides analysisMode with analysisSavedState={blank:true}); exit restores the empty state.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -13987,7 +13987,17 @@ function showMainApp() {
   loadReviewHistory();
 
   // Load repertoire studies in background
-  loadRepertoireTrie().then(() => {
+  loadRepertoireTrie().then(async () => {
+    // detectRepertoireDeviations reads cached moveStats from fenDataCache
+    // (chess.js replay only for uncached games). Wait for the IDB preload
+    // kicked off above so the first run doesn't race it and fall back to a
+    // full main-thread replay of every game. The preload promise always
+    // settles and always sets fenDataCacheLoaded — its .catch installs an
+    // empty cache — so this await can't hang the repertoire load.
+    if (!fenDataCacheLoaded) {
+      if (!fenDataPreloadPromise) startFenDataPreload();
+      try { await fenDataPreloadPromise; } catch (_) {}
+    }
     detectRepertoireDeviations();
     updateRepertoireBadge();
     // Start view 'repertoire' renders the panel (via enterStartView) before
@@ -24120,6 +24130,8 @@ function detectRepertoireDeviations() {
 
   const deviations = [];
   const gapMap = new Map(); // posKey:san → {positionKey, opponentMove, count, games, fen}
+  const detT0 = performance.now();
+  let statsGames = 0, replayGames = 0;
 
   for (const game of allGames) {
     if (game.id.startsWith('_test_')) continue;
@@ -24129,21 +24141,66 @@ function detectRepertoireDeviations() {
     const moves = game.moves?.split(' ');
     if (!moves || moves.length < 4) continue;
 
-    const chess = game.initialFen ? new Chess(game.initialFen) : new Chess();
+    // Fast path: the opening-explorer fen cache (fenDataCache, IDB-preloaded at
+    // startup) already carries everything this walk needs per ply — posKey before
+    // the move, san, uci, and the NEXT entry's posKey (or finalFen) as the
+    // post-move position. Reusing it skips the chess.js sloppy-SAN replay that
+    // previously ran here for every game on every launch (the same replay
+    // buildOpeningIndex documents at ~25s / 400 games on mobile).
+    // initialFen games are excluded from the fast path: the full-FEN
+    // reconstruction below derives the fullmove counter from the ply index,
+    // which assumes a standard start position.
+    const cached = (fenDataCacheLoaded && fenDataCache && !game.initialFen)
+      ? fenDataCache[game.id] : null;
+    const stats = (cached && Array.isArray(cached.moveStats) && cached.moveStats.length > 0)
+      ? cached.moveStats : null;
+    if (stats) statsGames++; else replayGames++;
+
+    // chess.js fallback only for uncached / initialFen games. moveStats may be
+    // shorter than moves (extraction breaks at the first unplayable SAN — L8);
+    // walking stats.length matches the legally-played prefix the replay path
+    // would cover.
+    const chess = stats ? null : (game.initialFen ? new Chess(game.initialFen) : new Chess());
+    const plyCount = stats ? stats.length : moves.length;
+
     let deviated = false;
     let lastChapterUrl = null;
     let lastChapterTitle = null;
     let lastStudyName = null;
 
-    for (let i = 0; i < moves.length; i++) {
-      const fen = chess.fen();
-      const posKey = fenPositionKey(fen);
-      const turn = chess.turn();
+    for (let i = 0; i < plyCount; i++) {
+      let posKey, fullFen, san, uci, turn;
+      if (stats) {
+        const ms = stats[i];
+        if (!ms || !ms.posKey) break;
+        // Normalize legacy EP-inclusive keys on read — same in-place heal as
+        // doBuildOpeningIndex (mutating ms.posKey persists via the shared
+        // fenDataCache reference on its next IDB write). Idempotent:
+        // normalized keys are fixed points.
+        const norm = fenPositionKey(ms.posKey);
+        if (norm !== ms.posKey) ms.posKey = norm;
+        posKey = norm;
+        turn = posKey.split(' ')[1];
+        if (turn !== 'w' && turn !== 'b') break; // malformed cache entry — stop cleanly
+        san = ms.moveSan;
+        uci = ms.moveUci;
+        // Full-FEN reconstruction for downstream consumers: the halfmove clock
+        // is irrelevant here (opening positions, no 50-move concerns), but the
+        // fullmove counter MUST be real — openGapInExplorer feeds gap.fen to
+        // launchFilterPractice, which reads the counter for move numbering.
+        fullFen = posKey + ' 0 ' + (Math.floor(i / 2) + 1);
+      } else {
+        fullFen = chess.fen();
+        posKey = fenPositionKey(fullFen);
+        turn = chess.turn();
+        const move = chess.move(moves[i], { sloppy: true });
+        if (!move) break;
+        san = move.san;
+        uci = move.from + move.to + (move.promotion || '');
+      }
+
       const isUserTurn = (turn === 'w' && playerColor === 'white') ||
                           (turn === 'b' && playerColor === 'black');
-
-      const move = chess.move(moves[i], { sloppy: true });
-      if (!move) break;
 
       if (isUserTurn) {
         // User's turn — trie stores these positions
@@ -24156,15 +24213,14 @@ function detectRepertoireDeviations() {
         lastChapterUrl = primary.chapterUrl || lastChapterUrl;
         lastChapterTitle = primary.chapterTitle || lastChapterTitle;
         lastStudyName = primary.studyName || lastStudyName;
-        const playedUci = move.from + move.to + (move.promotion || '');
-        if (!entries.some(e => e.uci === playedUci || e.san === move.san)) {
+        if (!entries.some(e => e.uci === uci || e.san === san)) {
           // Deviation found
           if (!deviated) {
             deviations.push({
               gameId: game.id,
               movePly: i + 1,
-              fenBefore: fen,
-              playedMove: { san: move.san, uci: playedUci },
+              fenBefore: fullFen,
+              playedMove: { san, uci },
               repertoireMove: primary,
               positionKey: posKey,
               opening: game.opening?.name || '',
@@ -24177,15 +24233,30 @@ function detectRepertoireDeviations() {
         }
       } else {
         // Opponent's turn — check if the resulting position (user's next turn) is in the trie
-        const nextPosKey = fenPositionKey(chess.fen());
+        let nextPosKey;
+        if (stats) {
+          if (i + 1 < stats.length) {
+            const next = stats[i + 1];
+            if (!next || !next.posKey) break;
+            const nk = fenPositionKey(next.posKey);
+            if (nk !== next.posKey) next.posKey = nk;
+            nextPosKey = nk;
+          } else {
+            // Last recorded move — post-move position lives in finalFen.
+            nextPosKey = cached.finalFen ? fenPositionKey(cached.finalFen) : null;
+            if (!nextPosKey) break; // can't verify coverage — stop (no false gap)
+          }
+        } else {
+          nextPosKey = fenPositionKey(chess.fen());
+        }
         if (!repertoireTrie.has(nextPosKey)) {
           // Opponent played a move our repertoire doesn't cover — gap
-          const gapKey = posKey + ':' + move.san;
+          const gapKey = posKey + ':' + san;
           if (!gapMap.has(gapKey)) {
             gapMap.set(gapKey, {
               positionKey: posKey,
-              fen: fen,
-              opponentMove: { san: move.san, uci: move.from + move.to + (move.promotion || '') },
+              fen: fullFen,
+              opponentMove: { san, uci },
               chapterUrl: lastChapterUrl,
               chapterTitle: lastChapterTitle,
               studyName: lastStudyName,
@@ -24279,7 +24350,7 @@ function detectRepertoireDeviations() {
   repertoireDeviations = allDevs.sort((a, b) => (b.gameCount || 0) - (a.gameCount || 0));
   repertoireGaps = Array.from(gapMap.values()).sort((a, b) => b.count - a.count);
 
-  console.log(`[Repertoire] Found ${deviations.length} deviations, ${repertoireGaps.length} gaps`);
+  console.log(`[Repertoire] Found ${deviations.length} deviations, ${repertoireGaps.length} gaps in ${(performance.now() - detT0).toFixed(0)}ms (${statsGames} games via cached moveStats, ${replayGames} via chess.js replay)`);
 }
 
 // ── Repertoire UI ──

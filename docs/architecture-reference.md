@@ -716,6 +716,27 @@ isRepertoireCorrectForItem(m, san, uci): checks m.repertoireMove first, then tri
 isRepertoireMove(fenBefore, san, uci): applies 'book' classification + filters out
   "deliberate prep" moves from extracted mistakes.
 
+detectRepertoireDeviations perf (moveStats fast path): the per-game walk reads
+  fenDataCache[gameId].moveStats (posKey/san/uci per ply; post-move position =
+  next entry's posKey, or finalFen for the last recorded move) instead of
+  replaying chess.js — the old full-replay-per-launch was the dominant startup
+  cost at 300+ games. chess.js `{sloppy:true}` replay remains ONLY the fallback
+  for uncached games and for initialFen games (excluded from the fast path
+  because reconstructed FENs derive the fullmove counter from ply index, which
+  assumes a standard start). Deviation fenBefore / gap fen are reconstructed as
+  `posKey + ' 0 ' + (floor(i/2)+1)` — halfmove clock is irrelevant downstream,
+  but the fullmove counter MUST be real (openGapInExplorer → launchFilterPractice
+  reads it for practice move numbering). Legacy EP-inclusive cache posKeys are
+  healed in-place on read (same idempotent pattern as doBuildOpeningIndex). The
+  startup call site (showMainApp's loadRepertoireTrie().then) awaits
+  fenDataPreloadPromise before the first run so it doesn't race the IDB preload
+  and fall back to full replay; the promise always settles (.catch installs an
+  empty cache + sets fenDataCacheLoaded). Mid-session callers (dismiss / custom
+  dev / refreshRepertoire / practice save) stay synchronous — preload is done by
+  then, or the per-game fallback covers it. Completion log:
+  `[Repertoire] Found D deviations, G gaps in Xms (N via cached moveStats, M via
+  chess.js replay)` — M > 0 on warm launches signals a fendata persistence issue.
+
 Review queue: isDue() + startRepertoireReview (due badge via updateRepertoireBadge,
   updates continuously, not gated on drill mode).
 
