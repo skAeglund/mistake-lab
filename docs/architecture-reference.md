@@ -767,8 +767,28 @@ Lead-up navigation: repLeadUpActive + repLeadUpLine + repLeadUpIdx.
   buildRepertoireLeadUp / buildLeadUpFromTrie / replayRepertoireBeginning /
   startRepertoireFromBeginning.
 
-Studies storage: gistData.repertoire.studies = [{id, color, name}] (name from
-  [ChapterName] → [StudyName] → [Event] precedence, bracket-safe header stripping).
+Studies storage: gistData.repertoire.studies = [{id, color, name, addedAt}] (name
+  from [ChapterName] → [StudyName] → [Event] precedence, bracket-safe header
+  stripping). addedAt (ms) is stamped by addRepertoireStudy; records predating
+  the tombstone feature have none (→ 0).
+Study deletion — TOMBSTONES (gistData.repertoire.deletedStudies = [{id, ts}]).
+  studies merges as a union by id, which cannot express a removal: the deleted
+  record survives from the remote side and the study reappears on the next
+  read-merge-write. removeRepertoireStudy → deleteRepertoireStudy(id) drops the
+  study, drops its todoList (a checklist is derived from its study and dies with
+  it — one tombstone covers both, matched via todoList.studyId), and pushes the
+  tombstone. studyTombstoneWins(tomb, study) = tombstone wins unless
+  study.addedAt > tomb.ts, which is how a re-add beats an earlier delete
+  cross-device — restoreRepertoireStudy (the toast's Undo, restoring the
+  captured todoList too) and addRepertoireStudy both re-stamp addedAt for
+  exactly that reason. Dropping the local tombstone is cosmetic: deletedStudies
+  merges as a union, so an already-synced one returns from the remote and must
+  lose on addedAt instead. Resolution runs in TWO places — mergeGistData (a pass
+  after the repertoire union, ungated on local.repertoire so an older build's
+  remote carrying both tombstone and study is reconciled; rewrites studies +
+  todoLists and retires tombstones that lost to a re-add) and at READ in
+  getRepertoireConfig / getTodoList, since loadFromGist assigns the raw remote
+  to gistData with no merge pass.
 Custom deviations: gistData.repertoire.customDeviations[]. addCustomDeviation /
   removeCustomDeviation / addCustomDeviationFromInput.
 Dismissed: gistData.repertoire.dismissed[] (position keys) —
@@ -800,6 +820,10 @@ Generation — generateTodoVariations(studyId, color, opts) → { variations, ga
 Persistence — gistData.repertoire.todoLists[] (one per study): { id:`todo_<studyId>`,
   studyId, name, color, targetPly, maxVariations, createdAt, variations[], gaps[] }.
   generateTodoListForStudy(studyId) regenerates via #todoPly/#todoCount inputs.
+  A checklist is owned by its study: deleting the study deletes the list, and
+  the study's tombstone keeps it deleted through the merge (no separate todoList
+  tombstone — see REPERTOIRE → Study deletion). All reads go through
+  getTodoList, which applies the same tombstone filter.
   Merged by id, local wins — these are regenerable definitions.
 
 Completion is DERIVED, not stored per-variation: a "win" writes to
@@ -1295,7 +1319,9 @@ Files:
 gistData schema:
   positions[pid].{completed, lastSeen, srs, invalidated, invalidatedLines[]}
   notes[fenKey].{text, arrows, circles, drawInterval, updated}
-  repertoire.studies[]            // [{id, color, name}]
+  repertoire.studies[]            // [{id, color, name, addedAt}]
+  repertoire.deletedStudies[]     // [{id, ts}] study-removal tombstones (see
+                                  //   REPERTOIRE → Study deletion)
   repertoire.customDeviations[]   // [{positionKey, ...}]
   repertoire.dismissed[]          // position keys
   repertoire.todoLists[]          // variation-checklist defs
@@ -1316,7 +1342,11 @@ syncToGist(): reads fresh remote (gistRead), deep-copies in-memory gistData as a
 mergeGistData(local, remote) field semantics:
   - positions: per-pid newer-wins by lastSeen; invalidated OR'd; invalidatedLines union
   - notes: per-key newer-wins by .updated
-  - repertoire.studies: merge by id, LOCAL wins
+  - repertoire.studies: merge by id, LOCAL wins; then a tombstone-resolution
+    pass drops studies (and their todoLists) killed by repertoire.deletedStudies
+  - repertoire.deletedStudies: union by id, newer ts wins; tombstones CARRIED
+    (a delete must beat an older live record cross-device), retired only when a
+    re-add out-stamps them (addedAt > ts)
   - repertoire.customDeviations: merge by positionKey, REMOTE wins
   - repertoire.dismissed: set union
   - repertoire.todoLists: merge by id, LOCAL wins

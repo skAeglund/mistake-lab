@@ -1873,7 +1873,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Repertoire deviation detection now reuses cached moveStats: detectRepertoireDeviations previously replayed EVERY game through chess.js (sloppy SAN + fen() per ply, synchronous, main thread, uncached) on every launch and every dismiss/refresh — the dominant per-launch cost at 300+ games. It now walks fenDataCache[gameId].moveStats (posKey/san/uci per ply; next entry's posKey or finalFen as the post-move position), with chess.js replay only for uncached or initialFen games. Deviation fenBefore / gap fen are reconstructed as posKey + ' 0 ' + real fullmove from ply index (halfmove clock is irrelevant downstream; the fullmove counter must be real — openGapInExplorer→launchFilterPractice reads it for move numbering; initialFen games skip the fast path since the derivation assumes a standard start). Legacy EP-inclusive cache posKeys are healed in-place on read (same idempotent pattern as doBuildOpeningIndex). The startup call site (showMainApp's loadRepertoireTrie().then) now awaits fenDataPreloadPromise first so the first run doesn't race the IDB preload and fall back to full replay; the promise always settles (its .catch installs an empty cache). Completion log now includes ms + cached/replayed game counts. Earlier — Opening-index build is now non-blocking: doBuildOpeningIndex batched with a fixed 50-game tick (one long main-thread task on mobile with hundreds of games). Now each tick self-sizes to a ~8ms work budget — BATCH starts at 20 and is resized every tick from measured per-game cost (cold/chess.js-replay ticks shrink toward 4, warm ticks grow toward 120), so the setTimeout(0) yields land often enough that taps/scroll stay responsive during the build. Total work and all index semantics are unchanged — no ply cap (the shared gameFenIndex/PMI feed opening-explorer per-move stats, game-position filtering, and weak spots, so capping would silently shorten filtering/explorer depth). Earlier — Weak-spots preview arrow: HUMAN-lens rows now overlay an orange arrow for the opponent's reply (the edge's uci) on the hover board preview, and the preview is oriented to the user's side (was hardcoded white, so black-perspective spots rendered flipped). showPositionPreview gains an optional moveUci param (SVG arrow with orientation-aware square→viewBox mapping); weakSpotRowHtml gains orientation + moveUci params threaded through onmouseenter. BOT-lens rows orient to the user but draw no arrow (position+preset has no single opponent move). Backward-compatible — the 2-arg deviation-row preview is unchanged. Earlier — Empty-state overlay fix: the "Select a game to begin" placeholder + "Analyze a position" button used position:absolute; inset:0 but sat in .panel-center (the whole board+nav+padding column), so they centred low over the board. Moved #emptyMsg inside #boardContainer (the position:relative, board-sized wrapper) so inset:0 now centres the overlay on the board square. Earlier — Analysis eval badges now colour by side: a small edge (+0.1–0.2) reads clearly white and (−0.1–0.2) clearly black instead of the old dark "equal" gray (which looked black for small white evals). Sign-based classifier with a slight tier (0<|cp|≤50, softened but clearly white/black), strong tier at |cp|>50, and a neutral mid-gray reserved for a dead-level 0.00; eval bar unchanged (already proportional). Earlier — Notes polish: (1) per-note "reveal arrows in draw order" interval (#noteDrawInterval, ms, 0=off, authoring default 750ms via NOTE_DEFAULT_DRAW_INTERVAL — new/legacy notes pre-fill it, explicit saved value incl. 0 wins, reveal reads the saved value literally so legacy notes don't animate until re-saved) — when >0 and a note has >1 arrow, note-view reveals arrows one per interval in stored draw order (first immediate, rest staggered), each connected same-color circle (arrow destination sits on it) fading in with its arrow; unconnected circles show immediately; ↻ Replay in view mode; state via noteReveal/noteRevealTimer + cancelNoteReveal() at every noteArrows-reset site; .note-annot-appear fades only the newest element each step. (2) note arrow/circle opacity 0.55 → 0.85. (3) bigger note panel + reading font (base width 240→264, fonts 12→13; ≥1400px width→320 / text→14 / textarea max-height→220; mobile view-text→14). Earlier — Weak-Spots Dashboard is now MOVE-CONDITIONAL: the unit is a move edge, not a position — at a recurring position, the specific move that leads to a bad win-rate (e.g. "They play Bb4 → you score 19% over 8 games", vs a fine score against their other replies). Each positionMoveIndex (posKey → move) entry is an edge with its own user-perspective W-L-D; the ≥5-game gate is per-edge (that move needs 5 games for its rate to mean anything). Score = (W+½D)/N; below 50% = weak. Moves are opponent replies you handle badly ("They play X"); your own move choices are excluded. Session-local Human/Bot toggle (window._weakSpotsMode): HUMAN scans PMI edges (grouped by opening, near-universal edges >50% of games gated out on ≥20-game libraries, memoized by pmiGameCount, lazy PMI build via ensureWeakSpotsIndex poll 200ms/12s), Study → opening explorer at the position so the per-move result bars show the full split; BOT stays position+preset from practiceScoreboard (practice records no per-move split), Drill → startTodoFromList else Study. Rows show a winRateColor score pill, move + whose-move, W-L-D over N, hover board preview; worst-first, cap 15, thresholds in WEAKSPOT_CFG. Read-only (no store, no drill machinery, no mode flag). Replaces the position-aggregate "branching point" version. Earlier — Analysis Mode note / 🧠 flashcard authoring + paste-FEN + scratch entry: (1) 📝 #btnAnalysisNote in the analysis-panel header (N key now targets it, not the display:none #positionNav btnNote) opens the note panel on the live analysis position — getCurrentNoteFen's analysisMode branch already resolved analysisEngine.fen(), so note edit/save and 🧠 Make/Remove flashcard work unchanged; updateNoteButton mirrors .has-note onto it. This is the recommended way to confirm/find a plan with the engine/Maia/DB before enrolling it. (2) Paste-FEN (#analysisFenInput / setAnalysisFromFen): validates, no-ops on an exact re-paste, confirms an unsaved note edit, then re-roots the tree at the pasted position; syncAnalysisFenInput (called from renderAnalysisTree) keeps the field showing the current FEN so it doubles as copy-current-FEN. (3) 'Analyze a position' (#btnAnalyzeScratch in #emptyMsg / enterAnalysisBlank): enter Analysis Mode from the empty board with no loaded mistake — no ninth mode flag (rides analysisMode with analysisSavedState={blank:true}); exit restores the empty state.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Deleted studies now stay deleted: gistData.repertoire.studies merges as a union by id, which cannot express a removal — the record still existed in the remote copy, collided with nothing, and came back on the next read-merge-write (~3s later, or at the next launch). Removal now records a tombstone in the new repertoire.deletedStudies ([{id, ts}], the planCards pattern): deleteRepertoireStudy drops the study, drops its variation checklist (a todoList is derived from its study and dies with it — one tombstone covers both via todoList.studyId; removeRepertoireStudy never touched todoLists before, so checklists outlived their studies regardless of the merge bug), and pushes the tombstone. studyTombstoneWins(tomb, study): the tombstone wins unless study.addedAt > tomb.ts — addRepertoireStudy and the toast's Undo (restoreRepertoireStudy, which also puts the captured checklist back) both stamp a fresh addedAt so a re-add beats an earlier delete cross-device; dropping the local tombstone is cosmetic, since deletedStudies merges as a union and an already-synced one returns from the remote to lose on addedAt instead. Resolution runs in two places: a pass in mergeGistData after the repertoire union (ungated on local.repertoire, so a remote written by an older build carrying both tombstone and study is reconciled; rewrites studies + todoLists, retires tombstones that lost to a re-add), and at READ in getRepertoireConfig / getTodoList, since loadFromGist assigns the raw remote to gistData with no merge pass. Studies predating this have no addedAt (→ 0), so a tombstone always wins over them. Earlier — Repertoire deviation detection now reuses cached moveStats: detectRepertoireDeviations previously replayed EVERY game through chess.js (sloppy SAN + fen() per ply, synchronous, main thread, uncached) on every launch and every dismiss/refresh — the dominant per-launch cost at 300+ games. It now walks fenDataCache[gameId].moveStats (posKey/san/uci per ply; next entry's posKey or finalFen as the post-move position), with chess.js replay only for uncached or initialFen games. Deviation fenBefore / gap fen are reconstructed as posKey + ' 0 ' + real fullmove from ply index (halfmove clock is irrelevant downstream; the fullmove counter must be real — openGapInExplorer→launchFilterPractice reads it for move numbering; initialFen games skip the fast path since the derivation assumes a standard start). Legacy EP-inclusive cache posKeys are healed in-place on read (same idempotent pattern as doBuildOpeningIndex). The startup call site (showMainApp's loadRepertoireTrie().then) now awaits fenDataPreloadPromise first so the first run doesn't race the IDB preload and fall back to full replay; the promise always settles (its .catch installs an empty cache). Completion log now includes ms + cached/replayed game counts. Earlier — Opening-index build is now non-blocking: doBuildOpeningIndex batched with a fixed 50-game tick (one long main-thread task on mobile with hundreds of games). Now each tick self-sizes to a ~8ms work budget — BATCH starts at 20 and is resized every tick from measured per-game cost (cold/chess.js-replay ticks shrink toward 4, warm ticks grow toward 120), so the setTimeout(0) yields land often enough that taps/scroll stay responsive during the build. Total work and all index semantics are unchanged — no ply cap (the shared gameFenIndex/PMI feed opening-explorer per-move stats, game-position filtering, and weak spots, so capping would silently shorten filtering/explorer depth). Earlier — Weak-spots preview arrow: HUMAN-lens rows now overlay an orange arrow for the opponent's reply (the edge's uci) on the hover board preview, and the preview is oriented to the user's side (was hardcoded white, so black-perspective spots rendered flipped). showPositionPreview gains an optional moveUci param (SVG arrow with orientation-aware square→viewBox mapping); weakSpotRowHtml gains orientation + moveUci params threaded through onmouseenter. BOT-lens rows orient to the user but draw no arrow (position+preset has no single opponent move). Backward-compatible — the 2-arg deviation-row preview is unchanged. Earlier — Empty-state overlay fix: the "Select a game to begin" placeholder + "Analyze a position" button used position:absolute; inset:0 but sat in .panel-center (the whole board+nav+padding column), so they centred low over the board. Moved #emptyMsg inside #boardContainer (the position:relative, board-sized wrapper) so inset:0 now centres the overlay on the board square. Earlier — Analysis eval badges now colour by side: a small edge (+0.1–0.2) reads clearly white and (−0.1–0.2) clearly black instead of the old dark "equal" gray (which looked black for small white evals). Sign-based classifier with a slight tier (0<|cp|≤50, softened but clearly white/black), strong tier at |cp|>50, and a neutral mid-gray reserved for a dead-level 0.00; eval bar unchanged (already proportional). Earlier — Notes polish: (1) per-note "reveal arrows in draw order" interval (#noteDrawInterval, ms, 0=off, authoring default 750ms via NOTE_DEFAULT_DRAW_INTERVAL — new/legacy notes pre-fill it, explicit saved value incl. 0 wins, reveal reads the saved value literally so legacy notes don't animate until re-saved) — when >0 and a note has >1 arrow, note-view reveals arrows one per interval in stored draw order (first immediate, rest staggered), each connected same-color circle (arrow destination sits on it) fading in with its arrow; unconnected circles show immediately; ↻ Replay in view mode; state via noteReveal/noteRevealTimer + cancelNoteReveal() at every noteArrows-reset site; .note-annot-appear fades only the newest element each step. (2) note arrow/circle opacity 0.55 → 0.85. (3) bigger note panel + reading font (base width 240→264, fonts 12→13; ≥1400px width→320 / text→14 / textarea max-height→220; mobile view-text→14). Earlier — Weak-Spots Dashboard is now MOVE-CONDITIONAL: the unit is a move edge, not a position — at a recurring position, the specific move that leads to a bad win-rate (e.g. "They play Bb4 → you score 19% over 8 games", vs a fine score against their other replies). Each positionMoveIndex (posKey → move) entry is an edge with its own user-perspective W-L-D; the ≥5-game gate is per-edge (that move needs 5 games for its rate to mean anything). Score = (W+½D)/N; below 50% = weak. Moves are opponent replies you handle badly ("They play X"); your own move choices are excluded. Session-local Human/Bot toggle (window._weakSpotsMode): HUMAN scans PMI edges (grouped by opening, near-universal edges >50% of games gated out on ≥20-game libraries, memoized by pmiGameCount, lazy PMI build via ensureWeakSpotsIndex poll 200ms/12s), Study → opening explorer at the position so the per-move result bars show the full split; BOT stays position+preset from practiceScoreboard (practice records no per-move split), Drill → startTodoFromList else Study. Rows show a winRateColor score pill, move + whose-move, W-L-D over N, hover board preview; worst-first, cap 15, thresholds in WEAKSPOT_CFG. Read-only (no store, no drill machinery, no mode flag). Replaces the position-aggregate "branching point" version. Earlier — Analysis Mode note / 🧠 flashcard authoring + paste-FEN + scratch entry: (1) 📝 #btnAnalysisNote in the analysis-panel header (N key now targets it, not the display:none #positionNav btnNote) opens the note panel on the live analysis position — getCurrentNoteFen's analysisMode branch already resolved analysisEngine.fen(), so note edit/save and 🧠 Make/Remove flashcard work unchanged; updateNoteButton mirrors .has-note onto it. This is the recommended way to confirm/find a plan with the engine/Maia/DB before enrolling it. (2) Paste-FEN (#analysisFenInput / setAnalysisFromFen): validates, no-ops on an exact re-paste, confirms an unsaved note edit, then re-roots the tree at the pasted position; syncAnalysisFenInput (called from renderAnalysisTree) keeps the field showing the current FEN so it doubles as copy-current-FEN. (3) 'Analyze a position' (#btnAnalyzeScratch in #emptyMsg / enterAnalysisBlank): enter Analysis Mode from the empty board with no loaded mistake — no ninth mode flag (rides analysisMode with analysisSavedState={blank:true}); exit restores the empty state.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -3460,7 +3460,13 @@ async function gistCreate(seedContent) {
 // - notes[posKey]: per-key, newer 'updated' wins.
 // - repertoire.studies: union by id; local wins on conflict (the user just
 //   configured them on this device, those are intentional in the no-Gist →
-//   Gist flow).
+//   Gist flow). A union alone cannot express a DELETION (the removed record
+//   simply survives from the remote side), so removals are recorded as
+//   tombstones in repertoire.deletedStudies and resolved after the union —
+//   see the tombstone block below.
+// - repertoire.deletedStudies: union by id, newer ts wins. Tombstones must be
+//   CARRIED (a delete on one device has to beat an older live record from
+//   another), exactly like planCards.
 // - repertoire.customDeviations: union by positionKey; remote wins on conflict
 //   (analyzer-style "remote is canonical").
 // - repertoire.dismissed: set union of position keys.
@@ -3552,6 +3558,45 @@ function mergeGistData(local, remote) {
       for (const t of merged.repertoire.todoLists || []) byId.set(t.id, t);
       for (const t of local.repertoire.todoLists) byId.set(t.id, t);
       merged.repertoire.todoLists = [...byId.values()];
+    }
+    // deletedStudies: study-removal tombstones ({id, ts}). Union by id, newer
+    // ts wins. Carried, never dropped here — the resolution pass below is what
+    // retires them.
+    if (local.repertoire.deletedStudies) {
+      const byId = new Map();
+      for (const t of merged.repertoire.deletedStudies || []) byId.set(t.id, t);
+      for (const t of local.repertoire.deletedStudies) {
+        const r = byId.get(t.id);
+        if (!r || (t.ts || 0) > (r.ts || 0)) byId.set(t.id, t);
+      }
+      merged.repertoire.deletedStudies = [...byId.values()];
+    }
+  }
+
+  // ── study tombstone resolution ──
+  // Runs unconditionally (not gated on local.repertoire): a remote written by
+  // an older build can contain a tombstone AND the study it kills, and this is
+  // the pass that reconciles them. A tombstone beats a study record unless the
+  // study was re-added AFTER the delete (studyTombstoneWins). Surviving lists
+  // are rewritten so the resolved state is what gets persisted, and tombstones
+  // that lost to a re-add are retired so they can't rot.
+  if (merged.repertoire) {
+    const tombs = new Map();
+    for (const t of merged.repertoire.deletedStudies || []) {
+      const r = tombs.get(t.id);
+      if (!r || (t.ts || 0) > (r.ts || 0)) tombs.set(t.id, t);
+    }
+    if (tombs.size) {
+      const studies = (merged.repertoire.studies || [])
+        .filter(s => !studyTombstoneWins(tombs.get(s.id), s));
+      const live = new Set(studies.map(s => s.id));
+      merged.repertoire.studies = studies;
+      // A checklist is derived from its study — it dies with it. (todoLists
+      // merge by id/local-wins too, so it needs the same protection; the study
+      // tombstone covers it via studyId rather than a second tombstone list.)
+      merged.repertoire.todoLists = (merged.repertoire.todoLists || [])
+        .filter(t => !tombs.has(t.studyId) || live.has(t.studyId));
+      merged.repertoire.deletedStudies = [...tombs.values()].filter(t => !live.has(t.id));
     }
   }
 
@@ -23829,10 +23874,70 @@ function walkPGNTokens(chess, tokens, cursor, trie, repertoireColor, warnings, i
 
 // ── Study fetch & cache ──
 
+// ─── Study deletion tombstones ───
+// gistData.repertoire.studies merges as a union by id, so removing a study from
+// the local array alone is silently undone by the next read-merge-write: the
+// record still exists remotely, collides with nothing, and survives the union.
+// Deletions are therefore recorded as tombstones ({id, ts}) in
+// gistData.repertoire.deletedStudies — the planCards pattern. A tombstone beats
+// a study record unless the study was re-added after the delete, which is what
+// the `addedAt` stamp on the record is for; records predating this feature have
+// no addedAt (→ 0), so a tombstone always wins over them.
+function studyTombstoneWins(tomb, study) {
+  if (!tomb) return false;
+  return !((study?.addedAt || 0) > (tomb.ts || 0));
+}
+function deletedStudyTombs() {
+  const m = new Map();
+  for (const t of (gistData?.repertoire?.deletedStudies || [])) {
+    const r = m.get(t.id);
+    if (!r || (t.ts || 0) > (r.ts || 0)) m.set(t.id, t);
+  }
+  return m;
+}
+
 function getRepertoireConfig() {
   // Stored in gistData.repertoire.studies
   if (!gistData) return [];
-  return gistData.repertoire?.studies || [];
+  const studies = gistData.repertoire?.studies || [];
+  // Filter at read as well as in mergeGistData: loadFromGist assigns the raw
+  // remote to gistData without a merge pass, so a copy still carrying a killed
+  // study (older build on another device) must not resurface in the UI.
+  const tombs = deletedStudyTombs();
+  if (!tombs.size) return studies;
+  return studies.filter(s => !studyTombstoneWins(tombs.get(s.id), s));
+}
+
+// Delete a study + everything derived from it, tombstone included.
+function deleteRepertoireStudy(id) {
+  ensureGistData();
+  if (!gistData.repertoire) gistData.repertoire = {};
+  const rep = gistData.repertoire;
+  rep.studies = (rep.studies || []).filter(s => s.id !== id);
+  rep.todoLists = (rep.todoLists || []).filter(t => t.studyId !== id);
+  rep.deletedStudies = (rep.deletedStudies || []).filter(t => t.id !== id);
+  rep.deletedStudies.push({ id, ts: Date.now() });
+  debounceSyncToGist();
+}
+
+// Undo a deleteRepertoireStudy. Dropping the local tombstone is not enough on
+// its own — deletedStudies merges as a union, so an already-synced tombstone
+// comes back from the remote. The fresh addedAt stamp is what actually revives
+// the study (studyTombstoneWins), on this device and every other one.
+function restoreRepertoireStudy(study, todoList, index) {
+  ensureGistData();
+  if (!gistData.repertoire) gistData.repertoire = {};
+  const rep = gistData.repertoire;
+  rep.deletedStudies = (rep.deletedStudies || []).filter(t => t.id !== study.id);
+  if (!rep.studies) rep.studies = [];
+  if (!rep.studies.some(s => s.id === study.id)) {
+    rep.studies.splice(Math.min(index, rep.studies.length), 0, { ...study, addedAt: Date.now() });
+  }
+  if (todoList) {
+    if (!rep.todoLists) rep.todoLists = [];
+    if (!rep.todoLists.some(t => t.studyId === study.id)) rep.todoLists.push(todoList);
+  }
+  debounceSyncToGist();
 }
 
 function setRepertoireConfig(studies) {
@@ -24424,8 +24529,16 @@ async function addRepertoireStudy() {
   const nameMatch = pgn.match(/\[StudyName "([^"]+)"\]/) || pgn.match(/\[Event "([^"]+)"\]/);
   const name = nameMatch ? nameMatch[1] : studyId;
 
-  studies.push({ id: studyId, color, name });
+  // addedAt is what lets this record out-rank a tombstone from an earlier
+  // delete (studyTombstoneWins) — without it, re-adding a previously deleted
+  // study would be killed on sight by its own tombstone. Retiring the local
+  // tombstone is cosmetic on top of that (deletedStudies merges as a union, so
+  // an already-synced one returns from the remote and loses to addedAt there).
+  studies.push({ id: studyId, color, name, addedAt: Date.now() });
   setRepertoireConfig(studies);
+  if (gistData.repertoire?.deletedStudies) {
+    gistData.repertoire.deletedStudies = gistData.repertoire.deletedStudies.filter(t => t.id !== studyId);
+  }
   // Adding the first study while connected makes the section foldable — keep it
   // open so setup doesn't collapse under the user mid-flow.
   window._repConfigOpen = true;
@@ -24441,8 +24554,11 @@ async function addRepertoireStudy() {
 function removeRepertoireStudy(index) {
   const studies = getRepertoireConfig();
   if (index < 0 || index >= studies.length) return;
-  const removed = studies.splice(index, 1)[0];
-  setRepertoireConfig(studies);
+  const removed = studies[index];
+  // Captured before the delete so Undo can put the generated checklist back
+  // rather than making the user regenerate it.
+  const removedTodo = getTodoList(removed.id);
+  deleteRepertoireStudy(removed.id);
   renderRepertoireConfig();
   const statusEl = document.getElementById('repertoireStatus');
   if (statusEl) statusEl.textContent = `Removed "${removed.name || removed.id}"`;
@@ -24450,15 +24566,15 @@ function removeRepertoireStudy(index) {
   // UX audit #12: the ✕ is a small tap target with no confirm — offer undo
   // instead of blocking. Restore re-inserts at the original index (config is
   // re-read at undo time in case other studies were added/removed meanwhile;
-  // clamp the index) and re-runs the same refresh pipeline as removal.
+  // clamp the index), puts the checklist back, and re-runs the same refresh
+  // pipeline as removal.
   showToast(`Removed study "${removed.name || removed.id}"`, {
     duration: 6000,
     actionLabel: 'Undo',
     onAction: () => {
       const current = getRepertoireConfig();
       if (current.some(s => s.id === removed.id)) return; // re-added manually meanwhile
-      current.splice(Math.min(index, current.length), 0, removed);
-      setRepertoireConfig(current);
+      restoreRepertoireStudy(removed, removedTodo, index);
       renderRepertoireConfig();
       if (statusEl) statusEl.textContent = `Restored "${removed.name || removed.id}"`;
       refreshRepertoire();
@@ -26273,7 +26389,14 @@ function winRateColor(rate) {
 // ─── Variation-checklist UI (Repertoire tab) ───
 
 function getTodoList(studyId) {
-  return gistData?.repertoire?.todoLists?.find(t => t.studyId === studyId) || null;
+  const list = gistData?.repertoire?.todoLists?.find(t => t.studyId === studyId) || null;
+  if (!list) return null;
+  // Same read-time guard as getRepertoireConfig: a raw (unmerged) remote can
+  // still carry the checklist of a study that was deleted elsewhere.
+  const tombs = deletedStudyTombs();
+  if (!tombs.has(studyId)) return list;
+  const study = (gistData?.repertoire?.studies || []).find(s => s.id === studyId);
+  return studyTombstoneWins(tombs.get(studyId), study) ? null : list;
 }
 
 // Format a SAN array with move numbers: ['e4','e5','Nf3'] → "1.e4 e5 2.Nf3".
