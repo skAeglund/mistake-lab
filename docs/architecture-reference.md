@@ -326,6 +326,13 @@ Analysis-tree root selection (enterAnalysisMode):
 Validation:
   - Threshold is a 5%-win-chance-drop via cpToWinPct (matching classifyWpDrop's own
     "good" cutoff), NOT a flat centipawn gap. No won-position exemption.
+  - Save-dialog warnings and unverified items are CLICKABLE (seqWarnLink):
+    the walk annotates each move with `_nodeId`/`_parentNodeId` (validation-only,
+    stripped alongside `_parentFen` at persist time in confirmSaveSequence);
+    clicking jumps via analysisGoToNode — to the position AFTER a flagged covered
+    move, and to the position BEFORE for uncovered-alternative / single-PV items
+    (where the user would branch or trigger an eval). The dialog stays open
+    (exploring with it open is the established pattern — confirm re-walks).
   - "Find another way" is optional and eval-gated, not mandatory.
   - `classifyRemainingTacticAlts(invLines)` classifies each not-yet-solved alt line:
       • mandatory — divergence-from-solved is at an OPPONENT move, or a user move
