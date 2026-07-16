@@ -855,7 +855,9 @@ Per-difficulty win-rate on chips: `TODO_WINRATE_WINDOW = 5` — window over the 
   practiceScoreboard[leafKey] by e.preset, takes slice(-5) of each bucket (entries
   are chronological, so this is the most-recent window), returns
   {easy:{n,wins,rate}, medium:…, hard:…} — rendered as wins/n + tooltip on each
-  chip. `winRateColor(rate)` maps 0..1 to background color via piecewise HSL hue
+  chip. A DRAW counts as 0.5 toward `wins` (display/rate only — completion and
+  difficulty unlock still require a real win via todoCompletedPresets; the
+  finishTodoDrill draw card is yellow and says so). `winRateColor(rate)` maps 0..1 to background color via piecewise HSL hue
   lerp: 0%→red(0°), 50%→orange(~30°), 75%→yellow-green(~78°), 100%→green(~122°),
   fixed 55%/45% S/L for legible white text. Never-attempted chips stay neutral.
   This is a display layer only — completion/unlock logic is unchanged by it.
