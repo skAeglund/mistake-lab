@@ -679,6 +679,17 @@ UI — Detected Tactics Modal (openDetectedTacticsModal / renderDetectedTacticsL
 Solve mode — tryDetectedTactic(listIdx) sets detectedTacticSolveMode=true, routes
   through tacticMode evaluation. Saves review snapshot in
   _detectedTacticReviewSnapshot for restore on exit. Escape → abandonDetectedTacticSolve.
+  Entry ALSO clears contLineReviewKeyMoves/KeyIdx and contLineBrowsing (not just
+  contLineReviewMode): the game-review stray-move guard in onDrop / tap-to-move
+  keys `inReviewContext` on reviewMode OR keyMoves, so leaving keyMoves populated
+  snapped back every solve move after a game review, and a latched
+  contLineBrowsing would have truncated the review's contLine. abandon restores
+  keyMoves/keyIdx from the snapshot; goToContLineMove recomputes contLineBrowsing.
+  Board gating: onDragStart and the tap-to-move handler each have a dedicated
+  detectedTacticSolveMode branch (after the paused-tactic gate, before the
+  `filteredMistakes[currentMistakeIdx]` block) gating on
+  _detectedTacticCand.playerColor + gameEngine.turn() — solves work even with no
+  live SRS item (currentMistakeIdx -1, e.g. checklist/advantage sessions).
 
 Save flow — savePracticeTactic(cand), a DIFFERENT function from confirmSaveSequence
   (SEQUENCE CONVERSION) though both write to gistData.practiceTactics with similar
