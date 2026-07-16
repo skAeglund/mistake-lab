@@ -823,9 +823,13 @@ the covered tree, with the Lichess opening explorer scoring opponent nodes to se
 how a fixed slot budget is APPORTIONED across the tree (proportional, NOT a ranking
 cut). Absent-from-DB covered moves still enumerate with a tiny floor.
 
-Generation — generateTodoVariations(studyId, color, opts) → { variations, gaps }:
+Generation — generateTodoVariations(studyId, color, opts) → { variations, gaps,
+  reserve }:
   opts: targetPly (10), maxVariations (10; UI clamps 1–50), maxGaps (10),
-        maxExplorerCalls (2500), maxNodes (20000), onProgress(callCount).
+        maxExplorerCalls (2500), maxNodes (20000), onProgress(callCount),
+        excludeLeafKeys (user-excluded leaf position keys — those leaves get
+        capacity 0 in the enumerated tree, so the apportionment reassigns
+        their slots; collectAllLeaves/selectLeaves skip zero-capacity leaves).
   TODO_RANK_RATINGS = [1600,1800,2000,2200,2500]; TODO_RANK_SPEEDS = blitz/rapid/
     classical/correspondence. Explorer calls memoized by fenPositionKey; 120ms
     politeness delay; keys BOTH uci and 's:'+SAN (castling O-O differs between
@@ -834,15 +838,35 @@ Generation — generateTodoVariations(studyId, color, opts) → { variations, ga
   Variation shape: { leafKey, leafFen, lineUci, lineSan, cumProb, importance,
     openingName }. Gap shape: uncovered opponent moves (reachProb ≥ 0.08),
     collapsed by transposition, ranked, capped.
+  RESERVE (`TODO_RESERVE_EXTRA = 10`): the next-best leaves in EXACT selection
+    order, same shape as variations. The capped d'Hondt apportionment is
+    house-monotone (quota q+1 replays q's greedy slot sequence + one slot, so
+    selection sets are nested); stepping the quota from N+1..N+10 and diffing
+    yields the order in which extra leaves would enter. Pure in-memory replays
+    of the built tree — no explorer calls. Used by exclusion to refill slots.
 
 Persistence — gistData.repertoire.todoLists[] (one per study): { id:`todo_<studyId>`,
-  studyId, name, color, targetPly, maxVariations, createdAt, variations[], gaps[] }.
-  generateTodoListForStudy(studyId) regenerates via #todoPly/#todoCount inputs.
+  studyId, name, color, targetPly, maxVariations, createdAt, variations[], gaps[],
+  reserve[], excludedLeafKeys[] }.
+  generateTodoListForStudy(studyId) regenerates via #todoPly/#todoCount inputs and
+  carries excludedLeafKeys over from the previous list (exclusions survive
+  regeneration; passed as opts.excludeLeafKeys).
   A checklist is owned by its study: deleting the study deletes the list, and
   the study's tombstone keeps it deleted through the merge (no separate todoList
   tombstone — see REPERTOIRE → Study deletion). All reads go through
   getTodoList, which applies the same tombstone filter.
   Merged by id, local wins — these are regenerable definitions.
+
+Variation EXCLUSION — excludeTodoVariation(studyId, vIdx), the ✕ on each
+  variation row (confirm()-gated): pushes the leafKey onto excludedLeafKeys,
+  splices the variation out, and refills the slot from list.reserve (first
+  entry not excluded / not already present, appended at the end of the list),
+  then debounceSyncToGist + re-render (todoHidePreview first — the ✕ sits in a
+  hover-preview row whose mouseleave is orphaned by the re-render). No reserve
+  left (or a legacy pre-reserve list) → toast suggests Regenerate.
+  clearTodoExclusions(studyId) ("restore all" footer link, shown with the
+  excluded count) empties excludedLeafKeys — excluded variation objects aren't
+  kept, so lines return on the next generation, not immediately.
 
 Completion is DERIVED, not stored per-variation: a "win" writes to
   gistData.practiceScoreboard[leafKey] tagged with the preset (recordPracticeResult
