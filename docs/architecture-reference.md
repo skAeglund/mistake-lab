@@ -200,6 +200,10 @@ practiceMistakes & practiceTactics merge into allMistakes AFTER analyzer-derived
   mistakes/tactics, BEFORE the repertoire-trie filter pass — so saved practice items
   matching the trie also get filtered out. Sequences merge through this same path.
 
+extractAllMistakes tail: snapshots recidRawMistakes (post-cache-save, raw) and
+  recidGamesMeta (pre-zero-position-filter — the filter then drops mistake-free
+  games from allGames) and calls scheduleRecidivism — see RECIDIVISM TRACKER.
+
 Shared helpers worth knowing: ensureGistData() (lazy-init gistData), lsSetSafe(key,
   value, ctx) (LS write with quota-failure surfacing), invalidateOpeningIndices()
   (resets fen/move indices, bumps openingBuildSession), flushPendingSyncs()
@@ -247,6 +251,9 @@ SRS grades (srsRecorded guards retry re-grading):
 
 isExactBest: move.san === bestMoveSan OR userUci === bestMoveUci OR wpDrop < 0.5.
 
+recordReview also stamps positions[pid].firstReview on the first-ever review
+  (outside .srs; see RECIDIVISM TRACKER for why and how it merges).
+
 FSRS-5 (fsrs_review(card, grade, now)):
   - Due-date boundaries use the LOCAL calendar day, not UTC.
   - fsrs_review treats an unparseable c.lastReview as "no prior review" (elapsed=0)
@@ -290,6 +297,91 @@ MOVE_CLASSIFICATION map (symbol / color):
 cpToWinPct(cp): win%-based helper also used by sequence validation (see below) —
   keeps the "good enough" bar for a sequence alt-line consistent with what would
   count as a mistake in a live drill.
+
+─── RECIDIVISM TRACKER ───
+
+Detects when a previously-drilled position recurs in a LATER game (real import
+or in-app continuation) and whether the user blundered there again — the
+"does drilling transfer?" measurement loop. Transpositions count (posKey
+equality via fenPositionKey).
+
+Verdicts (per encounter):
+  fixed    — position recurred, NO new mistake extracted there this time
+  relapsed — ANY new extracted mistake at the posKey (not just repeating the
+             original move); enc.sameMove=true when it IS the same move.
+             Repertoire items are checked directly against the trie
+             (trieMatchesMove) + item.repertoireMove (custom deviations) —
+             independent of deviation-detection's first-deviation-per-game scope.
+  exactBest — bonus flag only (never drives the verdict): tactic solution first
+             moves, trie move, or eval-cache bestMove for mistakes.
+  Mistake-type relapse inherits the >10% wpDrop extraction threshold — a small
+  inaccuracy in a drilled position reads as fixed. Deliberate.
+
+Derived state — nothing recidivism-specific is persisted except two fields on
+gistData.positions[pid]:
+  firstReview — ISO ts of the FIRST-ever review, stamped in recordReview
+    OUTSIDE .srs (an SRS-8 corrupt-card reset can't wipe it). mergeGistData
+    keeps the EARLIEST across devices (ISO strings, lexicographic sort).
+    Transfer credit requires game ts > firstReview. Legacy cards (reviewed
+    before the field existed): fallback = source game's createdAt
+    (mistake/tactic) or 0 (repertoire), encounters flagged approx.
+  recidGraded — gameIds already auto-rescheduled (dedupe), union-merged in
+    mergeGistData (newer-record-wins would drop entries).
+
+Compute path: scheduleRecidivism (300ms debounce, awaits fenDataPreloadPromise)
+→ computeRecidivism. Triggered from: end of extractAllMistakes, end of
+detectRepertoireDeviations (deviation set feeds the index), loadReviewHistory
+resolution (in-app encounters), and re-enabling the setting. Runs in a few ms —
+Map lookups over cached moveStats, no chess.js replay for real games.
+
+buildDrilledIndex → Map<posKey, entry[]>: reviewed (srs.reps ≥ 1),
+non-invalidated items. Sources: allMistakes (mistake/tactic) PLUS
+repertoireDeviations (type:'repertoire' items live THERE, not in allMistakes —
+the ITEM TYPES list is conceptual on this point). Excluded: 'plan' (no move to
+check), 'practice' (synthetic), 'advantage' (no single expected move, fuzzy
+relapse signal — v1 exclusion).
+
+Real-game scan walks fd.moveStats over recidGamesMeta, NOT allGames:
+  recidGamesMeta = slim {id, createdAt, hasAnalysis, playerColor} snapshot
+  captured in extractAllMistakes BEFORE the zero-position filter — a game with
+  no mistakes at all is dropped from allGames but is exactly where "fixed"
+  encounters live (its moveStats survive: the fenDataCache prune runs against
+  the pre-filter set). Gates: hasAnalysis (unanalyzed games extract no mistakes
+  → every recurrence would fake-read as fixed), posKey side-to-move ===
+  playerColor[0] (playing the other colour later reaches the same posKey with
+  the OPPONENT to move — not an encounter), sourceGameId ≠ game (the item's own
+  game), ts > cutoff, one encounter per (item, game) — repetitions only count
+  the first visit. Relapse lookup uses recidRawMistakes (rawMistakes .slice()
+  taken right after saveMistakesCache — pre-advantage-replacement and
+  pre-trie-filter, so mistakes later swallowed/filtered still register;
+  falls back to the mistakes cache).
+
+In-app scan replays Game Review History snapshots from baseFen via chess.js
+(slim moves store no FENs; bounded by REVIEW_HISTORY_CAP). Seed posKey
+excluded — the drill just showed that answer. Verdict from the stored
+per-move classification (mistake/blunder → relapsed); unclassified moves
+(deep evals never finished) are skipped, not guessed. In-app encounters are
+displayed dimmed and NEVER auto-graded (user is primed mid-drill).
+
+Auto-reschedule (applyRecidReschedules): a real-game relapse is a failed
+review in the wild → virtual fsrs_review(card, Again, gameDate). Guards:
+recidAutoEnabled() ('mistakelab_recid_auto' ≠ '0', Settings → Training
+"Reschedule on relapse", default on); once per (item, game) ever via
+recidGraded (marked even when skipped — never re-examine); skipped when
+card.lastReview ≥ game ts (user already re-reviewed after the relapse) or
+card is new/corrupt-reset. pos.lastSeen gets the WRITE time, not the game
+date — the positions merge is newer-record-wins by lastSeen and backdating
+would let a stale remote copy revert the reschedule.
+
+UI: recidSummaryEl → "↻ Transfer: N fixed · M relapsed (rate%)" line atop
+renderReviewList (prepended in the empty-queue path too); recidBadgeHtml →
+"↻ N✓ M✗!" in each review card's srs-info row (! = same move repeated,
+in-app dimmed, detail in title tooltip); toast + updateRepertoireBadge +
+conditional renderRepertoirePanel on reschedule (maybeRefreshRecidUi —
+queue rebuild gated on currentMistakeIdx < 0, no mid-drill reshuffle).
+
+State: recidivismByPosId (Map, null until first compute), recidivismSummary,
+recidGamesMeta, recidRawMistakes, getRecidEncounters(pid) accessor.
 
 ─── SEQUENCE CONVERSION (mistake → drillable multi-move sequence) ───
 
@@ -1361,7 +1453,10 @@ Files:
                                see GAME REVIEW HISTORY)
 
 gistData schema:
-  positions[pid].{completed, lastSeen, srs, invalidated, invalidatedLines[]}
+  positions[pid].{completed, lastSeen, srs, invalidated, invalidatedLines[],
+                  firstReview, recidGraded[]}   // last two: RECIDIVISM TRACKER —
+                  // merge keeps EARLIEST firstReview; recidGraded merges as a
+                  // union (both survive the newer-record-wins spread explicitly)
   notes[fenKey].{text, arrows, circles, drawInterval, updated}
   repertoire.studies[]            // [{id, color, name, addedAt}]
   repertoire.deletedStudies[]     // [{id, ts}] study-removal tombstones (see

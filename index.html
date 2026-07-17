@@ -1873,7 +1873,7 @@
       </div>
     </details>
   </div>
-  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Checklist variations can be excluded: an ✕ on each row (confirm-gated) pushes the leafKey onto the list's new excludedLeafKeys and refills the slot instantly from a new generation-time reserve. generateTodoVariations now returns reserve (TODO_RESERVE_EXTRA=10) — the next-best leaves in EXACT selection order, derived by stepping the d'Hondt quota N+1..N+10 and diffing (the capped d'Hondt apportionment is house-monotone, so selection sets are nested; pure in-memory replays of the built tree, no explorer calls). Exclusions survive regeneration: generateTodoListForStudy carries excludedLeafKeys over and passes opts.excludeLeafKeys; excluded leaves get capacity 0 in the enumerated tree so the apportionment reassigns their slots (first within their own subtree, overflowing to siblings). Legacy lists without a reserve still exclude — a toast suggests Regenerate to refill. Footer shows the excluded count + a "restore all" link (clearTodoExclusions; excluded variation objects aren't kept, so lines return on the next generation). excludeTodoVariation calls todoHidePreview before re-render since the ✕ sits in a hover-preview row whose mouseleave the re-render orphans. Earlier — Sequence save-dialog warnings are clickable: analysisTreeToSequenceLines annotates each move with _nodeId/_parentNodeId (validation-only, stripped alongside _parentFen at persist time), and validateSequenceLines wraps every warning and unverified item in seqWarnLink → analysisGoToNode. Covered-move warnings jump to the position AFTER the flagged move (the move is on the board when you land); uncovered-alternative and single-PV items jump to the position BEFORE, where you would branch the alternative or trigger an eval. Resolves the "18... Nxc1" ambiguity when a line has several move-18 spots; the dialog stays open while you inspect (confirm re-walks the tree anyway). Earlier — Checklist draws count as ½: todoPresetStats scores a drawn playout as 0.5 toward wins/n and the chip's win-rate color (display layer only — completion and difficulty unlock still require a real win via todoCompletedPresets). finishTodoDrill's draw card is yellow now and says so. Earlier — Detected Tactics solve is playable again after a game review: tryDetectedTactic cleared contLineReviewMode but left contLineReviewKeyMoves populated and contLineBrowsing latched — the game-review stray-move guard in onDrop/tap-to-move (inReviewContext keys on reviewMode OR keyMoves) snapped back every solve move, and a move slipping past would have truncated the review's contLine via the browsing branch. Solve entry now clears keyMoves/keyIdx/contLineBrowsing; abandon restores keyMoves/keyIdx from the snapshot (goToContLineMove recomputes browsing). Also: dedicated detectedTacticSolveMode branches in onDragStart and the tap-to-move handler gate on _detectedTacticCand.playerColor + gameEngine.turn() instead of the current SRS item, so solves also work with currentMistakeIdx -1 (checklist/advantage sessions) — placed after the paused-tactic gate so post-completion input stays blocked. Earlier — Deleted studies now stay deleted: gistData.repertoire.studies merges as a union by id, which cannot express a removal — the record still existed in the remote copy, collided with nothing, and came back on the next read-merge-write (~3s later, or at the next launch). Removal now records a tombstone in the new repertoire.deletedStudies ([{id, ts}], the planCards pattern): deleteRepertoireStudy drops the study, drops its variation checklist (a todoList is derived from its study and dies with it — one tombstone covers both via todoList.studyId; removeRepertoireStudy never touched todoLists before, so checklists outlived their studies regardless of the merge bug), and pushes the tombstone. studyTombstoneWins(tomb, study): the tombstone wins unless study.addedAt > tomb.ts — addRepertoireStudy and the toast's Undo (restoreRepertoireStudy, which also puts the captured checklist back) both stamp a fresh addedAt so a re-add beats an earlier delete cross-device; dropping the local tombstone is cosmetic, since deletedStudies merges as a union and an already-synced one returns from the remote to lose on addedAt instead. Resolution runs in two places: a pass in mergeGistData after the repertoire union (ungated on local.repertoire, so a remote written by an older build carrying both tombstone and study is reconciled; rewrites studies + todoLists, retires tombstones that lost to a re-add), and at READ in getRepertoireConfig / getTodoList, since loadFromGist assigns the raw remote to gistData with no merge pass. Studies predating this have no addedAt (→ 0), so a tombstone always wins over them. Earlier — Repertoire deviation detection now reuses cached moveStats: detectRepertoireDeviations previously replayed EVERY game through chess.js (sloppy SAN + fen() per ply, synchronous, main thread, uncached) on every launch and every dismiss/refresh — the dominant per-launch cost at 300+ games. It now walks fenDataCache[gameId].moveStats (posKey/san/uci per ply; next entry's posKey or finalFen as the post-move position), with chess.js replay only for uncached or initialFen games. Deviation fenBefore / gap fen are reconstructed as posKey + ' 0 ' + real fullmove from ply index (halfmove clock is irrelevant downstream; the fullmove counter must be real — openGapInExplorer→launchFilterPractice reads it for move numbering; initialFen games skip the fast path since the derivation assumes a standard start). Legacy EP-inclusive cache posKeys are healed in-place on read (same idempotent pattern as doBuildOpeningIndex). The startup call site (showMainApp's loadRepertoireTrie().then) now awaits fenDataPreloadPromise first so the first run doesn't race the IDB preload and fall back to full replay; the promise always settles (its .catch installs an empty cache). Completion log now includes ms + cached/replayed game counts. Earlier — Opening-index build is now non-blocking: doBuildOpeningIndex batched with a fixed 50-game tick (one long main-thread task on mobile with hundreds of games). Now each tick self-sizes to a ~8ms work budget — BATCH starts at 20 and is resized every tick from measured per-game cost (cold/chess.js-replay ticks shrink toward 4, warm ticks grow toward 120), so the setTimeout(0) yields land often enough that taps/scroll stay responsive during the build. Total work and all index semantics are unchanged — no ply cap (the shared gameFenIndex/PMI feed opening-explorer per-move stats, game-position filtering, and weak spots, so capping would silently shorten filtering/explorer depth). Earlier — Weak-spots preview arrow: HUMAN-lens rows now overlay an orange arrow for the opponent's reply (the edge's uci) on the hover board preview, and the preview is oriented to the user's side (was hardcoded white, so black-perspective spots rendered flipped). showPositionPreview gains an optional moveUci param (SVG arrow with orientation-aware square→viewBox mapping); weakSpotRowHtml gains orientation + moveUci params threaded through onmouseenter. BOT-lens rows orient to the user but draw no arrow (position+preset has no single opponent move). Backward-compatible — the 2-arg deviation-row preview is unchanged. Earlier — Empty-state overlay fix: the "Select a game to begin" placeholder + "Analyze a position" button used position:absolute; inset:0 but sat in .panel-center (the whole board+nav+padding column), so they centred low over the board. Moved #emptyMsg inside #boardContainer (the position:relative, board-sized wrapper) so inset:0 now centres the overlay on the board square. Earlier — Analysis eval badges now colour by side: a small edge (+0.1–0.2) reads clearly white and (−0.1–0.2) clearly black instead of the old dark "equal" gray (which looked black for small white evals). Sign-based classifier with a slight tier (0<|cp|≤50, softened but clearly white/black), strong tier at |cp|>50, and a neutral mid-gray reserved for a dead-level 0.00; eval bar unchanged (already proportional). Earlier — Notes polish: (1) per-note "reveal arrows in draw order" interval (#noteDrawInterval, ms, 0=off, authoring default 750ms via NOTE_DEFAULT_DRAW_INTERVAL — new/legacy notes pre-fill it, explicit saved value incl. 0 wins, reveal reads the saved value literally so legacy notes don't animate until re-saved) — when >0 and a note has >1 arrow, note-view reveals arrows one per interval in stored draw order (first immediate, rest staggered), each connected same-color circle (arrow destination sits on it) fading in with its arrow; unconnected circles show immediately; ↻ Replay in view mode; state via noteReveal/noteRevealTimer + cancelNoteReveal() at every noteArrows-reset site; .note-annot-appear fades only the newest element each step. (2) note arrow/circle opacity 0.55 → 0.85. (3) bigger note panel + reading font (base width 240→264, fonts 12→13; ≥1400px width→320 / text→14 / textarea max-height→220; mobile view-text→14). Earlier — Weak-Spots Dashboard is now MOVE-CONDITIONAL: the unit is a move edge, not a position — at a recurring position, the specific move that leads to a bad win-rate (e.g. "They play Bb4 → you score 19% over 8 games", vs a fine score against their other replies). Each positionMoveIndex (posKey → move) entry is an edge with its own user-perspective W-L-D; the ≥5-game gate is per-edge (that move needs 5 games for its rate to mean anything). Score = (W+½D)/N; below 50% = weak. Moves are opponent replies you handle badly ("They play X"); your own move choices are excluded. Session-local Human/Bot toggle (window._weakSpotsMode): HUMAN scans PMI edges (grouped by opening, near-universal edges >50% of games gated out on ≥20-game libraries, memoized by pmiGameCount, lazy PMI build via ensureWeakSpotsIndex poll 200ms/12s), Study → opening explorer at the position so the per-move result bars show the full split; BOT stays position+preset from practiceScoreboard (practice records no per-move split), Drill → startTodoFromList else Study. Rows show a winRateColor score pill, move + whose-move, W-L-D over N, hover board preview; worst-first, cap 15, thresholds in WEAKSPOT_CFG. Read-only (no store, no drill machinery, no mode flag). Replaces the position-aggregate "branching point" version. Earlier — Analysis Mode note / 🧠 flashcard authoring + paste-FEN + scratch entry: (1) 📝 #btnAnalysisNote in the analysis-panel header (N key now targets it, not the display:none #positionNav btnNote) opens the note panel on the live analysis position — getCurrentNoteFen's analysisMode branch already resolved analysisEngine.fen(), so note edit/save and 🧠 Make/Remove flashcard work unchanged; updateNoteButton mirrors .has-note onto it. This is the recommended way to confirm/find a plan with the engine/Maia/DB before enrolling it. (2) Paste-FEN (#analysisFenInput / setAnalysisFromFen): validates, no-ops on an exact re-paste, confirms an unsaved note edit, then re-roots the tree at the pasted position; syncAnalysisFenInput (called from renderAnalysisTree) keeps the field showing the current FEN so it doubles as copy-current-FEN. (3) 'Analyze a position' (#btnAnalyzeScratch in #emptyMsg / enterAnalysisBlank): enter Analysis Mode from the empty board with no loaded mistake — no ninth mode flag (rides analysisMode with analysisSavedState={blank:true}); exit restores the empty state.</div></div></div></div></div>
+  <div id="buildVersion" style="margin-top:24px;font-size:10px;color:var(--text-muted);opacity:0.5;">Recidivism tracker: previously-drilled positions recurring in LATER games are detected and verdicted — fixed (no new mistake there this time) vs relapsed (ANY new extracted mistake at that posKey, not just repeating the original move; sameMove flagged when it is). Fully derived, recomputed after every extraction/deviation run (scheduleRecidivism, 300ms debounce, awaits fenDataPreloadPromise): buildDrilledIndex maps posKey → reviewed (reps≥1, non-invalidated) mistake/tactic items from allMistakes PLUS repertoire items from repertoireDeviations (they never live in allMistakes); the real-game scan walks fenDataCache moveStats over recidGamesMeta — a slim {id,createdAt,hasAnalysis,playerColor} snapshot captured in extractAllMistakes BEFORE the zero-position filter, since mistake-free games are exactly where "fixed" lives — gated on hasAnalysis (unanalyzed games would fake-fix everything) and posKey side-to-move === playerColor (playing the other colour later reaches the same posKey with the opponent to move); relapse signal reads recidRawMistakes (pre-advantage-merge / pre-trie-filter snapshot). In-app: Game Review History snapshots replayed from baseFen (seed posKey excluded — the drill showed you that answer), verdict from stored per-move classification; dimmed in UI, never auto-graded. Transfer-credit cutoff = positions[pid].firstReview (stamped at first recordReview outside .srs so SRS-8 resets can't wipe it; mergeGistData keeps the EARLIEST; legacy fallback = source-game date, flagged approximate). A real-game relapse auto-records a virtual FSRS Again dated to the game (Settings→Training "Reschedule on relapse", default on; dedupe via positions[pid].recidGraded, union-merged cross-device; skipped when lastReview postdates the game; lastSeen stamped with WRITE time so the newer-record-wins positions merge can't revert the reschedule). UI: ↻ Transfer summary line atop the review list, per-card ↻ N✓ M✗ badge, toast + repertoire badge/panel refresh on reschedule. Earlier — Checklist variations can be excluded: an ✕ on each row (confirm-gated) pushes the leafKey onto the list's new excludedLeafKeys and refills the slot instantly from a new generation-time reserve. generateTodoVariations now returns reserve (TODO_RESERVE_EXTRA=10) — the next-best leaves in EXACT selection order, derived by stepping the d'Hondt quota N+1..N+10 and diffing (the capped d'Hondt apportionment is house-monotone, so selection sets are nested; pure in-memory replays of the built tree, no explorer calls). Exclusions survive regeneration: generateTodoListForStudy carries excludedLeafKeys over and passes opts.excludeLeafKeys; excluded leaves get capacity 0 in the enumerated tree so the apportionment reassigns their slots (first within their own subtree, overflowing to siblings). Legacy lists without a reserve still exclude — a toast suggests Regenerate to refill. Footer shows the excluded count + a "restore all" link (clearTodoExclusions; excluded variation objects aren't kept, so lines return on the next generation). excludeTodoVariation calls todoHidePreview before re-render since the ✕ sits in a hover-preview row whose mouseleave the re-render orphans. Earlier — Sequence save-dialog warnings are clickable: analysisTreeToSequenceLines annotates each move with _nodeId/_parentNodeId (validation-only, stripped alongside _parentFen at persist time), and validateSequenceLines wraps every warning and unverified item in seqWarnLink → analysisGoToNode. Covered-move warnings jump to the position AFTER the flagged move (the move is on the board when you land); uncovered-alternative and single-PV items jump to the position BEFORE, where you would branch the alternative or trigger an eval. Resolves the "18... Nxc1" ambiguity when a line has several move-18 spots; the dialog stays open while you inspect (confirm re-walks the tree anyway). Earlier — Checklist draws count as ½: todoPresetStats scores a drawn playout as 0.5 toward wins/n and the chip's win-rate color (display layer only — completion and difficulty unlock still require a real win via todoCompletedPresets). finishTodoDrill's draw card is yellow now and says so. Earlier — Detected Tactics solve is playable again after a game review: tryDetectedTactic cleared contLineReviewMode but left contLineReviewKeyMoves populated and contLineBrowsing latched — the game-review stray-move guard in onDrop/tap-to-move (inReviewContext keys on reviewMode OR keyMoves) snapped back every solve move, and a move slipping past would have truncated the review's contLine via the browsing branch. Solve entry now clears keyMoves/keyIdx/contLineBrowsing; abandon restores keyMoves/keyIdx from the snapshot (goToContLineMove recomputes browsing). Also: dedicated detectedTacticSolveMode branches in onDragStart and the tap-to-move handler gate on _detectedTacticCand.playerColor + gameEngine.turn() instead of the current SRS item, so solves also work with currentMistakeIdx -1 (checklist/advantage sessions) — placed after the paused-tactic gate so post-completion input stays blocked. Earlier — Deleted studies now stay deleted: gistData.repertoire.studies merges as a union by id, which cannot express a removal — the record still existed in the remote copy, collided with nothing, and came back on the next read-merge-write (~3s later, or at the next launch). Removal now records a tombstone in the new repertoire.deletedStudies ([{id, ts}], the planCards pattern): deleteRepertoireStudy drops the study, drops its variation checklist (a todoList is derived from its study and dies with it — one tombstone covers both via todoList.studyId; removeRepertoireStudy never touched todoLists before, so checklists outlived their studies regardless of the merge bug), and pushes the tombstone. studyTombstoneWins(tomb, study): the tombstone wins unless study.addedAt > tomb.ts — addRepertoireStudy and the toast's Undo (restoreRepertoireStudy, which also puts the captured checklist back) both stamp a fresh addedAt so a re-add beats an earlier delete cross-device; dropping the local tombstone is cosmetic, since deletedStudies merges as a union and an already-synced one returns from the remote to lose on addedAt instead. Resolution runs in two places: a pass in mergeGistData after the repertoire union (ungated on local.repertoire, so a remote written by an older build carrying both tombstone and study is reconciled; rewrites studies + todoLists, retires tombstones that lost to a re-add), and at READ in getRepertoireConfig / getTodoList, since loadFromGist assigns the raw remote to gistData with no merge pass. Studies predating this have no addedAt (→ 0), so a tombstone always wins over them. Earlier — Repertoire deviation detection now reuses cached moveStats: detectRepertoireDeviations previously replayed EVERY game through chess.js (sloppy SAN + fen() per ply, synchronous, main thread, uncached) on every launch and every dismiss/refresh — the dominant per-launch cost at 300+ games. It now walks fenDataCache[gameId].moveStats (posKey/san/uci per ply; next entry's posKey or finalFen as the post-move position), with chess.js replay only for uncached or initialFen games. Deviation fenBefore / gap fen are reconstructed as posKey + ' 0 ' + real fullmove from ply index (halfmove clock is irrelevant downstream; the fullmove counter must be real — openGapInExplorer→launchFilterPractice reads it for move numbering; initialFen games skip the fast path since the derivation assumes a standard start). Legacy EP-inclusive cache posKeys are healed in-place on read (same idempotent pattern as doBuildOpeningIndex). The startup call site (showMainApp's loadRepertoireTrie().then) now awaits fenDataPreloadPromise first so the first run doesn't race the IDB preload and fall back to full replay; the promise always settles (its .catch installs an empty cache). Completion log now includes ms + cached/replayed game counts. Earlier — Opening-index build is now non-blocking: doBuildOpeningIndex batched with a fixed 50-game tick (one long main-thread task on mobile with hundreds of games). Now each tick self-sizes to a ~8ms work budget — BATCH starts at 20 and is resized every tick from measured per-game cost (cold/chess.js-replay ticks shrink toward 4, warm ticks grow toward 120), so the setTimeout(0) yields land often enough that taps/scroll stay responsive during the build. Total work and all index semantics are unchanged — no ply cap (the shared gameFenIndex/PMI feed opening-explorer per-move stats, game-position filtering, and weak spots, so capping would silently shorten filtering/explorer depth). Earlier — Weak-spots preview arrow: HUMAN-lens rows now overlay an orange arrow for the opponent's reply (the edge's uci) on the hover board preview, and the preview is oriented to the user's side (was hardcoded white, so black-perspective spots rendered flipped). showPositionPreview gains an optional moveUci param (SVG arrow with orientation-aware square→viewBox mapping); weakSpotRowHtml gains orientation + moveUci params threaded through onmouseenter. BOT-lens rows orient to the user but draw no arrow (position+preset has no single opponent move). Backward-compatible — the 2-arg deviation-row preview is unchanged. Earlier — Empty-state overlay fix: the "Select a game to begin" placeholder + "Analyze a position" button used position:absolute; inset:0 but sat in .panel-center (the whole board+nav+padding column), so they centred low over the board. Moved #emptyMsg inside #boardContainer (the position:relative, board-sized wrapper) so inset:0 now centres the overlay on the board square. Earlier — Analysis eval badges now colour by side: a small edge (+0.1–0.2) reads clearly white and (−0.1–0.2) clearly black instead of the old dark "equal" gray (which looked black for small white evals). Sign-based classifier with a slight tier (0<|cp|≤50, softened but clearly white/black), strong tier at |cp|>50, and a neutral mid-gray reserved for a dead-level 0.00; eval bar unchanged (already proportional). Earlier — Notes polish: (1) per-note "reveal arrows in draw order" interval (#noteDrawInterval, ms, 0=off, authoring default 750ms via NOTE_DEFAULT_DRAW_INTERVAL — new/legacy notes pre-fill it, explicit saved value incl. 0 wins, reveal reads the saved value literally so legacy notes don't animate until re-saved) — when >0 and a note has >1 arrow, note-view reveals arrows one per interval in stored draw order (first immediate, rest staggered), each connected same-color circle (arrow destination sits on it) fading in with its arrow; unconnected circles show immediately; ↻ Replay in view mode; state via noteReveal/noteRevealTimer + cancelNoteReveal() at every noteArrows-reset site; .note-annot-appear fades only the newest element each step. (2) note arrow/circle opacity 0.55 → 0.85. (3) bigger note panel + reading font (base width 240→264, fonts 12→13; ≥1400px width→320 / text→14 / textarea max-height→220; mobile view-text→14). Earlier — Weak-Spots Dashboard is now MOVE-CONDITIONAL: the unit is a move edge, not a position — at a recurring position, the specific move that leads to a bad win-rate (e.g. "They play Bb4 → you score 19% over 8 games", vs a fine score against their other replies). Each positionMoveIndex (posKey → move) entry is an edge with its own user-perspective W-L-D; the ≥5-game gate is per-edge (that move needs 5 games for its rate to mean anything). Score = (W+½D)/N; below 50% = weak. Moves are opponent replies you handle badly ("They play X"); your own move choices are excluded. Session-local Human/Bot toggle (window._weakSpotsMode): HUMAN scans PMI edges (grouped by opening, near-universal edges >50% of games gated out on ≥20-game libraries, memoized by pmiGameCount, lazy PMI build via ensureWeakSpotsIndex poll 200ms/12s), Study → opening explorer at the position so the per-move result bars show the full split; BOT stays position+preset from practiceScoreboard (practice records no per-move split), Drill → startTodoFromList else Study. Rows show a winRateColor score pill, move + whose-move, W-L-D over N, hover board preview; worst-first, cap 15, thresholds in WEAKSPOT_CFG. Read-only (no store, no drill machinery, no mode flag). Replaces the position-aggregate "branching point" version. Earlier — Analysis Mode note / 🧠 flashcard authoring + paste-FEN + scratch entry: (1) 📝 #btnAnalysisNote in the analysis-panel header (N key now targets it, not the display:none #positionNav btnNote) opens the note panel on the live analysis position — getCurrentNoteFen's analysisMode branch already resolved analysisEngine.fen(), so note edit/save and 🧠 Make/Remove flashcard work unchanged; updateNoteButton mirrors .has-note onto it. This is the recommended way to confirm/find a plan with the engine/Maia/DB before enrolling it. (2) Paste-FEN (#analysisFenInput / setAnalysisFromFen): validates, no-ops on an exact re-paste, confirms an unsaved note edit, then re-roots the tree at the pasted position; syncAnalysisFenInput (called from renderAnalysisTree) keeps the field showing the current FEN so it doubles as copy-current-FEN. (3) 'Analyze a position' (#btnAnalyzeScratch in #emptyMsg / enterAnalysisBlank): enter Analysis Mode from the empty board with no loaded mistake — no ninth mode flag (rides analysisMode with analysisSavedState={blank:true}); exit restores the empty state.</div></div></div></div></div>
 </div>
 <div id="mainApp" class="main-layout hidden">
   <!-- Mobile drawer backdrop -->
@@ -2225,6 +2225,16 @@
         </div>
         <label class="toggle-switch" style="flex-shrink:0;margin-left:12px;">
           <input type="checkbox" id="settingsTacticMaiaAlts">
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin:14px 0 0;">
+        <div>
+          <span style="font-size:13px;">Reschedule on relapse</span>
+          <div class="hint" style="margin-top:2px;">When a drilled position recurs in a later game and you blunder there again, automatically mark the item failed and bring it back for review.</div>
+        </div>
+        <label class="toggle-switch" style="flex-shrink:0;margin-left:12px;">
+          <input type="checkbox" id="settingsRecidAuto">
           <span class="toggle-track"></span>
         </label>
       </div>
@@ -2879,6 +2889,13 @@ function recordReview(pid, grade) {
   gistData.positions[pid].completed = true;
   gistData.positions[pid].lastSeen = new Date().toISOString();
   gistData.positions[pid].srs = updated;
+  // Recidivism: timestamp of the FIRST-ever review. Games played after this
+  // can claim transfer credit ("drilled, then faced it again"). Lives on the
+  // position record (not inside .srs) so an SRS-8 corrupt-card reset can't
+  // wipe it; mergeGistData keeps the EARLIEST value across devices.
+  if (!gistData.positions[pid].firstReview) {
+    gistData.positions[pid].firstReview = new Date().toISOString();
+  }
   // Update localStorage
   const s = getCompletedSet();
   s.add(pid);
@@ -3509,6 +3526,18 @@ function mergeGistData(local, remote) {
           ...(localPos.invalidatedLines || []),
         ])),
       };
+      // Recidivism fields survive the newer-record-wins spread explicitly:
+      // firstReview keeps the EARLIEST timestamp (ISO strings — lexicographic
+      // order is chronological), recidGraded (auto-reschedule dedupe) merges
+      // as a union so a game graded on one device is never re-graded on another.
+      const fr = [remotePos.firstReview, localPos.firstReview].filter(Boolean).sort();
+      if (fr.length) merged.positions[pid].firstReview = fr[0];
+      if (remotePos.recidGraded || localPos.recidGraded) {
+        merged.positions[pid].recidGraded = Array.from(new Set([
+          ...(remotePos.recidGraded || []),
+          ...(localPos.recidGraded || []),
+        ]));
+      }
     }
   }
 
@@ -5156,6 +5185,15 @@ function openSettings() {
     maiaAltsToggle.onchange = function() {
       tacticScanMaiaAlts = this.checked;
       localStorage.setItem('mistakelab_tactic_maia_alts', tacticScanMaiaAlts ? 'true' : 'false');
+    };
+  }
+  // Recidivism: auto-reschedule relapsed items (default on)
+  const recidToggle = document.getElementById('settingsRecidAuto');
+  if (recidToggle) {
+    recidToggle.checked = recidAutoEnabled();
+    recidToggle.onchange = function() {
+      localStorage.setItem('mistakelab_recid_auto', this.checked ? '1' : '0');
+      if (this.checked) scheduleRecidivism(); // apply any pending reschedules now
     };
   }
   // Show mobile depth offset setting only on mobile
@@ -12281,6 +12319,13 @@ function extractAllMistakes() {
     saveMistakesCache(rawMistakes, currentFingerprints, advantageCandidates);
   }
 
+  // Recidivism: snapshot the RAW mistake set (pre-advantage-replacement,
+  // pre-trie-filter) — the relapse signal is "any extracted mistake at the
+  // drilled posKey", including ones later swallowed by an advantage item or
+  // dropped by the repertoire filter. .slice() detaches from the reassignments
+  // below (the element refs are shared but never mutated by them).
+  recidRawMistakes = rawMistakes.slice();
+
   // ── Advantage capitalization: filter candidates and push valid items ──
   const advantageItemCount = { checked: 0, added: 0, skippedWin: 0, skippedTimeLoss: 0, skippedTimeTrouble: 0 };
   const invalidatedAdvantage = getInvalidatedMistakes(); // reuse same invalidation store
@@ -12524,6 +12569,21 @@ function extractAllMistakes() {
       m.type !== 'mistake' || !isRepertoireMove(m.fenBefore, m.sanPlayed)
     );
   }
+
+  // Recidivism: slim game-metadata snapshot, captured BEFORE the zero-position
+  // filter below — a game with no mistakes at all is exactly where a drilled
+  // position recurring reads as "fixed", so those games must stay scannable.
+  // Their moveStats survive in fenDataCache (the IDB prune above ran against
+  // the pre-filter allGames), only the game objects get dropped.
+  recidGamesMeta = allGames
+    .filter(g => g.id && !g.id.startsWith('_test_'))
+    .map(g => ({
+      id: g.id,
+      createdAt: g.createdAt || 0,
+      hasAnalysis: !!(Array.isArray(g.analysis) && g.analysis.length),
+      playerColor: detectPlayerColor(g) || null,
+    }));
+  scheduleRecidivism(); // debounced; runs after this synchronous function returns
 
   // Sort by severity (biggest win% drop / tactic swing first)
   allMistakes.sort((a, b) => b.wpDrop - a.wpDrop);
@@ -14062,7 +14122,9 @@ function showMainApp() {
 
   // Review history: IDB load + Gist merge, non-blocking (guarded internally
   // by reviewHistoryLoaded). Only data — the Review-tab UI reads it lazily.
-  loadReviewHistory();
+  // Recidivism recomputes once it lands so in-app encounters appear without
+  // waiting for the next extraction.
+  loadReviewHistory().then(() => scheduleRecidivism()).catch(() => {});
 
   // Load repertoire studies in background
   loadRepertoireTrie().then(async () => {
@@ -14439,18 +14501,353 @@ function toggleReviewMode() {
   updatePositionNav(); // #6: sync Prev/counter/Next for the new mode
 }
 
+// ─── RECIDIVISM TRACKER ───
+// Detects when previously-drilled positions recur in LATER games — real
+// imports and in-app continuation games — and whether the user blundered
+// there again. "Relapsed" = ANY new mistake at the position (not just
+// repeating the original move); "fixed" = the position recurred with no new
+// mistake there. Transpositions count (posKey equality via fenPositionKey).
+//
+// Fully DERIVED state — recomputed from allMistakes + fenDataCache moveStats
+// (same fast path as detectRepertoireDeviations) + reviewHistory snapshots on
+// every extraction. Nothing recidivism-specific is persisted except two fields
+// on gistData.positions[pid]: firstReview (transfer-credit cutoff, stamped in
+// recordReview) and recidGraded (gameIds already auto-rescheduled, dedupe).
+let recidivismByPosId = null;   // Map<posId, encounter[]> — null until first compute
+let recidivismSummary = null;   // { fixed, relapsed, inappFixed, inappRelapsed }
+let recidGamesMeta = [];        // slim {id, createdAt, hasAnalysis, playerColor} snapshot,
+                                // captured in extractAllMistakes BEFORE the zero-position
+                                // filter drops mistake-free games from allGames (a clean
+                                // game is exactly where "fixed" encounters live)
+let recidRawMistakes = null;    // pre-advantage-merge / pre-trie-filter mistakes snapshot
+let _recidTimer = null;
+
+function recidAutoEnabled() {
+  return localStorage.getItem('mistakelab_recid_auto') !== '0';
+}
+
+function scheduleRecidivism() {
+  clearTimeout(_recidTimer);
+  _recidTimer = setTimeout(async () => {
+    if (!fenDataCacheLoaded && fenDataPreloadPromise) {
+      try { await fenDataPreloadPromise; } catch (_) {}
+    }
+    try { computeRecidivism(); }
+    catch (e) { console.warn('[Recid] compute failed:', e && e.message); }
+  }, 300);
+}
+
+// posKey → [{pid, type, sourceGameId, cutoff, approx, expected, origSan}] for
+// every reviewed (reps ≥ 1), non-invalidated mistake/tactic/repertoire item.
+// 'plan' has no move to check; 'practice' is synthetic; 'advantage' has no
+// single expected move and a fuzzy relapse signal — all excluded (v1).
+function buildDrilledIndex() {
+  const idx = new Map();
+  if (!Array.isArray(allMistakes)) return idx;
+  for (const m of allMistakes) {
+    if (m.type !== 'mistake' && m.type !== 'tactic' && m.type !== 'repertoire') continue;
+    const pid = posId(m);
+    const pos = gistData?.positions?.[pid];
+    const srs = pos?.srs;
+    if (!srs || !(srs.reps >= 1)) continue;   // never reviewed → no transfer to measure
+    if (pos.invalidated) continue;
+    let posKey;
+    try { posKey = m.type === 'repertoire' ? m.positionKey : fenPositionKey(m.fenBefore); }
+    catch (_) { continue; }
+    if (!posKey) continue;
+    // Cutoff: games at/before this timestamp predate the drilling and can't
+    // claim transfer credit. Legacy cards reviewed before firstReview existed
+    // fall back to the source game's date (mistake/tactic; items are usually
+    // drilled soon after import) or 0 for repertoire — flagged approximate.
+    let cutoff = pos.firstReview ? new Date(pos.firstReview).getTime() : NaN;
+    let approx = false;
+    if (!Number.isFinite(cutoff)) {
+      approx = true;
+      cutoff = (m.game && m.game.createdAt) || 0;
+    }
+    // Expected moves — used only for the bonus exactBest flag (and as a trie
+    // fallback for custom-deviation repertoire items). The fixed/relapsed
+    // verdict itself never requires knowing the best move.
+    const expected = [];
+    const firstUserMove = (line) => Array.isArray(line) ? (line.find(t => t && t.isUser) || line[0]) : null;
+    if (m.type === 'tactic') {
+      const f = firstUserMove(m.tacticMoves);
+      if (f && f.uci) expected.push(f.uci);
+      for (const line of (m.tacticAltLines || [])) {
+        const a = firstUserMove(line);
+        if (a && a.uci && !expected.includes(a.uci)) expected.push(a.uci);
+      }
+    } else if (m.type === 'repertoire') {
+      if (m.repertoireMove && m.repertoireMove.uci) expected.push(m.repertoireMove.uci);
+    } else {
+      const ev = evalCacheGet(m.fenBefore, 1, 1); // any cached depth — bonus flag only
+      if (ev && ev.bestMove) expected.push(ev.bestMove);
+    }
+    let arr = idx.get(posKey);
+    if (!arr) { arr = []; idx.set(posKey, arr); }
+    arr.push({ pid, type: m.type, sourceGameId: m.gameId || null, cutoff, approx,
+               expected, origSan: m.type === 'mistake' ? (m.sanPlayed || null) : null });
+  }
+  // Repertoire items live in repertoireDeviations, NOT allMistakes (allMistakes
+  // only mentions type:'repertoire' conceptually — the drill flow reads this
+  // array directly). sourceGameId stays null: a deviation aggregates its games[]
+  // and the cutoff already separates pre-drill occurrences from relapses.
+  if (Array.isArray(repertoireDeviations)) {
+    for (const d of repertoireDeviations) {
+      if (!d || !d.positionKey) continue;
+      const pid = posId(d);
+      const pos = gistData?.positions?.[pid];
+      const srs = pos?.srs;
+      if (!srs || !(srs.reps >= 1)) continue;
+      if (pos.invalidated) continue;
+      let cutoff = pos.firstReview ? new Date(pos.firstReview).getTime() : NaN;
+      let approx = false;
+      if (!Number.isFinite(cutoff)) { approx = true; cutoff = 0; }
+      const expected = (d.repertoireMove && d.repertoireMove.uci) ? [d.repertoireMove.uci] : [];
+      let arr = idx.get(d.positionKey);
+      if (!arr) { arr = []; idx.set(d.positionKey, arr); }
+      arr.push({ pid, type: 'repertoire', sourceGameId: null, cutoff, approx,
+                 expected, origSan: null });
+    }
+  }
+  return idx;
+}
+
+function computeRecidivism() {
+  const t0 = performance.now();
+  const drilled = buildDrilledIndex();
+  recidivismByPosId = new Map();
+  recidivismSummary = { fixed: 0, relapsed: 0, inappFixed: 0, inappRelapsed: 0 };
+  if (drilled.size === 0) { maybeRefreshRecidUi(0); return; }
+
+  const add = (pid, enc) => {
+    let arr = recidivismByPosId.get(pid);
+    if (!arr) { arr = []; recidivismByPosId.set(pid, arr); }
+    arr.push(enc);
+    if (enc.source === 'game') recidivismSummary[enc.verdict === 'relapsed' ? 'relapsed' : 'fixed']++;
+    else recidivismSummary[enc.verdict === 'relapsed' ? 'inappRelapsed' : 'inappFixed']++;
+  };
+
+  // Relapse signal per game: "a NEW extracted mistake exists at this posKey" —
+  // any bad move counts, not just repeating the original one. Uses the RAW
+  // pre-advantage-merge / pre-trie-filter mistake set (snapshotted in
+  // extractAllMistakes; the mistakes cache stores the same thing) so mistakes
+  // later swallowed by an advantage item or trie filter still register.
+  const rawM = recidRawMistakes || (loadMistakesCache() || {}).mistakes || [];
+  const mistakeAtPos = new Map(); // gameId → Map<posKey, sanPlayed>
+  for (const mm of rawM) {
+    if ((mm.type && mm.type !== 'mistake') || !mm.fenBefore || !mm.gameId) continue;
+    let g = mistakeAtPos.get(mm.gameId);
+    if (!g) { g = new Map(); mistakeAtPos.set(mm.gameId, g); }
+    try { g.set(fenPositionKey(mm.fenBefore), mm.sanPlayed || ''); } catch (_) {}
+  }
+
+  // ── Real games: walk cached moveStats (no chess.js replay) ──
+  const fenData = fenDataCache || {};
+  for (const g of recidGamesMeta) {
+    // Unanalyzed games produce no extracted mistakes, so every recurrence
+    // would falsely read as "fixed" — skip them entirely.
+    if (!g.hasAnalysis || !g.playerColor) continue;
+    const fd = fenData[g.id] || pendingFenData[g.id];
+    if (!fd || !Array.isArray(fd.moveStats)) continue;
+    const gm = mistakeAtPos.get(g.id);
+    const userChar = g.playerColor[0]; // 'w' | 'b'
+    const seenPids = new Set(); // repetitions: only the first visit per item counts
+    for (const ms of fd.moveStats) {
+      const entries = drilled.get(ms.posKey);
+      if (!entries) continue;
+      // Same posKey with the USER not to move happens when they later play the
+      // other color and the opponent reaches the drilled position — not an
+      // encounter. posKey field 2 is the side to move.
+      if (ms.posKey.split(' ')[1] !== userChar) continue;
+      for (const e of entries) {
+        if (e.sourceGameId === g.id) continue;        // the game the item came from
+        if (g.createdAt <= e.cutoff) continue;         // predates first review
+        if (seenPids.has(e.pid)) continue;
+        seenPids.add(e.pid);
+        let verdict, sameMove = false, exactBest = false;
+        if (e.type === 'repertoire') {
+          const ok = (repertoireTrie && trieMatchesMove(ms.posKey, ms.moveSan, ms.moveUci)) ||
+                     e.expected.includes(ms.moveUci);
+          verdict = ok ? 'fixed' : 'relapsed';
+          exactBest = ok;
+        } else {
+          const relapsed = !!(gm && gm.has(ms.posKey));
+          verdict = relapsed ? 'relapsed' : 'fixed';
+          if (relapsed) sameMove = !!e.origSan && gm.get(ms.posKey) === e.origSan;
+          else exactBest = e.expected.length > 0 && e.expected.includes(ms.moveUci);
+        }
+        add(e.pid, { gameId: g.id, ts: g.createdAt, source: 'game', playedSan: ms.moveSan,
+                     playedUci: ms.moveUci, verdict, sameMove, exactBest, approx: e.approx });
+      }
+    }
+  }
+
+  // ── In-app games: replay Game Review History snapshots (slim moves store no
+  // FENs — rebuilt from baseFen; bounded by REVIEW_HISTORY_CAP) ──
+  if (Array.isArray(reviewHistory)) {
+    for (const snap of reviewHistory) {
+      if (!snap || !snap.baseFen || !Array.isArray(snap.moves)) continue;
+      let chess, seedKey;
+      try { chess = new Chess(snap.baseFen); seedKey = fenPositionKey(snap.baseFen); }
+      catch (_) { continue; }
+      const seenPids = new Set();
+      for (const mv of snap.moves) {
+        let posKey;
+        try { posKey = fenPositionKey(chess.fen()); } catch (_) { break; }
+        const res = chess.move(mv.san, { sloppy: true });
+        if (!res) break;
+        if (!mv.isUser || posKey === seedKey) continue; // seed exclusion: the drill
+                                                        // showed you this answer
+        const entries = drilled.get(posKey);
+        if (!entries) continue;
+        const uci = mv.uci || (res.from + res.to + (res.promotion || ''));
+        for (const e of entries) {
+          if ((snap.ts || 0) <= e.cutoff) continue;
+          if (seenPids.has(e.pid)) continue;
+          let verdict, exactBest = false;
+          if (e.type === 'repertoire') {
+            const ok = (repertoireTrie && trieMatchesMove(posKey, mv.san, uci)) ||
+                       e.expected.includes(uci);
+            verdict = ok ? 'fixed' : 'relapsed';
+            exactBest = ok;
+          } else if (mv.classification) {
+            verdict = (mv.classification === 'mistake' || mv.classification === 'blunder')
+              ? 'relapsed' : 'fixed';
+            exactBest = e.expected.includes(uci) || (!!mv.bestMoveUci && uci === mv.bestMoveUci);
+          } else {
+            continue; // deep evals never classified this move — no verdict
+          }
+          seenPids.add(e.pid);
+          add(e.pid, { gameId: snap.id, ts: snap.ts || 0, source: 'inapp', playedSan: mv.san,
+                       playedUci: uci, verdict, sameMove: false, exactBest, approx: e.approx });
+        }
+      }
+    }
+  }
+
+  recidivismByPosId.forEach(arr => arr.sort((a, b) => b.ts - a.ts));
+
+  const rescheduled = applyRecidReschedules();
+  const s = recidivismSummary;
+  console.log(`[Recid] ${s.fixed + s.relapsed} game + ${s.inappFixed + s.inappRelapsed} in-app encounters ` +
+    `(${s.relapsed + s.inappRelapsed} relapsed) across ${recidivismByPosId.size} items ` +
+    `in ${Math.round(performance.now() - t0)}ms${rescheduled ? `; ${rescheduled} rescheduled` : ''}`);
+  maybeRefreshRecidUi(rescheduled);
+}
+
+// A relapse in a REAL game is semantically a failed review in the wild —
+// record a virtual FSRS Again dated to the game. Guards: once per (item, game)
+// ever via positions[pid].recidGraded (union-merged cross-device); skipped when
+// the user already re-reviewed the item after the game (lastReview ≥ game date).
+// In-app encounters never auto-grade. Toggleable in Settings → Training.
+function applyRecidReschedules() {
+  if (!recidAutoEnabled() || !recidivismByPosId || recidivismByPosId.size === 0) return 0;
+  let applied = 0;
+  recidivismByPosId.forEach((encs, pid) => {
+    for (const enc of encs) {
+      if (enc.verdict !== 'relapsed' || enc.source !== 'game') continue;
+      ensureGistData();
+      if (!gistData.positions[pid]) gistData.positions[pid] = {};
+      const pos = gistData.positions[pid];
+      const graded = pos.recidGraded || (pos.recidGraded = []);
+      if (graded.includes(enc.gameId)) continue;
+      graded.push(enc.gameId); // mark even when skipped below — never re-examine a game
+      const card = getCardForPosition(pid);
+      const lr = card.lastReview ? new Date(card.lastReview).getTime() : 0;
+      if (card.state === FSRS_STATE.new || enc.ts <= lr) continue;
+      pos.srs = fsrs_review(card, FSRS_GRADE.again, new Date(enc.ts));
+      // Real write time, NOT the game date: the positions merge is
+      // newer-record-wins by lastSeen — backdating would let a stale remote
+      // copy overwrite this reschedule.
+      pos.lastSeen = new Date().toISOString();
+      enc.rescheduled = true;
+      applied++;
+    }
+  });
+  if (applied > 0) debounceSyncToGist();
+  return applied;
+}
+
+function getRecidEncounters(pid) {
+  return (recidivismByPosId && recidivismByPosId.get(pid)) || [];
+}
+
+// Compact per-item badge for the review list: "↻ 2✓ 1✗!" (! = same move
+// repeated), in-app counts dimmed. Tooltip carries the detail.
+function recidBadgeHtml(pid) {
+  const encs = getRecidEncounters(pid);
+  if (encs.length === 0) return '';
+  let gf = 0, gr = 0, af = 0, ar = 0, sameMove = false;
+  for (const e of encs) {
+    if (e.source === 'game') { if (e.verdict === 'relapsed') gr++; else gf++; }
+    else { if (e.verdict === 'relapsed') ar++; else af++; }
+    if (e.verdict === 'relapsed' && e.sameMove) sameMove = true;
+  }
+  const parts = [];
+  if (gf) parts.push(`<span style="color:#4caf50">${gf}✓</span>`);
+  if (gr) parts.push(`<span style="color:var(--red)">${gr}✗${sameMove ? '!' : ''}</span>`);
+  if (af || ar) parts.push(`<span style="opacity:0.55">app ${af}✓${ar}✗</span>`);
+  const title = `Position recurred after drilling — games: ${gf} fixed, ${gr} relapsed` +
+    `${sameMove ? ' (same move repeated!)' : ''}` +
+    `${(af + ar) ? `; in-app: ${af} fixed, ${ar} relapsed` : ''}`;
+  return `<span title="${title}">↻ ${parts.join(' ')}</span>`;
+}
+
+// Transfer stat line at the top of the review list. Only real-game encounters
+// drive the headline rate; in-app shown dimmed (you're primed mid-drill).
+function recidSummaryEl() {
+  const s = recidivismSummary;
+  if (!s || (s.fixed + s.relapsed + s.inappFixed + s.inappRelapsed) === 0) return null;
+  const el = document.createElement('div');
+  el.style.cssText = 'padding:8px 12px;font-size:11px;color:var(--text-muted);border-bottom:1px solid var(--border);';
+  const total = s.fixed + s.relapsed;
+  const rate = total > 0 ? ` (${Math.round(100 * s.fixed / total)}%)` : '';
+  const gamePart = total > 0
+    ? `<span style="color:#4caf50">${s.fixed} fixed</span> · <span style="color:var(--red)">${s.relapsed} relapsed</span>${rate}`
+    : 'no game encounters yet';
+  const inappPart = (s.inappFixed + s.inappRelapsed)
+    ? ` <span style="opacity:0.7">· in-app ${s.inappFixed}✓ ${s.inappRelapsed}✗</span>` : '';
+  el.innerHTML = `↻ Transfer: ${gamePart}${inappPart}`;
+  el.title = 'Previously-drilled positions that recurred in games played after their first review. ' +
+    'Fixed = no new mistake there this time; relapsed = you blundered there again (any mistake counts).';
+  return el;
+}
+
+function maybeRefreshRecidUi(rescheduled) {
+  if (rescheduled > 0) {
+    showToast(`↻ ${rescheduled} drilled position${rescheduled === 1 ? '' : 's'} relapsed in recent games — rescheduled for review`, { type: 'info', duration: 6000 });
+  }
+  // Refresh the review list if it's on screen; don't reshuffle the queue mid-drill.
+  try {
+    if (reviewMode) {
+      if (currentMistakeIdx < 0) buildReviewQueue();
+      renderReviewList();
+    }
+    if (rescheduled > 0) {
+      updateRepertoireBadge(); // rescheduled repertoire items change the due count
+      if (repertoireMode && currentMistakeIdx < 0) renderRepertoirePanel();
+    }
+  } catch (_) {}
+}
+
 function renderReviewList() {
   const list = document.getElementById('gameList');
   list.innerHTML = '';
+
+  const recidEl = recidSummaryEl();
 
   if (reviewQueue.length === 0) {
     list.innerHTML = `<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px;">
       <div style="font-size:24px;margin-bottom:8px;">✓</div>
       All caught up! No positions due for review.
     </div>`;
+    if (recidEl) list.prepend(recidEl);
     renderReviewUpcomingSection(list);
     return;
   }
+
+  if (recidEl) list.appendChild(recidEl);
 
   const visibleReviewItems = reviewQueue.slice(0, reviewListDisplayLimit);
 
@@ -14575,7 +14972,7 @@ function buildReviewItemEl(m, upcoming) {
       </div>
       <div class="review-item-opening">${isPracticeMistake ? '<span style="color:var(--blue);font-weight:600;">Practice</span> · ' : ''}${escHtml(opening)}</div>
       <div class="review-srs-info">
-        ${!isNew ? `<span>reps: ${card.reps}</span><span>lapses: ${card.lapses}</span><span>stab: ${Math.round(card.stability)}d</span>` : '<span>First time</span>'}
+        ${!isNew ? `<span>reps: ${card.reps}</span><span>lapses: ${card.lapses}</span><span>stab: ${Math.round(card.stability)}d</span>` : '<span>First time</span>'}${recidBadgeHtml(pid)}
       </div>
     `;
   return item;
@@ -24537,6 +24934,7 @@ function detectRepertoireDeviations() {
   }
 
   repertoireDeviations = allDevs.sort((a, b) => (b.gameCount || 0) - (a.gameCount || 0));
+  scheduleRecidivism(); // deviation set feeds the recidivism drilled-index
   repertoireGaps = Array.from(gapMap.values()).sort((a, b) => b.count - a.count);
 
   console.log(`[Repertoire] Found ${deviations.length} deviations, ${repertoireGaps.length} gaps in ${(performance.now() - detT0).toFixed(0)}ms (${statsGames} games via cached moveStats, ${replayGames} via chess.js replay)`);
