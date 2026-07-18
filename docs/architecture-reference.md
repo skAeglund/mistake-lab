@@ -430,11 +430,12 @@ Validation:
       • mandatory — divergence-from-solved is at an OPPONENT move, or a user move
         with no proven sibling yet.
       • optional — divergence at a USER move with a proven sibling AND the branch's
-        stored eval is strictly higher than the best proven sibling → surfaced as
+        stored eval is strictly higher than the best proven sibling by at least
+        TACTIC_ALT_MIN_GAIN_WP (1.5) win-chance % (cpToWinPct on both) → surfaced as
         "💡 Find a stronger move (+Ncp)" on the completion card
         (`loadOptionalTacticAlt`); does not gate the SRS grade.
-      • excluded — user-divergent with an equal/better/unmeasured proven sibling;
-        nothing left to prove there.
+      • excluded — user-divergent with an equal/better/unmeasured/marginal proven
+        sibling; nothing left to prove there.
   - `tryTacticLineSwitch` (called from evaluateTacticMove): a played move that
     doesn't match the active line but IS the expected first move of another
     unsolved sibling line is silently accepted, swapping the active line. No-op
@@ -599,6 +600,12 @@ silentContinuation = true for advantage + silent-game contexts; suppresses per-m
   feedback. SILENT_REVIEW_MIN_MOVES = 5 before "Stop & Review" appears (also the
   minimum for a Game Review history snapshot to be captured at all).
   silentEvalQueue processes deep (SILENT_EVAL_DEPTH=22) re-evals on both workers.
+  Terminal post-move positions (checkmate/stalemate/draw) short-circuit the
+  post-position slow path on all three eval sites (eval-worker queue, main-worker
+  fallback, live evaluateMove): SF emits no PVs for a terminal position (bestmove
+  (none)), so the old afterCp=0 fallback classified a MATING move as a ~50% wp
+  blunder. Mate delivered = afterCp +10000 user POV (cpLoss clamped ≥0 → 'best');
+  stalemate/draw = 0 (a real penalty when the pre-move eval was winning).
   After each silent eval classifies a user move, detectTacticCandidate runs to
   populate contLine._tacticCandidates (see DETECTED TACTICS). Queue-drain
   completion also triggers finalizeReviewSnapshotIfPending().
@@ -917,7 +924,9 @@ cut). Absent-from-DB covered moves still enumerate with a tiny floor.
 
 Generation — generateTodoVariations(studyId, color, opts) → { variations, gaps,
   reserve }:
-  opts: targetPly (10), maxVariations (10; UI clamps 1–50), maxGaps (10),
+  opts: targetPly (10; UI select 0–20 even steps, 0 = uncapped "full" — branches
+        run to the end of repertoire coverage, safety caps still apply),
+        maxVariations (10; UI clamps 1–50), maxGaps (10),
         maxExplorerCalls (2500), maxNodes (20000), onProgress(callCount),
         excludeLeafKeys (user-excluded leaf position keys — those leaves get
         capacity 0 in the enumerated tree, so the apportionment reassigns
